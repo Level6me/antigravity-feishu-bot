@@ -3,8 +3,24 @@ import json
 import subprocess
 import sys
 import os
+import uuid
 
 os.environ["PATH"] += os.pathsep + "/Users/YOUR_USERNAME/.npm-global/bin" + os.pathsep + "/Users/YOUR_USERNAME/.local/bin"
+
+SESSION_FILE = "chat_sessions.json"
+
+def load_sessions():
+    if os.path.exists(SESSION_FILE):
+        try:
+            with open(SESSION_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_sessions(sessions):
+    with open(SESSION_FILE, "w") as f:
+        json.dump(sessions, f, indent=2)
 
 async def set_emoji(message_id, emoji_type):
     process = await asyncio.create_subprocess_exec(
@@ -47,8 +63,80 @@ async def emoji_spinner(message_id, emojis):
         await delete_emoji(message_id, r_id)
         raise
 
-async def handle_message(message_id, user_text):
-    print(f"\n[User]: {user_text}", flush=True)
+async def handle_message(message_id, chat_id, message_type, content_raw):
+    # Parse content
+    print(f"DEBUG message_type={message_type} content_raw={content_raw}", flush=True)
+    try:
+        content_json = json.loads(content_raw)
+    except:
+        content_json = {}
+
+    user_text = ""
+    if message_type == "text":
+        user_text = content_json.get("text", "") if content_json.get("text") else content_raw
+        user_text = user_text.strip()
+    elif message_type == "image":
+        image_key = content_json.get("image_key", "")
+        if not image_key:
+            import re
+            match = re.search(r'img_[a-zA-Z0-9_\-]+', content_raw)
+            if match:
+                image_key = match.group(0)
+
+        if not image_key and content_raw.startswith("[Image: ") and content_raw.endswith("]"):
+            image_key = content_raw[8:-1]
+        
+        if image_key:
+            output_filename = f"img_{image_key}.jpg"
+            output_path = os.path.abspath(output_filename)
+            dl_proc = await asyncio.create_subprocess_exec(
+                "lark-cli", "im", "+messages-resources-download",
+                "--message-id", message_id,
+                "--file-key", image_key,
+                "--type", "image",
+                "--output", output_filename,
+                "--as", "bot",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await dl_proc.communicate()
+            user_text = f"请参考这张图片: {output_path}"
+        else:
+            user_text = "[未获取到图片]"
+    elif message_type == "post":
+        # Handle rich text post
+        user_text = " ".join([elem.get("text", "") for line in content_json.get("content", []) for elem in line if elem.get("tag") == "text"])
+    else:
+        user_text = f"[暂不支持的消息类型: {message_type}]"
+
+    if not user_text:
+        return
+
+    print(f"\n[User {chat_id}]: {user_text}", flush=True)
+
+    # State management
+    sessions = load_sessions()
+    if chat_id not in sessions:
+        sessions[chat_id] = {"conversation": uuid.uuid4().hex, "model": "Gemini 3.5 Flash"}
+    
+    session_data = sessions[chat_id]
+
+    # Slash commands
+    if user_text.startswith("/clear"):
+        sessions[chat_id]["conversation"] = uuid.uuid4().hex
+        save_sessions(sessions)
+        reply_text = "🔄 上下文已清空，开启新对话！"
+        await send_reply(message_id, reply_text)
+        return
+    elif user_text.startswith("/model "):
+        new_model = user_text.split(" ", 1)[1].strip()
+        sessions[chat_id]["model"] = new_model
+        save_sessions(sessions)
+        reply_text = f"⚙️ 模型已切换为: {new_model}"
+        await send_reply(message_id, reply_text)
+        return
+
+    save_sessions(sessions)
 
     # State 1: Received
     r_id = await set_emoji(message_id, "StatusReading")
@@ -56,13 +144,18 @@ async def handle_message(message_id, user_text):
     await delete_emoji(message_id, r_id)
 
     # State 2: Spinner (Thinking -> Typing -> Mac -> Coffee)
-    # The user wanted a status showing "Operating, executing commands or coding"
-    # We cycle through these emojis to show active work
     spinner_task = asyncio.create_task(emoji_spinner(message_id, ["THINKING", "Typing", "Mac", "Communicate"]))
 
     # Call antigravity CLI non-interactively
+    cmd_args = [
+        "/Users/YOUR_USERNAME/.local/bin/antigravity", 
+        "-p", user_text, 
+        "--dangerously-skip-permissions", 
+        "--model", session_data["model"],
+        "--conversation", session_data["conversation"]
+    ]
     process = await asyncio.create_subprocess_exec(
-        "/Users/YOUR_USERNAME/.local/bin/antigravity", "-p", user_text, "--dangerously-skip-permissions", "--model", "Gemini 3.5 Flash",
+        *cmd_args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         stdin=subprocess.DEVNULL
@@ -76,6 +169,9 @@ async def handle_message(message_id, user_text):
         pass
     
     reply_text = stdout.decode().strip()
+    import re
+    reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
+    
     is_error = False
     if not reply_text:
         reply_text = stderr.decode().strip() or "Sorry, I couldn't generate a response."
@@ -89,7 +185,9 @@ async def handle_message(message_id, user_text):
     else:
         await set_emoji(message_id, "DONE")
 
-    # Send reply back via lark-cli
+    await send_reply(message_id, reply_text)
+
+async def send_reply(message_id, reply_text):
     reply_proc = await asyncio.create_subprocess_exec(
         "lark-cli", "im", "+messages-reply", 
         "--message-id", message_id,
@@ -98,7 +196,9 @@ async def handle_message(message_id, user_text):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
-    await reply_proc.communicate()
+    stdout, stderr = await reply_proc.communicate()
+    if reply_proc.returncode != 0:
+        print(f"[Error send_reply] {stderr.decode()}", flush=True)
 
 async def process_lark_events():
     print("Starting Lark Event Consumer...", flush=True)
@@ -121,24 +221,29 @@ async def process_lark_events():
             continue
             
         try:
-            event = json.loads(line)
-            message_id = event.get("message_id")
-            content_raw = event.get("content", "{}")
+            event_payload = json.loads(line)
             
-            try:
-                content_json = json.loads(content_raw)
-                user_text = content_json.get("text", "")
-            except:
-                user_text = content_raw
+            # Handle both wrapped and unwrapped event structures
+            event_obj = event_payload.get("event", event_payload)
+            msg_obj = event_obj.get("message", event_obj)
+            
+            message_id = msg_obj.get("message_id")
+            chat_id = msg_obj.get("chat_id")
+            message_type = msg_obj.get("message_type", "text")
+            content_raw = msg_obj.get("content", "{}")
 
-            if not message_id or not user_text:
+            if not message_id or not chat_id:
                 continue
 
             # Run message handling fully asynchronously!
-            asyncio.create_task(handle_message(message_id, user_text))
+            asyncio.create_task(handle_message(message_id, chat_id, message_type, content_raw))
 
         except Exception as e:
             print(f"Error processing event: {e}", flush=True)
+
+    # If we broke out, check if process exited
+    stderr_output = await process.stderr.read()
+    print(f"Lark Event Consumer exited. Stderr: {stderr_output.decode()}", flush=True)
 
 if __name__ == "__main__":
     asyncio.run(process_lark_events())
