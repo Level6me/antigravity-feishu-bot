@@ -198,6 +198,40 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             )
             await dl_proc.communicate()
             user_text += f"\n[附加图片路径: {output_path}]"
+    elif message_type in ["file", "audio", "media"]:
+        file_key = content_json.get("file_key", "")
+        file_name = content_json.get("file_name", "")
+        
+        if file_key:
+            if not file_name:
+                if message_type == "audio":
+                    file_name = f"audio_{file_key}.ogg"
+                elif message_type == "media":
+                    file_name = f"video_{file_key}.mp4"
+                else:
+                    file_name = f"file_{file_key}"
+            
+            output_path = os.path.abspath(file_name)
+            dl_proc = await asyncio.create_subprocess_exec(
+                "lark-cli", "im", "+messages-resources-download",
+                "--message-id", message_id,
+                "--file-key", file_key,
+                "--type", "file",
+                "--output", file_name,
+                "--as", "bot",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await dl_proc.communicate()
+            
+            if message_type == "file":
+                user_text = f"请详细阅读这份文件（{file_name}），并做出响应。文件路径: {output_path}"
+            elif message_type == "audio":
+                user_text = f"请仔细听这段语音内容（语音文件路径: {output_path}），并做出响应。"
+            elif message_type == "media":
+                user_text = f"请仔细观看这段视频内容（视频文件路径: {output_path}），并做出响应。"
+        else:
+            user_text = f"[未获取到{message_type}的资源键]"
     else:
         user_text = f"[暂不支持的消息类型: {message_type}]"
 
