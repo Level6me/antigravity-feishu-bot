@@ -19,8 +19,19 @@ running_processes = {}
 api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
 
 def extract_and_upload_resources(text, message_id):
-    images = re.findall(r'!\[.*?\]\((/Users/YOUR_USERNAME/[^)]+)\)', text)
-    files = re.findall(r'(?<!!)\[.*?\]\((/Users/YOUR_USERNAME/[^)]+)\)', text)
+    images = re.findall(r'!\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', text)
+    files = re.findall(r'(?<!!)\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', text)
+    
+    # Also scan inside artifact .md files for images
+    for file_path in files:
+        if file_path.endswith(".md") and os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    md_content = f.read()
+                    imgs = re.findall(r'!\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', md_content)
+                    images.extend(imgs)
+            except:
+                pass
     
     for img_path in set(images):
         if os.path.exists(img_path):
