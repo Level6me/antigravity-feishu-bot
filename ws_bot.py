@@ -99,18 +99,7 @@ async def delete_emoji(message_id, reaction_id):
     )
     await process.communicate()
 
-async def emoji_spinner(message_id, emojis):
-    current_idx = 0
-    r_id = await set_emoji(message_id, emojis[current_idx])
-    try:
-        while True:
-            await asyncio.sleep(4)
-            await delete_emoji(message_id, r_id)
-            current_idx = (current_idx + 1) % len(emojis)
-            r_id = await set_emoji(message_id, emojis[current_idx])
-    except asyncio.CancelledError:
-        await delete_emoji(message_id, r_id)
-        raise
+# emoji_spinner removed
 
 async def send_reply(message_id, reply_text):
     reply_proc = await asyncio.create_subprocess_exec(
@@ -234,18 +223,9 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         sessions[chat_id]["role"] = new_role
         save_sessions(sessions)
         
-        role_prompt = f"[System Instruction: For the rest of this conversation, you must adopt the following persona/role: {new_role}. Please just say 'Role accepted: {new_role}']"
-        await asyncio.create_subprocess_exec(
-            "/Users/YOUR_USERNAME/.local/bin/antigravity", "-p", role_prompt, 
-            "--dangerously-skip-permissions", 
-            "--model", session_data["model"],
-            "--conversation", session_data["conversation"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL
-        )
-        
-        reply_text = f"🎭 角色设定成功！我将以「{new_role}」的身份与您对话。"
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-        return
+        # Override the user_text to let the normal flow handle it, ensuring conversation ID is captured!
+        user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
+        # Continue to standard flow instead of returning early
     elif user_text.startswith("/help"):
         reply_text = """💡 **Antigravity 机器人使用指南**
 
@@ -308,7 +288,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     await asyncio.sleep(1)
     await delete_emoji(message_id, r_id)
 
-    spinner_task = asyncio.create_task(emoji_spinner(message_id, ["THINKING", "Typing", "Mac", "Communicate"]))
+    # Spinner removed; rely on typing indicator stream
 
     # Inject protocol into prompt
     system_instruction = "[System Rule: If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. NEVER ask normal text multi-choice questions.]\n\n"
@@ -390,11 +370,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     await stdout_task
     await stderr_task
     
-    spinner_task.cancel()
-    try:
-        await spinner_task
-    except asyncio.CancelledError:
-        pass
+    # Spinner cancellation removed
     
     reply_text = accumulated_text.strip()
     reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
