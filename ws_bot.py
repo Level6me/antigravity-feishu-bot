@@ -13,6 +13,7 @@ APP_ID = "***REDACTED_APPID***"
 APP_SECRET = "***REDACTED***"
 
 SESSION_FILE = "chat_sessions.json"
+PROFILE_FILE = "user_profiles.json"
 main_loop = None
 running_processes = {}
 
@@ -120,6 +121,19 @@ def load_sessions():
 def save_sessions(sessions):
     with open(SESSION_FILE, "w") as f:
         json.dump(sessions, f, indent=2)
+
+def load_profiles():
+    if os.path.exists(PROFILE_FILE):
+        try:
+            with open(PROFILE_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_profiles(profiles):
+    with open(PROFILE_FILE, "w") as f:
+        json.dump(profiles, f, ensure_ascii=False, indent=2)
 
 async def set_emoji(message_id, emoji_type):
     process = await asyncio.create_subprocess_exec(
@@ -320,6 +334,37 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         reply_text = "🔄 上下文已清空，开启新对话！"
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return
+        
+    elif user_text.startswith("/remember "):
+        memory_text = user_text[len("/remember "):].strip()
+        profiles = load_profiles()
+        if chat_id not in profiles:
+            profiles[chat_id] = []
+        profiles[chat_id].append(memory_text)
+        save_profiles(profiles)
+        reply_text = f"🧠 已为您永久记录偏好：\n- {memory_text}"
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        return
+        
+    elif user_text.startswith("/memory"):
+        profiles = load_profiles()
+        memories = profiles.get(chat_id, [])
+        if not memories:
+            reply_text = "📭 当前没有记录您的任何长时偏好。您可以通过 `/remember <偏好>` 来添加。"
+        else:
+            reply_text = "🧠 **当前已永久记住您的以下偏好**：\n" + "\n".join([f"- {m}" for m in memories])
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        return
+        
+    elif user_text.startswith("/forget"):
+        profiles = load_profiles()
+        if chat_id in profiles:
+            del profiles[chat_id]
+            save_profiles(profiles)
+        reply_text = "🗑️ 您的所有长时记忆偏好已被彻底清空！"
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        return
+
     elif user_text.startswith("/role "):
         new_role = user_text.split(" ", 1)[1].strip()
         sessions[chat_id]["role"] = new_role
@@ -333,6 +378,9 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
 
 🔹 `/model` : 弹出交互式控制面板，自由切换大模型
 🔹 `/role <设定>` : 让机器人扮演特定角色 (例如: `/role 资深Python工程师`)
+🔹 `/remember <设定>` : 让机器人永久记住你的偏好 (例如: `/remember 我写代码只用 Python`)
+🔹 `/memory` : 查看机器人当前记住的所有偏好
+🔹 `/forget` : 清除机器人的长时记忆偏好
 🔹 `/clear` : 清空当前对话的上下文记忆，重新开始
 🔹 `/stop` : 紧急刹车！强制中止正在后台生成的耗时任务
 🔹 `/help` : 显示此帮助菜单
@@ -398,17 +446,26 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
 
     # Inject protocol into prompt
     system_instruction = "[System Rule: If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. NEVER ask normal text multi-choice questions.]\n\n"
-    final_prompt = system_instruction + user_text
-
+    
+    # Load long-term memory if this is a new conversation
+    final_prompt = user_text
+    is_new_conversation = not session_data.get("conversation")
+    if is_new_conversation:
+        profiles = load_profiles()
+        memories = profiles.get(chat_id, [])
+        if memories:
+            memory_block = "\n".join([f"- {m}" for m in memories])
+            final_prompt = f"[System Context: Please strictly follow the user's permanent preferences below:]\n{memory_block}\n\n[User's Message:]\n{user_text}"
+            
     log_file_path = f"agy_log_{uuid.uuid4().hex}.txt"
     cmd_args = [
         "/Users/YOUR_USERNAME/.local/bin/antigravity", 
-        "-p", final_prompt, 
+        "-p", system_instruction + final_prompt, 
         "--dangerously-skip-permissions", 
         "--model", session_data["model"],
         "--log-file", log_file_path
     ]
-    if session_data.get("conversation"):
+    if not is_new_conversation:
         cmd_args.extend(["--conversation", session_data["conversation"]])
     process = await asyncio.create_subprocess_exec(
         *cmd_args,
