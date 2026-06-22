@@ -333,21 +333,21 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 "options": options
             }
 
-    if not is_error and reply_text:
-        current_model = session_data.get('model', 'Default')
-        current_role = session_data.get('role', '无')
-        reply_text += f"\n\n---\n*🤖 模型: {current_model} | 🎭 角色: {current_role} | 💡 键入 /help 查看指令*"
-
+    elements = []
+    
     if reply_text:
         print(f"[Agent text]: {reply_text[:100]}...", flush=True)
-        await send_reply(message_id, reply_text)
-    
-    # Send choice card if detected
+        elements.append({
+            "tag": "markdown",
+            "content": reply_text
+        })
+        
     if choice_card_data and choice_card_data["options"]:
-        print(f"[Agent card]: {choice_card_data['question']}", flush=True)
+        if reply_text:
+            elements.append({"tag": "hr"})
+            
         actions = []
         markdown_options = []
-        
         is_long_options = any(len(opt) > 15 for opt in choice_card_data["options"])
         
         for i, opt in enumerate(choice_card_data["options"][:10]):
@@ -376,33 +376,46 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 "type": "default",
                 "value": {"action": "user_choice", "choice": opt, "label": btn_label}
             })
-            
             if is_long_options:
                 markdown_options.append(f"- **{btn_label}**: {rest_text}")
 
-        markdown_text = f"**{choice_card_data['question']}**"
+        question_text = f"**{choice_card_data['question']}**"
         if is_long_options:
-            markdown_text += "\n\n" + "\n".join(markdown_options)
+            question_text += "\n\n" + "\n".join(markdown_options)
             
-        choice_card_content = {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "template": "watchet",
-                "title": {"content": "🤔 请您做出选择", "tag": "plain_text"}
-            },
+        elements.append({
+            "tag": "markdown",
+            "content": question_text
+        })
+        elements.append({
+            "tag": "action",
+            "layout": "flow",
+            "actions": actions
+        })
+
+    if not is_error:
+        current_model = session_data.get('model', 'Default')
+        current_role = session_data.get('role', '无')
+        elements.append({
+            "tag": "note",
             "elements": [
                 {
-                    "tag": "markdown",
-                    "content": markdown_text
-                },
-                {
-                    "tag": "action",
-                    "layout": "flow",
-                    "actions": actions
+                    "tag": "plain_text",
+                    "content": f"🤖 模型: {current_model} | 🎭 角色: {current_role} | 💡 键入 /help 查看指令"
                 }
             ]
+        })
+
+    if elements:
+        card_content = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "blue" if not is_error else "red",
+                "title": {"content": "✨ AI 回复" if not is_error else "❌ 发生错误", "tag": "plain_text"}
+            },
+            "elements": elements
         }
-        await send_interactive_card(message_id, choice_card_content)
+        await send_interactive_card(message_id, card_content)
 
     if is_error:
         await set_emoji(message_id, "CrossMark")
