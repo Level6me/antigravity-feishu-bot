@@ -176,7 +176,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
 
     sessions = load_sessions()
     if chat_id not in sessions:
-        sessions[chat_id] = {"conversation": uuid.uuid4().hex, "model": "Gemini 3.5 Flash"}
+        sessions[chat_id] = {"conversation": "", "model": "Gemini 3.5 Flash"}
     
     session_data = sessions[chat_id]
 
@@ -271,13 +271,16 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     system_instruction = "[System Rule: If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. NEVER ask normal text multi-choice questions.]\n\n"
     final_prompt = system_instruction + user_text
 
+    log_file_path = f"agy_log_{uuid.uuid4().hex}.txt"
     cmd_args = [
         "/Users/YOUR_USERNAME/.local/bin/antigravity", 
         "-p", final_prompt, 
         "--dangerously-skip-permissions", 
         "--model", session_data["model"],
-        "--conversation", session_data["conversation"]
+        "--log-file", log_file_path
     ]
+    if session_data.get("conversation"):
+        cmd_args.extend(["--conversation", session_data["conversation"]])
     process = await asyncio.create_subprocess_exec(
         *cmd_args,
         stdout=asyncio.subprocess.PIPE,
@@ -294,6 +297,19 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     
     reply_text = stdout.decode().strip()
     reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
+    
+    # Parse log file for conversation ID
+    if os.path.exists(log_file_path):
+        with open(log_file_path, "r") as f:
+            log_content = f.read()
+        match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
+        if match:
+            new_conv_id = match.group(1)
+            if session_data.get("conversation") != new_conv_id:
+                sessions[chat_id]["conversation"] = new_conv_id
+                save_sessions(sessions)
+        os.remove(log_file_path)
+
     
     is_error = False
     if not reply_text:

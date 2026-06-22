@@ -184,9 +184,59 @@ async def handle_message(message_id, chat_id, message_type, content_raw):
 🔹 `/role <角色设定>` : 让机器人扮演特定角色 (例如: `/role 资深Python工程师`)
 🔹 `/clear` : 清空当前对话的上下文记忆，重新开始
 🔹 `/help` : 显示此帮助菜单
+🔹 `/card` : 发送可点击的交互式控制面板卡片
 
 *提示: 机器人会自动下载您发送的图片，您可以直接发图并提问！*"""
         await send_reply(message_id, reply_text)
+        return
+    elif user_text.startswith("/card") or user_text.startswith("/menu"):
+        card_content = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "blue",
+                "title": {"content": "🤖 机器人控制面板", "tag": "plain_text"}
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**当前正在使用的模型**: {session_data.get('model', 'Default')}\n请点击下方按钮快速切换（需配置 Webhook）："
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "Gemini 3.5 Flash"},
+                            "type": "primary",
+                            "value": {"action": "switch_model", "model": "Gemini 3.5 Flash"}
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "Claude 3.5 Sonnet"},
+                            "type": "default",
+                            "value": {"action": "switch_model", "model": "Claude 3.5 Sonnet"}
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "GPT-4o"},
+                            "type": "default",
+                            "value": {"action": "switch_model", "model": "GPT-4o"}
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        reply_proc = await asyncio.create_subprocess_exec(
+            "lark-cli", "im", "+messages-reply", 
+            "--message-id", message_id,
+            "--msg-type", "interactive",
+            "--content", json.dumps(card_content),
+            "--as", "bot",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await reply_proc.communicate()
         return
 
     save_sessions(sessions)
