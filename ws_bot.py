@@ -280,14 +280,18 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
         # Continue to standard flow instead of returning early
     elif user_text.startswith("/help"):
-        reply_text = """💡 **Antigravity 机器人使用指南**
+        reply_text = """💡 **Antigravity 机器人高级操作指南**
 
 🔹 `/model` : 弹出交互式控制面板，自由切换大模型
-🔹 `/role <角色设定>` : 让机器人扮演特定角色 (例如: `/role 资深Python工程师`)
+🔹 `/role <设定>` : 让机器人扮演特定角色 (例如: `/role 资深Python工程师`)
 🔹 `/clear` : 清空当前对话的上下文记忆，重新开始
+🔹 `/stop` : 紧急刹车！强制中止正在后台生成的耗时任务
 🔹 `/help` : 显示此帮助菜单
 
-*提示: 机器人会自动下载您发送的图片，您可以直接发图并提问！*"""
+*✨ 隐藏黑科技提示：*
+* **多模态解析**：直接向我发送文档 (PDF/Word)、语音、视频或图片，我能直接阅读、倾听并分析！*
+* **远程终端**：我可以读取你电脑上的文件，甚至直接执行如 `ls -al` 等终端命令！*
+* **全网搜索**：发给我任意网页链接，我可以帮你提取摘要！*"""
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return
     elif user_text.startswith("/model") or user_text.startswith("/card") or user_text.startswith("/menu"):
