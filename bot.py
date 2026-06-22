@@ -100,12 +100,37 @@ async def handle_message(message_id, chat_id, message_type, content_raw):
                 stderr=asyncio.subprocess.PIPE
             )
             await dl_proc.communicate()
-            user_text = f"请参考这张图片: {output_path}"
+            user_text = f"请查看这张图片并做出回应。图片路径: {output_path}"
         else:
             user_text = "[未获取到图片]"
     elif message_type == "post":
-        # Handle rich text post
-        user_text = " ".join([elem.get("text", "") for line in content_json.get("content", []) for elem in line if elem.get("tag") == "text"])
+        # Handle rich text post (extract both text and images)
+        texts = []
+        image_keys = []
+        for line in content_json.get("content", []):
+            for elem in line:
+                if elem.get("tag") == "text":
+                    texts.append(elem.get("text", ""))
+                elif elem.get("tag") == "img":
+                    image_keys.append(elem.get("image_key", ""))
+        
+        user_text = " ".join(texts)
+        if image_keys:
+            image_key = image_keys[0] # Grab first image for now
+            output_filename = f"img_{image_key}.jpg"
+            output_path = os.path.abspath(output_filename)
+            dl_proc = await asyncio.create_subprocess_exec(
+                "lark-cli", "im", "+messages-resources-download",
+                "--message-id", message_id,
+                "--file-key", image_key,
+                "--type", "image",
+                "--output", output_filename,
+                "--as", "bot",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await dl_proc.communicate()
+            user_text += f"\n[附加图片路径: {output_path}]"
     else:
         user_text = f"[暂不支持的消息类型: {message_type}]"
 
@@ -133,6 +158,34 @@ async def handle_message(message_id, chat_id, message_type, content_raw):
         sessions[chat_id]["model"] = new_model
         save_sessions(sessions)
         reply_text = f"⚙️ 模型已切换为: {new_model}"
+        await send_reply(message_id, reply_text)
+        return
+    elif user_text.startswith("/role "):
+        new_role = user_text.split(" ", 1)[1].strip()
+        sessions[chat_id]["role"] = new_role
+        save_sessions(sessions)
+        
+        role_prompt = f"[System Instruction: For the rest of this conversation, you must adopt the following persona/role: {new_role}. Please just say 'Role accepted: {new_role}']"
+        await asyncio.create_subprocess_exec(
+            "/Users/YOUR_USERNAME/.local/bin/antigravity", "-p", role_prompt, 
+            "--dangerously-skip-permissions", 
+            "--model", session_data["model"],
+            "--conversation", session_data["conversation"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL
+        )
+        
+        reply_text = f"🎭 角色设定成功！我将以「{new_role}」的身份与您对话。"
+        await send_reply(message_id, reply_text)
+        return
+    elif user_text.startswith("/help"):
+        reply_text = """💡 **Antigravity 机器人使用指南**
+
+🔹 `/model <模型名>` : 切换当前大模型 (例如: `/model Claude 3.5 Sonnet`)
+🔹 `/role <角色设定>` : 让机器人扮演特定角色 (例如: `/role 资深Python工程师`)
+🔹 `/clear` : 清空当前对话的上下文记忆，重新开始
+🔹 `/help` : 显示此帮助菜单
+
+*提示: 机器人会自动下载您发送的图片，您可以直接发图并提问！*"""
         await send_reply(message_id, reply_text)
         return
 
@@ -176,6 +229,12 @@ async def handle_message(message_id, chat_id, message_type, content_raw):
     if not reply_text:
         reply_text = stderr.decode().strip() or "Sorry, I couldn't generate a response."
         is_error = True
+
+    if not is_error:
+        # Add footer (小尾巴)
+        current_model = session_data.get('model', 'Default')
+        current_role = session_data.get('role', '无')
+        reply_text += f"\n\n---\n*🤖 模型: {current_model} | 🎭 角色: {current_role} | 💡 键入 /help 查看指令*"
 
     print(f"[Agent]: {reply_text[:100]}...", flush=True)
     
