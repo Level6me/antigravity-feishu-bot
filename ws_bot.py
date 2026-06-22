@@ -251,6 +251,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 },
                 {
                     "tag": "action",
+                    "layout": "flow",
                     "actions": actions
                 }
             ]
@@ -380,6 +381,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 },
                 {
                     "tag": "action",
+                    "layout": "flow",
                     "actions": actions
                 }
             ]
