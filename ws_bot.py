@@ -445,7 +445,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     # Spinner removed; rely on typing indicator stream
 
     # Inject protocol into prompt
-    system_instruction = "[System Rule: If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. NEVER ask normal text multi-choice questions.]\n\n"
+    system_instruction = "[System Rule: If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. NEVER ask normal text multi-choice questions. ONLY output plain text choices, avoid complex formatting inside choices.]\n\n"
     
     # Load long-term memory if this is a new conversation
     final_prompt = user_text
@@ -712,7 +712,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if main_loop and main_loop.is_running():
             async def notify_and_process():
                 # Notify the user visually in the chat
-                user_display_text = f"👉 您已选择：**{label}**\n*(详细内容: {choice})*"
+                user_display_text = f"✅ **您已选择：{label}**\n*(选项内容已发送给 AI 进行下一步处理...)*"
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, user_display_text))
                 
                 # Send the choice to the LLM backend
