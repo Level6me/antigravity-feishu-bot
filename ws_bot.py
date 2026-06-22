@@ -15,6 +15,49 @@ APP_SECRET = "***REDACTED***"
 SESSION_FILE = "chat_sessions.json"
 main_loop = None
 
+api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
+
+def send_reply_sdk(message_id, reply_text):
+    req = ReplyMessageRequest.builder() \
+        .message_id(message_id) \
+        .request_body(ReplyMessageRequestBody.builder() \
+            .msg_type("text") \
+            .content(json.dumps({"text": reply_text})) \
+            .build()) \
+        .build()
+    resp = api_client.im.v1.message.reply(req)
+    if resp.code != 0:
+        print(f"[Error send_reply_sdk] {resp.msg}", flush=True)
+
+def send_interactive_card_sdk(message_id, card_content):
+    req = ReplyMessageRequest.builder() \
+        .message_id(message_id) \
+        .request_body(ReplyMessageRequestBody.builder() \
+            .msg_type("interactive") \
+            .content(json.dumps(card_content)) \
+            .build()) \
+        .build()
+    resp = api_client.im.v1.message.reply(req)
+    if resp.code != 0:
+        print(f"[Error send_interactive_card_sdk] {resp.msg}", flush=True)
+        return None
+    try:
+        return json.loads(resp.raw.content).get("data", {}).get("message_id")
+    except:
+        return None
+
+def patch_interactive_card_sdk(message_id, card_content):
+    req = PatchMessageRequest.builder() \
+        .message_id(message_id) \
+        .request_body(PatchMessageRequestBody.builder() \
+            .content(json.dumps(card_content)) \
+            .build()) \
+        .build()
+    resp = api_client.im.v1.message.patch(req)
+    if resp.code != 0:
+        print(f"[Error patch_interactive_card_sdk] {resp.msg}", flush=True)
+
+
 def load_sessions():
     if os.path.exists(SESSION_FILE):
         try:
@@ -184,7 +227,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         sessions[chat_id]["conversation"] = uuid.uuid4().hex
         save_sessions(sessions)
         reply_text = "🔄 上下文已清空，开启新对话！"
-        await send_reply(message_id, reply_text)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return
     elif user_text.startswith("/role "):
         new_role = user_text.split(" ", 1)[1].strip()
@@ -201,7 +244,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         )
         
         reply_text = f"🎭 角色设定成功！我将以「{new_role}」的身份与您对话。"
-        await send_reply(message_id, reply_text)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return
     elif user_text.startswith("/help"):
         reply_text = """💡 **Antigravity 机器人使用指南**
@@ -212,7 +255,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
 🔹 `/help` : 显示此帮助菜单
 
 *提示: 机器人会自动下载您发送的图片，您可以直接发图并提问！*"""
-        await send_reply(message_id, reply_text)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return
     elif user_text.startswith("/model") or user_text.startswith("/card") or user_text.startswith("/menu"):
         fetch_proc = await asyncio.create_subprocess_exec(
@@ -256,7 +299,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 }
             ]
         }
-        await send_interactive_card(message_id, card_content)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
         return
 
     save_sessions(sessions)
@@ -287,7 +330,65 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         stderr=asyncio.subprocess.PIPE,
         stdin=subprocess.DEVNULL
     )
-    stdout, stderr = await process.communicate()
+    
+    init_card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"content": "✨ AI 思考中...", "tag": "plain_text"}
+        },
+        "elements": [{"tag": "markdown", "content": "正在为您生成回复..."}]
+    }
+    loop = asyncio.get_running_loop()
+    bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, init_card))
+    
+    accumulated_text = ""
+    stderr_text = ""
+    
+    async def read_stdout():
+        nonlocal accumulated_text
+        while True:
+            chunk = await process.stdout.read(64)
+            if not chunk:
+                break
+            accumulated_text += chunk.decode(errors='ignore')
+            
+    async def read_stderr():
+        nonlocal stderr_text
+        while True:
+            chunk = await process.stderr.read(64)
+            if not chunk:
+                break
+            stderr_text += chunk.decode(errors='ignore')
+
+    stdout_task = asyncio.create_task(read_stdout())
+    stderr_task = asyncio.create_task(read_stderr())
+    
+    last_update_text = ""
+    
+    while process.returncode is None:
+        await asyncio.sleep(0.5)
+        if accumulated_text != last_update_text:
+            last_update_text = accumulated_text
+            clean_text = re.sub(r'\[CHOICE_CARD\].*', '', accumulated_text, flags=re.DOTALL)
+            clean_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', clean_text)
+            if clean_text.strip():
+                patch_card = {
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "template": "blue",
+                        "title": {"content": "✨ AI 输出中...", "tag": "plain_text"}
+                    },
+                    "elements": [{"tag": "markdown", "content": clean_text + " ✍️"}]
+                }
+                if bot_reply_msg_id:
+                    await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, patch_card))
+        if stdout_task.done() and stderr_task.done():
+            break
+
+    await process.wait()
+    await stdout_task
+    await stderr_task
     
     spinner_task.cancel()
     try:
@@ -295,7 +396,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     except asyncio.CancelledError:
         pass
     
-    reply_text = stdout.decode().strip()
+    reply_text = accumulated_text.strip()
     reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
     
     # Parse log file for conversation ID
@@ -313,7 +414,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     
     is_error = False
     if not reply_text:
-        reply_text = stderr.decode().strip() or "Sorry, I couldn't generate a response."
+        reply_text = stderr_text.strip() or "Sorry, I couldn't generate a response."
         is_error = True
 
     # Parse for [CHOICE_CARD]
@@ -415,7 +516,10 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             },
             "elements": elements
         }
-        await send_interactive_card(message_id, card_content)
+        if bot_reply_msg_id:
+            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, card_content))
+        else:
+            await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
 
     if is_error:
         await set_emoji(message_id, "CrossMark")
@@ -462,7 +566,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             async def notify_and_process():
                 # Notify the user visually in the chat
                 user_display_text = f"👉 您已选择：**{label}**\n*(详细内容: {choice})*"
-                await send_reply(card_message_id, user_display_text)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, user_display_text))
                 
                 # Send the choice to the LLM backend
                 simulated_content = json.dumps({"text": f"我的选择是：{choice}"})
