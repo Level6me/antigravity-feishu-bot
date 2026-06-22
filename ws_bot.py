@@ -18,6 +18,44 @@ running_processes = {}
 
 api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
 
+def extract_and_upload_resources(text, message_id):
+    images = re.findall(r'!\[.*?\]\((/Users/YOUR_USERNAME/[^)]+)\)', text)
+    files = re.findall(r'(?<!!)\[.*?\]\((/Users/YOUR_USERNAME/[^)]+)\)', text)
+    
+    for img_path in set(images):
+        if os.path.exists(img_path):
+            try:
+                req = lark.api.im.v1.CreateImageRequest.builder().request_body(
+                    lark.api.im.v1.CreateImageRequestBody.builder().image_type("message").image(open(img_path, "rb")).build()
+                ).build()
+                resp = api_client.im.v1.image.create(req)
+                if resp.code == 0:
+                    img_key = json.loads(resp.raw.content).get('data', {}).get('image_key')
+                    if img_key:
+                        msg_req = lark.api.im.v1.ReplyMessageRequest.builder().message_id(message_id).request_body(
+                            lark.api.im.v1.ReplyMessageRequestBody.builder().msg_type("image").content(json.dumps({"image_key": img_key})).build()
+                        ).build()
+                        api_client.im.v1.message.reply(msg_req)
+            except Exception as e:
+                pass
+
+    for file_path in set(files):
+        if os.path.exists(file_path):
+            try:
+                req = lark.api.im.v1.CreateFileRequest.builder().request_body(
+                    lark.api.im.v1.CreateFileRequestBody.builder().file_type("stream").file_name(os.path.basename(file_path)).file(open(file_path, "rb")).build()
+                ).build()
+                resp = api_client.im.v1.file.create(req)
+                if resp.code == 0:
+                    file_key = json.loads(resp.raw.content).get('data', {}).get('file_key')
+                    if file_key:
+                        msg_req = lark.api.im.v1.ReplyMessageRequest.builder().message_id(message_id).request_body(
+                            lark.api.im.v1.ReplyMessageRequestBody.builder().msg_type("file").content(json.dumps({"file_key": file_key})).build()
+                        ).build()
+                        api_client.im.v1.message.reply(msg_req)
+            except Exception as e:
+                pass
+
 def send_reply_sdk(message_id, reply_text):
     req = ReplyMessageRequest.builder() \
         .message_id(message_id) \
@@ -436,6 +474,9 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     reply_text = accumulated_text.strip()
     reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
     reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
+    
+    # Auto-upload extracted files and images
+    await asyncio.get_running_loop().run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id))
     
     # Parse log file for conversation ID
     if os.path.exists(log_file_path):
