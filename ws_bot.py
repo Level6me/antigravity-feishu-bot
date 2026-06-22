@@ -3,6 +3,7 @@ import json
 import subprocess
 import os
 import uuid
+import re
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -12,6 +13,7 @@ APP_ID = "***REDACTED_APPID***"
 APP_SECRET = "***REDACTED***"
 
 SESSION_FILE = "chat_sessions.json"
+main_loop = None
 
 def load_sessions():
     if os.path.exists(SESSION_FILE):
@@ -80,7 +82,27 @@ async def send_reply(message_id, reply_text):
     if reply_proc.returncode != 0:
         print(f"[Error send_reply] {stderr.decode()}", flush=True)
 
+async def send_interactive_card(message_id, card_content):
+    reply_proc = await asyncio.create_subprocess_exec(
+        "lark-cli", "im", "+messages-reply", 
+        "--message-id", message_id,
+        "--msg-type", "interactive",
+        "--content", json.dumps(card_content),
+        "--as", "bot",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    await reply_proc.communicate()
+
 async def handle_message_async(message_id, chat_id, message_type, content_raw):
+    try:
+        await _handle_message_async_internal(message_id, chat_id, message_type, content_raw)
+    except Exception as e:
+        import traceback
+        print(f"[FATAL ERROR in handle_message_async]: {e}")
+        traceback.print_exc()
+
+async def _handle_message_async_internal(message_id, chat_id, message_type, content_raw):
     try:
         content_json = json.loads(content_raw)
     except:
@@ -93,7 +115,6 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
     elif message_type == "image":
         image_key = content_json.get("image_key", "")
         if not image_key:
-            import re
             match = re.search(r'img_[a-zA-Z0-9_\-]+', content_raw)
             if match:
                 image_key = match.group(0)
@@ -194,7 +215,6 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
         await send_reply(message_id, reply_text)
         return
     elif user_text.startswith("/model") or user_text.startswith("/card") or user_text.startswith("/menu"):
-        # Fetch available models dynamically
         fetch_proc = await asyncio.create_subprocess_exec(
             "/Users/YOUR_USERNAME/.local/bin/antigravity", "models",
             stdout=asyncio.subprocess.PIPE,
@@ -204,15 +224,12 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
         stdout, _ = await fetch_proc.communicate()
         models_output = stdout.decode().strip()
         
-        # Parse models (assuming one model per line)
         available_models = [line.strip() for line in models_output.split('\n') if line.strip()]
-        
-        # Fallback if command fails
         if not available_models:
             available_models = ["Gemini 3.5 Flash (Medium)", "Claude Sonnet 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
             
         actions = []
-        for i, model_name in enumerate(available_models[:10]): # Limit to 10 buttons to prevent payload overflow
+        for i, model_name in enumerate(available_models[:10]):
             button_type = "primary" if i == 0 else "default"
             actions.append({
                 "tag": "button",
@@ -238,17 +255,7 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
                 }
             ]
         }
-        
-        reply_proc = await asyncio.create_subprocess_exec(
-            "lark-cli", "im", "+messages-reply", 
-            "--message-id", message_id,
-            "--msg-type", "interactive",
-            "--content", json.dumps(card_content),
-            "--as", "bot",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        await reply_proc.communicate()
+        await send_interactive_card(message_id, card_content)
         return
 
     save_sessions(sessions)
@@ -259,9 +266,13 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
 
     spinner_task = asyncio.create_task(emoji_spinner(message_id, ["THINKING", "Typing", "Mac", "Communicate"]))
 
+    # Inject protocol into prompt
+    system_instruction = "[System Rule: If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. NEVER ask normal text multi-choice questions.]\n\n"
+    final_prompt = system_instruction + user_text
+
     cmd_args = [
         "/Users/YOUR_USERNAME/.local/bin/antigravity", 
-        "-p", user_text, 
+        "-p", final_prompt, 
         "--dangerously-skip-permissions", 
         "--model", session_data["model"],
         "--conversation", session_data["conversation"]
@@ -281,7 +292,6 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
         pass
     
     reply_text = stdout.decode().strip()
-    import re
     reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
     
     is_error = False
@@ -289,22 +299,97 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
         reply_text = stderr.decode().strip() or "Sorry, I couldn't generate a response."
         is_error = True
 
+    # Parse for [CHOICE_CARD]
+    choice_card_data = None
     if not is_error:
+        choice_pattern = re.compile(r'\[CHOICE_CARD\]\s*Q:\s*(.*?)\n(.*?)\s*\[/CHOICE_CARD\]', re.DOTALL | re.IGNORECASE)
+        match = choice_pattern.search(reply_text)
+        if match:
+            question = match.group(1).strip()
+            options_text = match.group(2).strip()
+            options = [opt.strip()[1:].strip() if opt.strip().startswith('-') else opt.strip() for opt in options_text.split('\n') if opt.strip()]
+            
+            # Remove the block from the text reply
+            reply_text = choice_pattern.sub('', reply_text).strip()
+            choice_card_data = {
+                "question": question,
+                "options": options
+            }
+
+    if not is_error and reply_text:
         current_model = session_data.get('model', 'Default')
         current_role = session_data.get('role', '无')
         reply_text += f"\n\n---\n*🤖 模型: {current_model} | 🎭 角色: {current_role} | 💡 键入 /help 查看指令*"
 
-    print(f"[Agent]: {reply_text[:100]}...", flush=True)
+    if reply_text:
+        print(f"[Agent text]: {reply_text[:100]}...", flush=True)
+        await send_reply(message_id, reply_text)
     
+    # Send choice card if detected
+    if choice_card_data and choice_card_data["options"]:
+        print(f"[Agent card]: {choice_card_data['question']}", flush=True)
+        actions = []
+        markdown_options = []
+        
+        is_long_options = any(len(opt) > 15 for opt in choice_card_data["options"])
+        
+        for i, opt in enumerate(choice_card_data["options"][:10]):
+            prefix_match = re.match(r'^([a-zA-Z0-9\u4e00-\u9fa5]+)[:：.、]\s*(.*)$', opt)
+            
+            if prefix_match:
+                prefix = prefix_match.group(1).strip()
+                rest_text = prefix_match.group(2).strip()
+                
+                if len(prefix) == 1 and prefix.encode('utf-8').isalpha():
+                    btn_label = f"选项 {prefix}"
+                elif len(prefix) <= 4:
+                    btn_label = prefix
+                else:
+                    btn_label = f"选项 {i+1}"
+            else:
+                btn_label = f"选项 {i+1}"
+                rest_text = opt
+            
+            if not is_long_options:
+                btn_label = opt[:50]
+                
+            actions.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": btn_label},
+                "type": "default",
+                "value": {"action": "user_choice", "choice": opt, "label": btn_label}
+            })
+            
+            if is_long_options:
+                markdown_options.append(f"- **{btn_label}**: {rest_text}")
+
+        markdown_text = f"**{choice_card_data['question']}**"
+        if is_long_options:
+            markdown_text += "\n\n" + "\n".join(markdown_options)
+            
+        choice_card_content = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "watchet",
+                "title": {"content": "🤔 请您做出选择", "tag": "plain_text"}
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": markdown_text
+                },
+                {
+                    "tag": "action",
+                    "actions": actions
+                }
+            ]
+        }
+        await send_interactive_card(message_id, choice_card_content)
+
     if is_error:
         await set_emoji(message_id, "CrossMark")
     else:
         await set_emoji(message_id, "DONE")
-
-    await send_reply(message_id, reply_text)
-
-
-main_loop = None
 
 def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     message_id = data.event.message.message_id
@@ -312,18 +397,17 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     message_type = data.event.message.message_type
     content_raw = data.event.message.content
     
-    # Offload to asyncio event loop
     if main_loop and main_loop.is_running():
         asyncio.run_coroutine_threadsafe(handle_message_async(message_id, chat_id, message_type, content_raw), main_loop)
     else:
         print("Error: main_loop is not running!")
-
 
 def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
     print(f"Card action received: {data.event.action.value}")
     
     action_value = data.event.action.value
     chat_id = data.event.context.open_chat_id
+    card_message_id = data.event.context.open_message_id
     
     if action_value.get("action") == "switch_model":
         new_model = action_value.get("model")
@@ -336,24 +420,39 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         save_sessions(sessions)
 
         print(f"Switched model to {new_model} in chat {chat_id}")
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"模型已成功切换为 {new_model}！"}})
 
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"模型已成功切换为 {new_model}！"}})
+    elif action_value.get("action") == "user_choice":
+        choice = action_value.get("choice")
+        label = action_value.get("label", choice)
+        print(f"User selected choice: {choice}")
+        
+        if main_loop and main_loop.is_running():
+            async def notify_and_process():
+                # Notify the user visually in the chat
+                user_display_text = f"👉 您已选择：**{label}**\n*(详细内容: {choice})*"
+                await send_reply(card_message_id, user_display_text)
+                
+                # Send the choice to the LLM backend
+                simulated_content = json.dumps({"text": f"我的选择是：{choice}"})
+                await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
+
+            asyncio.run_coroutine_threadsafe(notify_and_process(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"已确认：{label[:15]}"}})
     
     return P2CardActionTriggerResponse()
-
 
 async def main():
     global main_loop
     main_loop = asyncio.get_running_loop()
     print("Starting Lark WS Client...", flush=True)
     
-    # Initialize dispatcher
     event_handler = lark.EventDispatcherHandler.builder("", "") \
         .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1) \
         .register_p2_card_action_trigger(do_p2_card_action_trigger) \
         .build()
 
-    # Start WebSocket client
     cli = lark.ws.Client(
         APP_ID, 
         APP_SECRET,
@@ -361,7 +460,6 @@ async def main():
         log_level=lark.LogLevel.DEBUG
     )
     
-    # Start cli in a separate thread so it doesn't block the async event loop
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, cli.start)
 
