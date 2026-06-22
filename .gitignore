@@ -1,0 +1,35 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# State and logs
+chat_sessions.json
+user_profiles.json
+agy_log_*.txt
+*.log
+
+# Test and scratch files
+test_*.py
+add_*.py
+do_patch*.py
+fix_*.py
+dummy.txt
+hello.py
+
+# Media generated/downloaded
+*.mov
+*.mp4
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ogg
+
+# Local agent customizations (unless intended for repository sharing)
+.agents/

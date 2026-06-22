@@ -9,64 +9,16 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger, P2CardActionTriggerResponse
 
-APP_ID = "***REDACTED_APPID***"
-APP_SECRET = "***REDACTED***"
+from config import APP_ID, APP_SECRET, SESSION_FILE, PROFILE_FILE
+from memory import load_sessions, save_sessions, load_profiles, save_profiles
+from multimodal import extract_and_upload_resources
 
-SESSION_FILE = "chat_sessions.json"
-PROFILE_FILE = "user_profiles.json"
 main_loop = None
 running_processes = {}
 
 api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
 
-def extract_and_upload_resources(text, message_id):
-    images = re.findall(r'!\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', text)
-    files = re.findall(r'(?<!!)\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', text)
-    
-    # Also scan inside artifact .md files for images
-    for file_path in files:
-        if file_path.endswith(".md") and os.path.exists(file_path):
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    md_content = f.read()
-                    imgs = re.findall(r'!\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', md_content)
-                    images.extend(imgs)
-            except:
-                pass
-    
-    for img_path in set(images):
-        if os.path.exists(img_path):
-            try:
-                req = lark.api.im.v1.CreateImageRequest.builder().request_body(
-                    lark.api.im.v1.CreateImageRequestBody.builder().image_type("message").image(open(img_path, "rb")).build()
-                ).build()
-                resp = api_client.im.v1.image.create(req)
-                if resp.code == 0:
-                    img_key = json.loads(resp.raw.content).get('data', {}).get('image_key')
-                    if img_key:
-                        msg_req = lark.api.im.v1.ReplyMessageRequest.builder().message_id(message_id).request_body(
-                            lark.api.im.v1.ReplyMessageRequestBody.builder().msg_type("image").content(json.dumps({"image_key": img_key})).build()
-                        ).build()
-                        api_client.im.v1.message.reply(msg_req)
-            except Exception as e:
-                pass
 
-    for file_path in set(files):
-        if os.path.exists(file_path):
-            try:
-                req = lark.api.im.v1.CreateFileRequest.builder().request_body(
-                    lark.api.im.v1.CreateFileRequestBody.builder().file_type("stream").file_name(os.path.basename(file_path)).file(open(file_path, "rb")).build()
-                ).build()
-                resp = api_client.im.v1.file.create(req)
-                if resp.code == 0:
-                    file_key = json.loads(resp.raw.content).get('data', {}).get('file_key')
-                    if file_key:
-                        msg_req = lark.api.im.v1.ReplyMessageRequest.builder().message_id(message_id).request_body(
-                            lark.api.im.v1.ReplyMessageRequestBody.builder().msg_type("file").content(json.dumps({"file_key": file_key})).build()
-                        ).build()
-                        api_client.im.v1.message.reply(msg_req)
-            except Exception as e:
-                pass
 
 def send_reply_sdk(message_id, reply_text):
     req = ReplyMessageRequest.builder() \
@@ -109,31 +61,7 @@ def patch_interactive_card_sdk(message_id, card_content):
         print(f"[Error patch_interactive_card_sdk] {resp.msg}", flush=True)
 
 
-def load_sessions():
-    if os.path.exists(SESSION_FILE):
-        try:
-            with open(SESSION_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
 
-def save_sessions(sessions):
-    with open(SESSION_FILE, "w") as f:
-        json.dump(sessions, f, indent=2)
-
-def load_profiles():
-    if os.path.exists(PROFILE_FILE):
-        try:
-            with open(PROFILE_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_profiles(profiles):
-    with open(PROFILE_FILE, "w") as f:
-        json.dump(profiles, f, ensure_ascii=False, indent=2)
 
 async def set_emoji(message_id, emoji_type):
     process = await asyncio.create_subprocess_exec(
@@ -544,7 +472,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
     
     # Auto-upload extracted files and images
-    await asyncio.get_running_loop().run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id))
+    await asyncio.get_running_loop().run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client))
     
     # Parse log file for conversation ID
     if os.path.exists(log_file_path):
