@@ -211,6 +211,12 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 else:
                     file_name = f"file_{file_key}"
             
+            # Force .mp4 for media to fix Gemini API unsupported mime type
+            if message_type == "media" and not file_name.lower().endswith(".mp4"):
+                file_name = file_key + ".mp4"
+            if message_type == "audio" and "." not in file_name:
+                file_name = file_key + ".ogg"
+            
             output_path = os.path.abspath(file_name)
             dl_proc = await asyncio.create_subprocess_exec(
                 "lark-cli", "im", "+messages-resources-download",
@@ -385,6 +391,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         if accumulated_text != last_update_text:
             last_update_text = accumulated_text
             clean_text = re.sub(r'\[CHOICE_CARD\].*', '', accumulated_text, flags=re.DOTALL)
+            clean_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', clean_text, flags=re.DOTALL)
             clean_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', clean_text)
             if clean_text.strip():
                 patch_card = {
@@ -408,6 +415,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     
     reply_text = accumulated_text.strip()
     reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
+    reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
     
     # Parse log file for conversation ID
     if os.path.exists(log_file_path):
