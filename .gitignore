@@ -33,3 +33,4 @@ hello.py
 
 # Local agent customizations (unless intended for repository sharing)
 .agents/
+.env
