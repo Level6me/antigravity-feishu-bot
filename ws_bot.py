@@ -14,6 +14,7 @@ APP_SECRET = "***REDACTED***"
 
 SESSION_FILE = "chat_sessions.json"
 main_loop = None
+running_processes = {}
 
 api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
 
@@ -252,7 +253,19 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     
     session_data = sessions[chat_id]
 
-    if user_text.startswith("/clear"):
+    if user_text.startswith("/stop"):
+        if chat_id in running_processes:
+            try:
+                running_processes[chat_id].kill()
+            except:
+                pass
+            reply_text = "🛑 当前任务已被紧急叫停！"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        else:
+            reply_text = "ℹ️ 当前没有正在运行的任务。"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        return
+    elif user_text.startswith("/clear"):
         sessions[chat_id]["conversation"] = uuid.uuid4().hex
         save_sessions(sessions)
         reply_text = "🔄 上下文已清空，开启新对话！"
@@ -350,6 +363,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         stderr=asyncio.subprocess.PIPE,
         stdin=subprocess.DEVNULL
     )
+    running_processes[chat_id] = process
     
     init_card = {
         "config": {"wide_screen_mode": True},
@@ -408,6 +422,8 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             break
 
     await process.wait()
+    if chat_id in running_processes:
+        del running_processes[chat_id]
     await stdout_task
     await stderr_task
     
