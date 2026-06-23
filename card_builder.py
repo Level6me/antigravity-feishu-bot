@@ -65,6 +65,23 @@ class CardBuilder:
         }
 
     @staticmethod
+    def build_download_indicator(file_name, media_type="文件"):
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "wathet",
+                "title": {"content": "📥 资源加载中...", "tag": "plain_text"}
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"正在为您下载并解析多媒体资源：**{file_name}**\n\n大文件（如视频、PDF）可能需要数秒至一分钟，请稍候..."
+                },
+                CardBuilder._create_footer()
+            ]
+        }
+
+    @staticmethod
     def build_ai_response(reply_text, choice_card_data=None, current_model="Default", current_role="无", is_error=False, is_streaming=False):
         elements = []
         

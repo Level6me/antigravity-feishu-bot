@@ -92,10 +92,14 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
         traceback.print_exc()
 
 async def _handle_message_async_internal(message_id, chat_id, message_type, content_raw):
+    loop = asyncio.get_running_loop()
+    bot_reply_msg_id = None
+
     try:
         content_json = json.loads(content_raw)
-    except:
-        content_json = {}
+    except Exception as e:
+        log.error(f"Failed to parse content_raw JSON: {e}")
+        return
 
     user_text = ""
     if message_type == "text":
@@ -142,6 +146,10 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         if image_keys:
             image_key = image_keys[0]
             output_filename = f"img_{image_key}.jpg"
+            
+            dl_card = CardBuilder.build_download_indicator("图片内容")
+            bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
+            
             output_path = os.path.abspath(output_filename)
             dl_proc = await asyncio.create_subprocess_exec(
                 "lark-cli", "im", "+messages-resources-download",
@@ -174,6 +182,9 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             if message_type == "audio" and "." not in file_name:
                 file_name = file_key + ".ogg"
             
+            dl_card = CardBuilder.build_download_indicator(file_name, message_type)
+            bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
+
             output_path = os.path.abspath(file_name)
             dl_proc = await asyncio.create_subprocess_exec(
                 "lark-cli", "im", "+messages-resources-download",
@@ -253,8 +264,10 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     running_processes[chat_id] = process
     
     init_card = CardBuilder.build_typing_indicator()
-    loop = asyncio.get_running_loop()
-    bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, init_card))
+    if bot_reply_msg_id:
+        await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card))
+    else:
+        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, init_card))
     
     accumulated_text = ""
     stderr_text = ""
