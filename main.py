@@ -349,6 +349,11 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                             if lines:
                                 for line in reversed(lines):
                                     data = json.loads(line)
+                                    
+                                    # Stop scanning if we hit the boundary of the current turn
+                                    if data.get("type") == "USER_INPUT":
+                                        break
+                                        
                                     if "tool_calls" in data and len(data["tool_calls"]) > 0:
                                         action = data["tool_calls"][-1].get("args", {}).get("toolAction", "")
                                         action = action.replace('"', '').strip()
