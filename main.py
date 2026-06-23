@@ -250,7 +250,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     )
     running_processes[chat_id] = process
     
-    init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success)
+    init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text)
     if bot_reply_msg_id:
         await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card))
     else:

@@ -48,19 +48,37 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_typing_indicator(downloaded_file_name=None, download_success=True):
-        content = "正在为您生成回复，请稍候..."
+    def _guess_intent(text):
+        if not text:
+            return "✨ AI 思考中...", "正在为您生成回复，请稍候..."
+        
+        text = text.lower()
+        if any(kw in text for kw in ["代码", "脚本", "编程", "重构", "xcode", "编译", "bug", "报错", "前端", "后端", "python", "swift"]):
+            return "💻 代码工程模式", "AI 正在理解代码逻辑并为您进行开发与调试，请稍候..."
+        elif any(kw in text for kw in ["搜", "查一下", "找一下", "检索", "全网"]):
+            return "🔍 数据检索模式", "AI 正在跨域检索并为您归纳相关信息，请稍候..."
+        elif any(kw in text for kw in ["翻译", "英文", "中文"]):
+            return "🌐 翻译模式", "AI 正在为您进行精准翻译，请稍候..."
+        elif any(kw in text for kw in ["总结", "归纳", "提炼", "重点"]):
+            return "📝 总结提炼模式", "AI 正在帮您提炼核心要点，请稍候..."
+        else:
+            return "✨ AI 思考中...", "正在为您深度分析与生成回复，请稍候..."
+
+    @staticmethod
+    def build_typing_indicator(downloaded_file_name=None, download_success=True, user_text=""):
+        title, content = CardBuilder._guess_intent(user_text)
+        
         if downloaded_file_name:
             if download_success:
-                content = f"✅ 已成功获取资源：**{downloaded_file_name}**\n\n正在为您深度分析与生成回复，请稍候..."
+                content = f"✅ 已成功获取资源：**{downloaded_file_name}**\n\n{content}"
             else:
-                content = f"❌ 获取资源失败：**{downloaded_file_name}**\n\n正在为您生成回复，请稍候..."
+                content = f"❌ 获取资源失败：**{downloaded_file_name}**\n\n{content}"
 
         return {
             "config": {"wide_screen_mode": True},
             "header": {
                 "template": "blue",
-                "title": {"content": "✨ AI 思考中...", "tag": "plain_text"}
+                "title": {"content": title, "tag": "plain_text"}
             },
             "elements": [
                 {
