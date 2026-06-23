@@ -101,13 +101,37 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         log.error(f"Failed to parse content_raw JSON: {e}")
         return
 
+    # Quick parsing for slash commands
+    raw_text = ""
+    if message_type == "text":
+        raw_text = content_json.get("text", "") if content_json.get("text") else content_raw
+        raw_text = raw_text.strip()
+
+    # Load sessions early for slash commands
+    sessions = load_sessions()
+    if chat_id not in sessions:
+        sessions[chat_id] = {"conversation": "", "model": "Gemini 3.5 Flash"}
+    session_data = sessions[chat_id]
+
+    # Handle slash commands first (this allows /stop to bypass the lock)
+    if message_type == "text" and raw_text.startswith("/"):
+        handled, _ = await handle_slash_command(raw_text, message_id, chat_id, sessions, running_processes)
+        if handled:
+            return
+
+    # CONCURRENT PROTECTION LOCK
+    if chat_id in running_processes and running_processes[chat_id].returncode is None:
+        log.warning(f"Rejecting concurrent request from {chat_id}")
+        warning_msg = "⚠️ 当前有任务正在深度思考或执行中，请等待任务完成，或发送 `/stop` 强行终止当前任务。"
+        await loop.run_in_executor(None, lambda: send_reply_sdk(message_id, warning_msg))
+        return
+
     user_text = ""
     downloaded_file_name = None
     download_success = True
 
     if message_type == "text":
-        user_text = content_json.get("text", "") if content_json.get("text") else content_raw
-        user_text = user_text.strip()
+        user_text = raw_text
     elif message_type == "image":
         image_key = content_json.get("image_key", "")
         if not image_key:
@@ -198,16 +222,8 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     if not user_text:
         return
 
-    sessions = load_sessions()
-    if chat_id not in sessions:
-        sessions[chat_id] = {"conversation": "", "model": "Gemini 3.5 Flash"}
+    # Sessions are already loaded and slash commands already handled at the top
     
-    session_data = sessions[chat_id]
-
-    handled, user_text = await handle_slash_command(user_text, message_id, chat_id, sessions, running_processes)
-    if handled:
-        return
-
     log.info(f"[User {chat_id}]: {user_text}")
 
     save_sessions(sessions)
