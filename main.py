@@ -198,17 +198,18 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     if not user_text:
         return
 
+    sessions = load_sessions()
+    if chat_id not in sessions:
+        sessions[chat_id] = {"conversation": "", "model": "Gemini 3.5 Flash"}
+    
+    session_data = sessions[chat_id]
+
     handled, user_text = await handle_slash_command(user_text, message_id, chat_id, sessions, running_processes)
     if handled:
         return
 
     print(f"\n[User {chat_id}]: {user_text}", flush=True)
 
-    sessions = load_sessions()
-    if chat_id not in sessions:
-        sessions[chat_id] = {"conversation": "", "model": "Gemini 3.5 Flash"}
-    
-    session_data = sessions[chat_id]
     save_sessions(sessions)
 
     r_id = await set_emoji(message_id, "StatusReading")
