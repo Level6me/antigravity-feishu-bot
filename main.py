@@ -275,10 +275,35 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 break
             stderr_text += chunk.decode(errors='ignore')
 
+    def get_latest_transcript_file():
+        # Try from session first
+        if session_data.get("conversation"):
+            conv_id = session_data["conversation"]
+            path = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
+            if os.path.exists(path):
+                return path
+        
+        # Fallback to the newest folder
+        base_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain/")
+        if not os.path.exists(base_dir):
+            return None
+        try:
+            dirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+            if not dirs:
+                return None
+            newest_dir = max(dirs, key=os.path.getmtime)
+            path = os.path.join(newest_dir, ".system_generated/logs/transcript.jsonl")
+            if os.path.exists(path):
+                return path
+        except Exception:
+            pass
+        return None
+
     stdout_task = asyncio.create_task(read_stdout())
     stderr_task = asyncio.create_task(read_stderr())
     
     last_update_text = ""
+    last_tool_action = ""
     last_patch_time = time.time()
     
     while process.returncode is None:
@@ -299,6 +324,29 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                     )
                     if bot_reply_msg_id:
                         await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, patch_card))
+        else:
+            # Check for tool execution updates
+            if not accumulated_text.strip() and time.time() - last_patch_time >= 1.0:
+                transcript_path = await loop.run_in_executor(None, get_latest_transcript_file)
+                if transcript_path:
+                    try:
+                        with open(transcript_path, 'r', encoding='utf-8') as f:
+                            lines = f.readlines()
+                            if lines:
+                                last_line = lines[-1]
+                                data = json.loads(last_line)
+                                if "tool_calls" in data and len(data["tool_calls"]) > 0:
+                                    action = data["tool_calls"][-1].get("args", {}).get("toolAction", "")
+                                    action = action.replace('"', '').strip()
+                                    if action and action != last_tool_action:
+                                        last_tool_action = action
+                                        last_patch_time = time.time()
+                                        indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success)
+                                        if bot_reply_msg_id:
+                                            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
+                    except Exception:
+                        pass
+                        
         if stdout_task.done() and stderr_task.done():
             break
 

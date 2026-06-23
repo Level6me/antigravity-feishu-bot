@@ -90,6 +90,34 @@ class CardBuilder:
         }
 
     @staticmethod
+    def build_tool_indicator(tool_action, user_text="", downloaded_file_name=None, download_success=True):
+        title, content = CardBuilder._guess_intent(user_text)
+        
+        # Override the text with the actual tool action
+        content = f"**当前动作：** `{tool_action}`\n\n*(AI 正在运行底层命令或操作文件，请稍候...)*"
+        
+        if downloaded_file_name:
+            if download_success:
+                content = f"✅ 已成功获取资源：**{downloaded_file_name}**\n\n{content}"
+            else:
+                content = f"❌ 获取资源失败：**{downloaded_file_name}**\n\n{content}"
+
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "turquoise",
+                "title": {"content": "🛠️ " + tool_action, "tag": "plain_text"}
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": content
+                },
+                CardBuilder._create_footer()
+            ]
+        }
+
+    @staticmethod
     def build_download_indicator(file_name, media_type="文件"):
         return {
             "config": {"wide_screen_mode": True},
