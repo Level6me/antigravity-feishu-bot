@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+from logger import log
 
 DB_FILE = "antigravity_bot.db"
 
@@ -42,7 +43,7 @@ def migrate_from_json():
                 cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
             os.rename("chat_sessions.json", "chat_sessions.json.bak")
         except Exception as e:
-            print(f"Error migrating sessions: {e}")
+            log.error(f"Error migrating sessions: {e}")
             
     # Migrate profiles
     if os.path.exists("user_profiles.json"):
@@ -52,8 +53,9 @@ def migrate_from_json():
             for user_id, data in profiles.items():
                 cursor.execute('INSERT OR REPLACE INTO user_profiles (user_id, data) VALUES (?, ?)', (user_id, json.dumps(data)))
             os.rename("user_profiles.json", "user_profiles.json.bak")
+            log.info("Migrated user_profiles.json to SQLite")
         except Exception as e:
-            print(f"Error migrating profiles: {e}")
+            log.error(f"Error migrating profiles: {e}")
             
     conn.commit()
     conn.close()

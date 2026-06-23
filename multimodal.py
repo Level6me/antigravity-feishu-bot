@@ -2,6 +2,7 @@ import re
 import os
 import json
 import lark_oapi as lark
+from logger import log
 
 def extract_and_upload_resources(text, message_id, api_client):
     images = re.findall(r'!\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', text)
@@ -15,8 +16,8 @@ def extract_and_upload_resources(text, message_id, api_client):
                     md_content = f.read()
                     imgs = re.findall(r'!\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', md_content)
                     images.extend(imgs)
-            except:
-                pass
+            except Exception as e:
+                log.error(f"[Multimodal] Error scanning md file: {e}")
     
     for img_path in set(images):
         if os.path.exists(img_path):
@@ -28,12 +29,15 @@ def extract_and_upload_resources(text, message_id, api_client):
                 if resp.code == 0:
                     img_key = json.loads(resp.raw.content).get('data', {}).get('image_key')
                     if img_key:
+                        log.info(f"[Multimodal] Image uploaded successfully, image_key: {img_key}")
                         msg_req = lark.api.im.v1.ReplyMessageRequest.builder().message_id(message_id).request_body(
                             lark.api.im.v1.ReplyMessageRequestBody.builder().msg_type("image").content(json.dumps({"image_key": img_key})).build()
                         ).build()
                         api_client.im.v1.message.reply(msg_req)
+                else:
+                    log.error(f"[Multimodal] Failed to upload image: {resp.msg}")
             except Exception as e:
-                pass
+                log.error(f"[Multimodal] Error uploading image: {e}")
 
     for file_path in set(files):
         if os.path.exists(file_path):

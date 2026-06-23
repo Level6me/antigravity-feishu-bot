@@ -16,6 +16,9 @@ from database import load_sessions, save_sessions, load_profiles, save_profiles
 from multimodal import extract_and_upload_resources
 from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, patch_interactive_card_sdk
 from commands import handle_slash_command
+from logger import log
+from card_builder import CardBuilder
+import time
 
 main_loop = None
 running_processes = {}
@@ -85,7 +88,7 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
         await _handle_message_async_internal(message_id, chat_id, message_type, content_raw)
     except Exception as e:
         import traceback
-        print(f"[FATAL ERROR in handle_message_async]: {e}")
+        log.error(f"[FATAL ERROR in handle_message_async]: {e}")
         traceback.print_exc()
 
 async def _handle_message_async_internal(message_id, chat_id, message_type, content_raw):
@@ -208,7 +211,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     if handled:
         return
 
-    print(f"\n[User {chat_id}]: {user_text}", flush=True)
+    log.info(f"[User {chat_id}]: {user_text}")
 
     save_sessions(sessions)
 
@@ -249,14 +252,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     )
     running_processes[chat_id] = process
     
-    init_card = {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "template": "blue",
-            "title": {"content": "✨ AI 思考中...", "tag": "plain_text"}
-        },
-        "elements": [{"tag": "markdown", "content": "正在为您生成回复..."}]
-    }
+    init_card = CardBuilder.build_typing_indicator()
     loop = asyncio.get_running_loop()
     bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, init_card))
     
@@ -283,25 +279,26 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     stderr_task = asyncio.create_task(read_stderr())
     
     last_update_text = ""
+    last_patch_time = time.time()
     
     while process.returncode is None:
         await asyncio.sleep(0.5)
         if accumulated_text != last_update_text:
-            last_update_text = accumulated_text
-            clean_text = re.sub(r'\[CHOICE_CARD\].*', '', accumulated_text, flags=re.DOTALL)
-            clean_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', clean_text, flags=re.DOTALL)
-            clean_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', clean_text)
-            if clean_text.strip():
-                patch_card = {
-                    "config": {"wide_screen_mode": True},
-                    "header": {
-                        "template": "blue",
-                        "title": {"content": "✨ AI 输出中...", "tag": "plain_text"}
-                    },
-                    "elements": [{"tag": "markdown", "content": clean_text + " ✍️"}]
-                }
-                if bot_reply_msg_id:
-                    await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, patch_card))
+            if time.time() - last_patch_time >= 1.0:
+                last_update_text = accumulated_text
+                last_patch_time = time.time()
+                clean_text = re.sub(r'\[CHOICE_CARD\].*', '', accumulated_text, flags=re.DOTALL)
+                clean_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', clean_text, flags=re.DOTALL)
+                clean_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', clean_text)
+                if clean_text.strip():
+                    patch_card = CardBuilder.build_ai_response(
+                        clean_text.strip(),
+                        current_model=session_data.get('model', 'Default'),
+                        current_role=session_data.get('role', '无'),
+                        is_streaming=True
+                    )
+                    if bot_reply_msg_id:
+                        await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, patch_card))
         if stdout_task.done() and stderr_task.done():
             break
 
@@ -355,92 +352,22 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 "options": options
             }
 
-    elements = []
-    
     if reply_text:
-        print(f"[Agent text]: {reply_text[:100]}...", flush=True)
-        elements.append({
-            "tag": "markdown",
-            "content": reply_text
-        })
-        
-    if choice_card_data and choice_card_data["options"]:
-        if reply_text:
-            elements.append({"tag": "hr"})
-            
-        actions = []
-        markdown_options = []
-        is_long_options = any(len(opt) > 15 for opt in choice_card_data["options"])
-        
-        for i, opt in enumerate(choice_card_data["options"][:10]):
-            prefix_match = re.match(r'^([a-zA-Z0-9\u4e00-\u9fa5]+)[:：.、]\s*(.*)$', opt)
-            
-            if prefix_match:
-                prefix = prefix_match.group(1).strip()
-                rest_text = prefix_match.group(2).strip()
-                
-                if len(prefix) == 1 and prefix.encode('utf-8').isalpha():
-                    btn_label = f"选项 {prefix}"
-                elif len(prefix) <= 4:
-                    btn_label = prefix
-                else:
-                    btn_label = f"选项 {i+1}"
-            else:
-                btn_label = f"选项 {i+1}"
-                rest_text = opt
-            
-            if not is_long_options:
-                btn_label = opt[:50]
-                
-            actions.append({
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": btn_label},
-                "type": "default",
-                "value": {"action": "user_choice", "choice": opt, "label": btn_label}
-            })
-            if is_long_options:
-                markdown_options.append(f"- **{btn_label}**: {rest_text}")
+        log.info(f"[Agent text]: {reply_text[:100]}...")
 
-        question_text = f"**{choice_card_data['question']}**"
-        if is_long_options:
-            question_text += "\n\n" + "\n".join(markdown_options)
-            
-        elements.append({
-            "tag": "markdown",
-            "content": question_text
-        })
-        elements.append({
-            "tag": "action",
-            "layout": "flow",
-            "actions": actions
-        })
-
-    if not is_error:
-        current_model = session_data.get('model', 'Default')
-        current_role = session_data.get('role', '无')
-        elements.append({
-            "tag": "note",
-            "elements": [
-                {
-                    "tag": "plain_text",
-                    "content": f"🤖 模型: {current_model} | 🎭 角色: {current_role} | 💡 键入 /help 查看指令"
-                }
-            ]
-        })
-
-    if elements:
-        card_content = {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "template": "blue" if not is_error else "red",
-                "title": {"content": "✨ AI 回复" if not is_error else "❌ 发生错误", "tag": "plain_text"}
-            },
-            "elements": elements
-        }
-        if bot_reply_msg_id:
-            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, card_content))
-        else:
-            await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
+    final_card = CardBuilder.build_ai_response(
+        reply_text, 
+        choice_card_data=choice_card_data,
+        current_model=session_data.get('model', 'Default'),
+        current_role=session_data.get('role', '无'),
+        is_error=is_error,
+        is_streaming=False
+    )
+    
+    if bot_reply_msg_id:
+        await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card))
+    else:
+        await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, final_card))
 
     if is_error:
         await set_emoji(message_id, "CrossMark")
@@ -456,10 +383,10 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     if main_loop and main_loop.is_running():
         asyncio.run_coroutine_threadsafe(handle_message_async(message_id, chat_id, message_type, content_raw), main_loop)
     else:
-        print("Error: main_loop is not running!")
+        log.error("main_loop is not running!")
 
 def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
-    print(f"Card action received: {data.event.action.value}")
+    log.info(f"Card action received: {data.event.action.value}")
     
     action_value = data.event.action.value
     chat_id = data.event.context.open_chat_id
@@ -475,13 +402,13 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             sessions[chat_id]["model"] = new_model
         save_sessions(sessions)
 
-        print(f"Switched model to {new_model} in chat {chat_id}")
+        log.info(f"Switched model to {new_model} in chat {chat_id}")
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"模型已成功切换为 {new_model}！"}})
 
     elif action_value.get("action") == "user_choice":
         choice = action_value.get("choice")
         label = action_value.get("label", choice)
-        print(f"User selected choice: {choice}")
+        log.info(f"User selected choice: {choice}")
         
         if main_loop and main_loop.is_running():
             async def notify_and_process():
@@ -502,7 +429,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 async def main():
     global main_loop
     main_loop = asyncio.get_running_loop()
-    print("Starting Lark WS Client...", flush=True)
+    log.info("Starting Lark WS Client...")
     
     event_handler = lark.EventDispatcherHandler.builder("", "") \
         .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1) \
@@ -520,7 +447,7 @@ async def main():
     await loop.run_in_executor(None, cli.start)
 
 def cleanup(signum, frame):
-    print("Gracefully shutting down... killing zombie processes", flush=True)
+    log.warning("Gracefully shutting down... killing zombie processes")
     for process in running_processes.values():
         try:
             process.kill()

@@ -3,6 +3,8 @@ import subprocess
 import uuid
 from database import load_profiles, save_profiles, save_sessions
 from lark_client import send_reply_sdk, send_interactive_card_sdk
+from logger import log
+from card_builder import CardBuilder
 
 async def handle_slash_command(user_text, message_id, chat_id, sessions, running_processes):
     """
@@ -101,34 +103,7 @@ async def handle_slash_command(user_text, message_id, chat_id, sessions, running
         if not available_models:
             available_models = ["Gemini 3.5 Flash (Medium)", "Claude Sonnet 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
             
-        actions = []
-        for i, model_name in enumerate(available_models[:10]):
-            button_type = "primary" if i == 0 else "default"
-            actions.append({
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": model_name},
-                "type": button_type,
-                "value": {"action": "switch_model", "model": model_name}
-            })
-
-        card_content = {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "template": "blue",
-                "title": {"content": "🤖 机器人控制面板", "tag": "plain_text"}
-            },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": f"**当前正在使用的模型**: {session_data.get('model', 'Default')}\n**可用模型列表**（点击下方按钮快速切换）："
-                },
-                {
-                    "tag": "action",
-                    "layout": "flow",
-                    "actions": actions
-                }
-            ]
-        }
+        card_content = CardBuilder.build_model_panel(available_models, session_data.get('model', 'Default'))
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
         return True, user_text
         

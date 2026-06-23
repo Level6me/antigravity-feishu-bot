@@ -2,6 +2,7 @@ import json
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody, PatchMessageRequest, PatchMessageRequestBody
 from config import APP_ID, APP_SECRET
+from logger import log
 
 api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
 
@@ -15,7 +16,7 @@ def send_reply_sdk(message_id, reply_text):
         .build()
     resp = api_client.im.v1.message.reply(req)
     if resp.code != 0:
-        print(f"[Error send_reply_sdk] {resp.msg}", flush=True)
+        log.error(f"[send_reply_sdk] Failed: {resp.msg}")
 
 def send_interactive_card_sdk(message_id, card_content):
     req = ReplyMessageRequest.builder() \
@@ -27,7 +28,7 @@ def send_interactive_card_sdk(message_id, card_content):
         .build()
     resp = api_client.im.v1.message.reply(req)
     if resp.code != 0:
-        print(f"[Error send_interactive_card_sdk] {resp.msg}", flush=True)
+        log.error(f"[send_interactive_card_sdk] Failed: {resp.msg}")
         return None
     try:
         return json.loads(resp.raw.content).get("data", {}).get("message_id")
@@ -43,4 +44,4 @@ def patch_interactive_card_sdk(message_id, card_content):
         .build()
     resp = api_client.im.v1.message.patch(req)
     if resp.code != 0:
-        print(f"[Error patch_interactive_card_sdk] {resp.msg}", flush=True)
+        log.error(f"[patch_interactive_card_sdk] Failed: {resp.msg}")
