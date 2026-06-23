@@ -14,7 +14,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTr
 from config import APP_ID, APP_SECRET, SESSION_FILE, PROFILE_FILE
 from database import load_sessions, save_sessions, load_profiles, save_profiles
 from multimodal import extract_and_upload_resources
-from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, patch_interactive_card_sdk
+from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, patch_interactive_card_sdk, download_message_resource_sdk
 from commands import handle_slash_command
 from logger import log
 from card_builder import CardBuilder
@@ -125,19 +125,10 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
             
             output_path = os.path.abspath(output_filename)
-            dl_proc = await asyncio.create_subprocess_exec(
-                "lark-cli", "im", "+messages-resources-download",
-                "--message-id", message_id,
-                "--file-key", image_key,
-                "--type", "image",
-                "--output", output_filename,
-                "--as", "bot",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await dl_proc.communicate()
+            success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
+            
             downloaded_file_name = output_filename
-            download_success = (dl_proc.returncode == 0)
+            download_success = success
             user_text = f"请查看这张图片并做出回应。图片路径: {output_path}"
         else:
             user_text = "[未获取到图片]"
@@ -160,19 +151,10 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
             
             output_path = os.path.abspath(output_filename)
-            dl_proc = await asyncio.create_subprocess_exec(
-                "lark-cli", "im", "+messages-resources-download",
-                "--message-id", message_id,
-                "--file-key", image_key,
-                "--type", "image",
-                "--output", output_filename,
-                "--as", "bot",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await dl_proc.communicate()
+            success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
+            
             downloaded_file_name = output_filename
-            download_success = (dl_proc.returncode == 0)
+            download_success = success
             user_text += f"\n[附加图片路径: {output_path}]"
     elif message_type in ["file", "audio", "media"]:
         file_key = content_json.get("file_key", "")
@@ -197,19 +179,10 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
 
             output_path = os.path.abspath(file_name)
-            dl_proc = await asyncio.create_subprocess_exec(
-                "lark-cli", "im", "+messages-resources-download",
-                "--message-id", message_id,
-                "--file-key", file_key,
-                "--type", "file",
-                "--output", file_name,
-                "--as", "bot",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await dl_proc.communicate()
+            success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, file_key, "file", output_path))
+            
             downloaded_file_name = file_name
-            download_success = (dl_proc.returncode == 0)
+            download_success = success
             
             if message_type == "file":
                 user_text = f"请详细阅读这份文件（{file_name}），并做出响应。文件路径: {output_path}"

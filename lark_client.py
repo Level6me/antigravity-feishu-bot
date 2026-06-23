@@ -1,6 +1,6 @@
 import json
 import lark_oapi as lark
-from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody, PatchMessageRequest, PatchMessageRequestBody
+from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody, PatchMessageRequest, PatchMessageRequestBody, GetMessageResourceRequest
 from config import APP_ID, APP_SECRET
 from logger import log
 
@@ -45,3 +45,27 @@ def patch_interactive_card_sdk(message_id, card_content):
     resp = api_client.im.v1.message.patch(req)
     if resp.code != 0:
         log.error(f"[patch_interactive_card_sdk] Failed: {resp.msg}")
+
+def download_message_resource_sdk(message_id, file_key, resource_type, output_path):
+    """
+    Downloads a message resource (image, file, audio, media) using the official SDK.
+    """
+    req = GetMessageResourceRequest.builder() \
+        .message_id(message_id) \
+        .file_key(file_key) \
+        .type(resource_type) \
+        .build()
+    
+    resp = api_client.im.v1.message_resource.get(req)
+    
+    if resp.code == 0:
+        try:
+            with open(output_path, "wb") as f:
+                f.write(resp.file.read())
+            return True
+        except Exception as e:
+            log.error(f"[download_message_resource_sdk] Error saving file: {e}")
+            return False
+    else:
+        log.error(f"[download_message_resource_sdk] Failed: {resp.msg}")
+        return False
