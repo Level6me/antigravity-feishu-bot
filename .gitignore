@@ -39,3 +39,6 @@ hello.py
 *.db
 *.bak
 GiteeClient/
+*.err
+*.out
+*.txt
