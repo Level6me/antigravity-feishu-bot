@@ -54,13 +54,8 @@
    ```bash
    npm install -g pm2
    ```
-3. **安装 Lark CLI (飞书命令行工具)**
-   `lark-cli` 用于处理多模态文件的下载和极个别系统交互。
-   * 下载并安装: `npm install -g @larksuiteoapi/lark-cli`
-   * （或者按飞书官方教程下载二进制版）
-   * **重要**：安装后在终端运行 `lark-cli auth login` 完成飞书开发者授权登录。
-4. **安装 Antigravity CLI**
-   这是底层驱动大模型的引擎。你需要确保在终端中可以直接执行 `antigravity` 命令。
+3. **安装 Antigravity CLI**
+   这是底层驱动大模型的核心引擎。你需要确保在终端中可以直接执行 `antigravity` 命令。
 
 ### 第二步：配置 Python 虚拟环境与依赖
 为了不污染全局环境，建议在项目目录内使用虚拟环境 (venv)。
@@ -133,6 +128,7 @@ pm2 save
 - **[UX]** 优化了选项卡片（交互按钮）的体验，增加按钮消抖和操作确认反馈提示 `✅ 您已选择...`。
 
 ### v2.1 - 视觉交互与工业级监控升维 (2026.06)
+- **[Refactor]** 彻底剥离了沉重的 Node.js `lark-cli` 依赖，重写为纯 Python 原生 `GetMessageResourceRequest` 底层分发，实现了真正的**零外部依赖纯血部署**，并显著降低了多模态文件下载时的内存占用与进程开销。
 - **[Feature]** 引入全新的多模态长时任务反馈机制：在上传巨型文件/视频时，新增“资源下载中...”过渡预告卡片，并在完成后无缝切换为状态结果，彻底消除等待焦虑。
 - **[Feature]** 完全弃用 `print`，引入独立的 `logger.py` 工业级日志追踪模块，支持按级别带色彩的高亮输出与日志文件 `feishu_bot.log` 满额自动切割（Log Rotation）。
 - **[UX/Refactor]** 将混乱的 JSON 卡片构建代码全部抽离为 `CardBuilder` 静态工厂类，统一飞书卡片UI风格，增加状态卡片的精致页脚与时间戳。
