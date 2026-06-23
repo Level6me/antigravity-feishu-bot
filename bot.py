@@ -5,9 +5,10 @@ import sys
 import os
 import uuid
 
-os.environ["PATH"] += os.pathsep + "/Users/YOUR_USERNAME/.npm-global/bin" + os.pathsep + "/Users/YOUR_USERNAME/.local/bin"
+home = os.path.expanduser("~")
+os.environ["PATH"] += os.pathsep + os.path.join(home, ".npm-global/bin") + os.pathsep + os.path.join(home, ".local/bin")
 
-SESSION_FILE = "chat_sessions.json"
+from config import ANTIGRAVITY_BIN, SESSION_FILE
 
 def load_sessions():
     if os.path.exists(SESSION_FILE):
@@ -167,7 +168,7 @@ async def handle_message(message_id, chat_id, message_type, content_raw):
         
         role_prompt = f"[System Instruction: For the rest of this conversation, you must adopt the following persona/role: {new_role}. Please just say 'Role accepted: {new_role}']"
         await asyncio.create_subprocess_exec(
-            "/Users/YOUR_USERNAME/.local/bin/antigravity", "-p", role_prompt, 
+            ANTIGRAVITY_BIN, "-p", role_prompt, 
             "--dangerously-skip-permissions", 
             "--model", session_data["model"],
             "--conversation", session_data["conversation"],
@@ -251,7 +252,7 @@ async def handle_message(message_id, chat_id, message_type, content_raw):
 
     # Call antigravity CLI non-interactively
     cmd_args = [
-        "/Users/YOUR_USERNAME/.local/bin/antigravity", 
+        ANTIGRAVITY_BIN, 
         "-p", user_text, 
         "--dangerously-skip-permissions", 
         "--model", session_data["model"],

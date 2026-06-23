@@ -5,6 +5,7 @@ from database import load_profiles, save_profiles, save_sessions
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
 from card_builder import CardBuilder
+from config import ANTIGRAVITY_BIN
 
 async def handle_slash_command(user_text, message_id, chat_id, sessions, running_processes):
     """
@@ -91,7 +92,7 @@ async def handle_slash_command(user_text, message_id, chat_id, sessions, running
         
     elif user_text.startswith("/model") or user_text.startswith("/card") or user_text.startswith("/menu"):
         fetch_proc = await asyncio.create_subprocess_exec(
-            "/Users/YOUR_USERNAME/.local/bin/antigravity", "models",
+            ANTIGRAVITY_BIN, "models",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=subprocess.DEVNULL

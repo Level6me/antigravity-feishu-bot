@@ -5,8 +5,10 @@ import lark_oapi as lark
 from logger import log
 
 def extract_and_upload_resources(text, message_id, api_client):
-    images = re.findall(r'!\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', text)
-    files = re.findall(r'(?<!!)\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', text)
+    home_dir = os.path.expanduser("~")
+    home_dir_esc = re.escape(home_dir)
+    images = re.findall(r'!\[.*?\]\((?:file://)?(' + home_dir_esc + r'/[^)]+)\)', text)
+    files = re.findall(r'(?<!!)\[.*?\]\((?:file://)?(' + home_dir_esc + r'/[^)]+)\)', text)
     
     IGNORED_EXTENSIONS = {
         '.py', '.swift', '.js', '.ts', '.html', '.css', '.json', '.md', 
@@ -20,7 +22,7 @@ def extract_and_upload_resources(text, message_id, api_client):
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     md_content = f.read()
-                    imgs = re.findall(r'!\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', md_content)
+                    imgs = re.findall(r'!\[.*?\]\((?:file://)?(' + home_dir_esc + r'/[^)]+)\)', md_content)
                     images.extend(imgs)
             except Exception as e:
                 log.error(f"[Multimodal] Error scanning md file: {e}")

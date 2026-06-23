@@ -1,10 +1,47 @@
 import json
 import lark_oapi as lark
-from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody, PatchMessageRequest, PatchMessageRequestBody, GetMessageResourceRequest
+from lark_oapi.api.im.v1 import (
+    ReplyMessageRequest, ReplyMessageRequestBody, PatchMessageRequest,
+    PatchMessageRequestBody, GetMessageResourceRequest, CreateMessageReactionRequest,
+    CreateMessageReactionRequestBody, Emoji, DeleteMessageReactionRequest
+)
 from config import APP_ID, APP_SECRET
 from logger import log
 
 api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
+
+def set_emoji_sdk(message_id, emoji_type):
+    try:
+        req = CreateMessageReactionRequest.builder() \
+            .message_id(message_id) \
+            .request_body(CreateMessageReactionRequestBody.builder() \
+                .reaction_type(Emoji.builder().emoji_type(emoji_type).build()) \
+                .build()) \
+            .build()
+        resp = api_client.im.v1.message.reaction.create(req)
+        if resp.code == 0:
+            return json.loads(resp.raw.content).get("data", {}).get("reaction_id")
+        else:
+            log.error(f"[set_emoji_sdk] Failed: {resp.msg}")
+            return None
+    except Exception as e:
+        log.error(f"[set_emoji_sdk] Error: {e}")
+        return None
+
+def delete_emoji_sdk(message_id, reaction_id):
+    if not reaction_id:
+        return
+    try:
+        req = DeleteMessageReactionRequest.builder() \
+            .message_id(message_id) \
+            .reaction_id(reaction_id) \
+            .build()
+        resp = api_client.im.v1.message.reaction.delete(req)
+        if resp.code != 0:
+            log.error(f"[delete_emoji_sdk] Failed: {resp.msg}")
+    except Exception as e:
+        log.error(f"[delete_emoji_sdk] Error: {e}")
+
 
 def send_reply_sdk(message_id, reply_text):
     req = ReplyMessageRequest.builder() \

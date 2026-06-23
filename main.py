@@ -11,10 +11,10 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger, P2CardActionTriggerResponse
 
-from config import APP_ID, APP_SECRET, SESSION_FILE, PROFILE_FILE
+from config import APP_ID, APP_SECRET, SESSION_FILE, PROFILE_FILE, ANTIGRAVITY_BIN
 from database import load_sessions, save_sessions, load_profiles, save_profiles
 from multimodal import extract_and_upload_resources
-from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, patch_interactive_card_sdk, download_message_resource_sdk
+from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, patch_interactive_card_sdk, download_message_resource_sdk, set_emoji_sdk, delete_emoji_sdk
 from commands import handle_slash_command
 from logger import log
 from card_builder import CardBuilder
@@ -29,32 +29,30 @@ running_processes = {}
 
 
 async def set_emoji(message_id, emoji_type):
-    process = await asyncio.create_subprocess_exec(
-        "lark-cli", "im", "reactions", "create", 
-        "--message-id", message_id,
-        "--data", f'{{"reaction_type":{{"emoji_type":"{emoji_type}"}}}}',
-        "--as", "bot",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    stdout, _ = await process.communicate()
+    # Map custom / obsolete emojis to standard Lark emoji names
+    mapping = {
+        "StatusReading": "Typing",
+        "CrossMark": "CrossMark",
+        "DONE": "DONE"
+    }
+    mapped_type = mapping.get(emoji_type, emoji_type)
+    
+    loop = asyncio.get_running_loop()
     try:
-        data = json.loads(stdout.decode())
-        return data.get("data", {}).get("reaction_id")
-    except:
+        reaction_id = await loop.run_in_executor(None, lambda: set_emoji_sdk(message_id, mapped_type))
+        return reaction_id
+    except Exception as e:
+        log.error(f"Failed to set emoji reaction {emoji_type}: {e}")
         return None
 
 async def delete_emoji(message_id, reaction_id):
-    if not reaction_id: return
-    process = await asyncio.create_subprocess_exec(
-        "lark-cli", "im", "reactions", "delete", 
-        "--message-id", message_id,
-        "--reaction-id", reaction_id,
-        "--as", "bot",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    await process.communicate()
+    if not reaction_id:
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, lambda: delete_emoji_sdk(message_id, reaction_id))
+    except Exception as e:
+        log.error(f"Failed to delete emoji reaction: {e}")
 
 # emoji_spinner removed
 
@@ -249,7 +247,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             
     log_file_path = f"agy_log_{uuid.uuid4().hex}.txt"
     cmd_args = [
-        "/Users/YOUR_USERNAME/.local/bin/antigravity", 
+        ANTIGRAVITY_BIN, 
         "-p", system_instruction + final_prompt, 
         "--dangerously-skip-permissions", 
         "--model", session_data["model"],
