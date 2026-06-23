@@ -48,7 +48,14 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_typing_indicator():
+    def build_typing_indicator(downloaded_file_name=None, download_success=True):
+        content = "正在为您生成回复，请稍候..."
+        if downloaded_file_name:
+            if download_success:
+                content = f"✅ 已成功获取资源：**{downloaded_file_name}**\n\n正在为您深度分析与生成回复，请稍候..."
+            else:
+                content = f"❌ 获取资源失败：**{downloaded_file_name}**\n\n正在为您生成回复，请稍候..."
+
         return {
             "config": {"wide_screen_mode": True},
             "header": {
@@ -58,7 +65,7 @@ class CardBuilder:
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": "正在为您生成回复，请稍候..."
+                    "content": content
                 },
                 CardBuilder._create_footer()
             ]

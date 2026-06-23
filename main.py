@@ -102,6 +102,9 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         return
 
     user_text = ""
+    downloaded_file_name = None
+    download_success = True
+
     if message_type == "text":
         user_text = content_json.get("text", "") if content_json.get("text") else content_raw
         user_text = user_text.strip()
@@ -117,6 +120,10 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         
         if image_key:
             output_filename = f"img_{image_key}.jpg"
+            
+            dl_card = CardBuilder.build_download_indicator(output_filename, "图片")
+            bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
+            
             output_path = os.path.abspath(output_filename)
             dl_proc = await asyncio.create_subprocess_exec(
                 "lark-cli", "im", "+messages-resources-download",
@@ -129,6 +136,8 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 stderr=asyncio.subprocess.PIPE
             )
             await dl_proc.communicate()
+            downloaded_file_name = output_filename
+            download_success = (dl_proc.returncode == 0)
             user_text = f"请查看这张图片并做出回应。图片路径: {output_path}"
         else:
             user_text = "[未获取到图片]"
@@ -162,6 +171,8 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 stderr=asyncio.subprocess.PIPE
             )
             await dl_proc.communicate()
+            downloaded_file_name = output_filename
+            download_success = (dl_proc.returncode == 0)
             user_text += f"\n[附加图片路径: {output_path}]"
     elif message_type in ["file", "audio", "media"]:
         file_key = content_json.get("file_key", "")
@@ -197,6 +208,8 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 stderr=asyncio.subprocess.PIPE
             )
             await dl_proc.communicate()
+            downloaded_file_name = file_name
+            download_success = (dl_proc.returncode == 0)
             
             if message_type == "file":
                 user_text = f"请详细阅读这份文件（{file_name}），并做出响应。文件路径: {output_path}"
@@ -263,7 +276,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     )
     running_processes[chat_id] = process
     
-    init_card = CardBuilder.build_typing_indicator()
+    init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success)
     if bot_reply_msg_id:
         await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card))
     else:
