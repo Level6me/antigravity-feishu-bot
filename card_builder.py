@@ -61,6 +61,8 @@ class CardBuilder:
             return "🌐 翻译模式", "AI 正在为您进行精准翻译，请稍候..."
         elif any(kw in text for kw in ["总结", "归纳", "提炼", "重点"]):
             return "📝 总结提炼模式", "AI 正在帮您提炼核心要点，请稍候..."
+        elif any(kw in text for kw in ["选项", "我的选择是"]):
+            return "🎯 选项执行中", "AI 已收到您的选择，正在进行处理..."
         else:
             return "✨ AI 思考中...", "正在为您深度分析与生成回复，请稍候..."
 

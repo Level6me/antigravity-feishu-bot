@@ -333,17 +333,18 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                         with open(transcript_path, 'r', encoding='utf-8') as f:
                             lines = f.readlines()
                             if lines:
-                                last_line = lines[-1]
-                                data = json.loads(last_line)
-                                if "tool_calls" in data and len(data["tool_calls"]) > 0:
-                                    action = data["tool_calls"][-1].get("args", {}).get("toolAction", "")
-                                    action = action.replace('"', '').strip()
-                                    if action and action != last_tool_action:
-                                        last_tool_action = action
-                                        last_patch_time = time.time()
-                                        indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success)
-                                        if bot_reply_msg_id:
-                                            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
+                                for line in reversed(lines):
+                                    data = json.loads(line)
+                                    if "tool_calls" in data and len(data["tool_calls"]) > 0:
+                                        action = data["tool_calls"][-1].get("args", {}).get("toolAction", "")
+                                        action = action.replace('"', '').strip()
+                                        if action and action != last_tool_action:
+                                            last_tool_action = action
+                                            last_patch_time = time.time()
+                                            indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success)
+                                            if bot_reply_msg_id:
+                                                await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
+                                        break
                     except Exception:
                         pass
                         
