@@ -8,6 +8,12 @@ def extract_and_upload_resources(text, message_id, api_client):
     images = re.findall(r'!\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', text)
     files = re.findall(r'(?<!!)\[.*?\]\((?:file://)?(/Users/YOUR_USERNAME/[^)]+)\)', text)
     
+    IGNORED_EXTENSIONS = {
+        '.py', '.swift', '.js', '.ts', '.html', '.css', '.json', '.md', 
+        '.java', '.cpp', '.c', '.h', '.m', '.txt', '.log', '.sh', '.rb', 
+        '.go', '.rs', '.pbxproj', '.xcworkspacedata', '.plist'
+    }
+    
     # Also scan inside artifact .md files for images
     for file_path in files:
         if file_path.endswith(".md") and os.path.exists(file_path):
@@ -40,6 +46,11 @@ def extract_and_upload_resources(text, message_id, api_client):
                 log.error(f"[Multimodal] Error uploading image: {e}")
 
     for file_path in set(files):
+        _, ext = os.path.splitext(file_path)
+        if ext.lower() in IGNORED_EXTENSIONS:
+            log.info(f"[Multimodal] Skipping auto-upload for code/text file: {file_path}")
+            continue
+
         if os.path.exists(file_path):
             try:
                 req = lark.api.im.v1.CreateFileRequest.builder().request_body(

@@ -237,6 +237,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         "-p", system_instruction + final_prompt, 
         "--dangerously-skip-permissions", 
         "--model", session_data["model"],
+        "--print-timeout", "60m",
         "--log-file", log_file_path
     ]
     if not is_new_conversation:
