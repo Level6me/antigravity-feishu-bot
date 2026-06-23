@@ -4,61 +4,23 @@ import subprocess
 import os
 import uuid
 import re
+import sys
+import signal
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger, P2CardActionTriggerResponse
 
 from config import APP_ID, APP_SECRET, SESSION_FILE, PROFILE_FILE
-from memory import load_sessions, save_sessions, load_profiles, save_profiles
+from database import load_sessions, save_sessions, load_profiles, save_profiles
 from multimodal import extract_and_upload_resources
+from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, patch_interactive_card_sdk
+from commands import handle_slash_command
 
 main_loop = None
 running_processes = {}
 
-api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
 
-
-
-def send_reply_sdk(message_id, reply_text):
-    req = ReplyMessageRequest.builder() \
-        .message_id(message_id) \
-        .request_body(ReplyMessageRequestBody.builder() \
-            .msg_type("text") \
-            .content(json.dumps({"text": reply_text})) \
-            .build()) \
-        .build()
-    resp = api_client.im.v1.message.reply(req)
-    if resp.code != 0:
-        print(f"[Error send_reply_sdk] {resp.msg}", flush=True)
-
-def send_interactive_card_sdk(message_id, card_content):
-    req = ReplyMessageRequest.builder() \
-        .message_id(message_id) \
-        .request_body(ReplyMessageRequestBody.builder() \
-            .msg_type("interactive") \
-            .content(json.dumps(card_content)) \
-            .build()) \
-        .build()
-    resp = api_client.im.v1.message.reply(req)
-    if resp.code != 0:
-        print(f"[Error send_interactive_card_sdk] {resp.msg}", flush=True)
-        return None
-    try:
-        return json.loads(resp.raw.content).get("data", {}).get("message_id")
-    except:
-        return None
-
-def patch_interactive_card_sdk(message_id, card_content):
-    req = PatchMessageRequest.builder() \
-        .message_id(message_id) \
-        .request_body(PatchMessageRequestBody.builder() \
-            .content(json.dumps(card_content)) \
-            .build()) \
-        .build()
-    resp = api_client.im.v1.message.patch(req)
-    if resp.code != 0:
-        print(f"[Error patch_interactive_card_sdk] {resp.msg}", flush=True)
 
 
 
@@ -236,6 +198,10 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     if not user_text:
         return
 
+    handled, user_text = await handle_slash_command(user_text, message_id, chat_id, sessions, running_processes)
+    if handled:
+        return
+
     print(f"\n[User {chat_id}]: {user_text}", flush=True)
 
     sessions = load_sessions()
@@ -243,127 +209,6 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         sessions[chat_id] = {"conversation": "", "model": "Gemini 3.5 Flash"}
     
     session_data = sessions[chat_id]
-
-    if user_text.startswith("/stop"):
-        if chat_id in running_processes:
-            try:
-                running_processes[chat_id].kill()
-            except:
-                pass
-            reply_text = "🛑 当前任务已被紧急叫停！"
-            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-        else:
-            reply_text = "ℹ️ 当前没有正在运行的任务。"
-            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-        return
-    elif user_text.startswith("/clear"):
-        sessions[chat_id]["conversation"] = uuid.uuid4().hex
-        save_sessions(sessions)
-        reply_text = "🔄 上下文已清空，开启新对话！"
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-        return
-        
-    elif user_text.startswith("/remember "):
-        memory_text = user_text[len("/remember "):].strip()
-        profiles = load_profiles()
-        if chat_id not in profiles:
-            profiles[chat_id] = []
-        profiles[chat_id].append(memory_text)
-        save_profiles(profiles)
-        reply_text = f"🧠 已为您永久记录偏好：\n- {memory_text}"
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-        return
-        
-    elif user_text.startswith("/memory"):
-        profiles = load_profiles()
-        memories = profiles.get(chat_id, [])
-        if not memories:
-            reply_text = "📭 当前没有记录您的任何长时偏好。您可以通过 `/remember <偏好>` 来添加。"
-        else:
-            reply_text = "🧠 **当前已永久记住您的以下偏好**：\n" + "\n".join([f"- {m}" for m in memories])
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-        return
-        
-    elif user_text.startswith("/forget"):
-        profiles = load_profiles()
-        if chat_id in profiles:
-            del profiles[chat_id]
-            save_profiles(profiles)
-        reply_text = "🗑️ 您的所有长时记忆偏好已被彻底清空！"
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-        return
-
-    elif user_text.startswith("/role "):
-        new_role = user_text.split(" ", 1)[1].strip()
-        sessions[chat_id]["role"] = new_role
-        save_sessions(sessions)
-        
-        # Override the user_text to let the normal flow handle it, ensuring conversation ID is captured!
-        user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
-        # Continue to standard flow instead of returning early
-    elif user_text.startswith("/help"):
-        reply_text = """💡 **Antigravity 机器人高级操作指南**
-
-🔹 `/model` : 弹出交互式控制面板，自由切换大模型
-🔹 `/role <设定>` : 让机器人扮演特定角色 (例如: `/role 资深Python工程师`)
-🔹 `/remember <设定>` : 让机器人永久记住你的偏好 (例如: `/remember 我写代码只用 Python`)
-🔹 `/memory` : 查看机器人当前记住的所有偏好
-🔹 `/forget` : 清除机器人的长时记忆偏好
-🔹 `/clear` : 清空当前对话的上下文记忆，重新开始
-🔹 `/stop` : 紧急刹车！强制中止正在后台生成的耗时任务
-🔹 `/help` : 显示此帮助菜单
-
-*✨ 隐藏黑科技提示：*
-* **多模态解析**：直接向我发送文档 (PDF/Word)、语音、视频或图片，我能直接阅读、倾听并分析！*
-* **远程终端**：我可以读取你电脑上的文件，甚至直接执行如 `ls -al` 等终端命令！*
-* **全网搜索**：发给我任意网页链接，我可以帮你提取摘要！*"""
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-        return
-    elif user_text.startswith("/model") or user_text.startswith("/card") or user_text.startswith("/menu"):
-        fetch_proc = await asyncio.create_subprocess_exec(
-            "/Users/YOUR_USERNAME/.local/bin/antigravity", "models",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=subprocess.DEVNULL
-        )
-        stdout, _ = await fetch_proc.communicate()
-        models_output = stdout.decode().strip()
-        
-        available_models = [line.strip() for line in models_output.split('\n') if line.strip()]
-        if not available_models:
-            available_models = ["Gemini 3.5 Flash (Medium)", "Claude Sonnet 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
-            
-        actions = []
-        for i, model_name in enumerate(available_models[:10]):
-            button_type = "primary" if i == 0 else "default"
-            actions.append({
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": model_name},
-                "type": button_type,
-                "value": {"action": "switch_model", "model": model_name}
-            })
-
-        card_content = {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "template": "blue",
-                "title": {"content": "🤖 机器人控制面板", "tag": "plain_text"}
-            },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": f"**当前正在使用的模型**: {session_data.get('model', 'Default')}\n**可用模型列表**（点击下方按钮快速切换）："
-                },
-                {
-                    "tag": "action",
-                    "layout": "flow",
-                    "actions": actions
-                }
-            ]
-        }
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
-        return
-
     save_sessions(sessions)
 
     r_id = await set_emoji(message_id, "StatusReading")
@@ -673,5 +518,16 @@ async def main():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, cli.start)
 
+def cleanup(signum, frame):
+    print("Gracefully shutting down... killing zombie processes", flush=True)
+    for process in running_processes.values():
+        try:
+            process.kill()
+        except:
+            pass
+    sys.exit(0)
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
     asyncio.run(main())
