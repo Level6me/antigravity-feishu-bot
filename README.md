@@ -63,13 +63,13 @@ pip install -r requirements.txt
 ```
 
 ### 第三步：配置飞书应用凭证
-打开 `ws_bot.py`，在代码顶部填入你自己在“飞书开发者后台”创建的机器人的 `APP_ID` 和 `APP_SECRET`：
+在项目根目录创建一个 `.env` 文件，填入你自己在“飞书开发者后台”创建的机器人的 `APP_ID` 和 `APP_SECRET`：
 
-```python
-APP_ID = "cli_xxxxxxxxxxxx"
-APP_SECRET = "xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+```env
+APP_ID=cli_xxxxxxxxxxxx
+APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
-> **注意**：请确保你的飞书应用在后台开启了“WebSocket 建立长连接”的权限，并为机器人开通了收发消息的全部所需权限（包括 `im:message` 等）。
+> **注意**：请确保你的飞书应用在后台开启了“WebSocket 建立长连接”的权限，并为机器人开通了收发消息的全部所需权限（包括 `im:message` 等）。代码底层已接入 `python-dotenv` 自动加载环境变量，避免了秘钥泄露至代码仓库的风险。
 
 ### 第四步：一键启动后台服务
 
@@ -77,7 +77,7 @@ APP_SECRET = "xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 ```bash
 # 启动机器人进程（请务必使用虚拟环境里的 python3 执行）
-pm2 start venv/bin/python3 --name "feishu-bot" -- ws_bot.py
+pm2 start venv/bin/python3 --name "feishu-bot" -- main.py
 
 # 保存 PM2 进程列表，保证电脑重启后自动恢复
 pm2 save
@@ -94,7 +94,21 @@ pm2 save
 
 本代机器人的核心重构架构：
 1. **网络层**：摒弃轮询，使用 `lark_oapi.ws.Client` 与飞书网关建立稳定的全双工长连接，事件响应延迟达到毫秒级。
-2. **调度层**：所有会话完全协程化处理 (`asyncio`)。同一个用户发来多个文件、多个并发提问互不干扰；不同用户的请求也能完美隔离。
-3. **打字机缓冲流**：通过一个异步后台守护任务 (Ticker)，每隔 0.5 秒提取一次 `antigravity` 吐出的增量文本，调用 API 局部更新 (`PATCH`) 互动卡片，并在完成后自动过滤掉不必要的系统底层探针日志。
+2. **高度模块化解耦**：项目划分为 `main.py`（WebSocket 主轴）、`commands.py`（指令路由器）、`lark_client.py`（飞书 SDK 发送端）、`database.py`（存储层）以及 `multimodal.py`（多模态解析层），极致清爽。
+3. **SQLite 持久化数据热迁移**：彻底告别脆弱的 JSON 文本文件读写，所有长时偏好记忆和对话上下文均无缝对接至原生的 SQLite 数据库，保证高并发数据安全。
+4. **防僵尸与优雅退出机制**：引入 `signal` 信号流，接管中断（SIGINT/SIGTERM）。当使用 PM2 重启或者停止服务时，会自动执行 Graceful Shutdown，彻底清理后台任何遗留未处理的僵尸进程。
 
-现在，尽情享受你的终极私人助理吧！遇到问题可以随时翻阅 `feishu-bot-error.log` 进行排查。
+现在，尽情享受你的终极私人助理吧！遇到问题可以随时翻阅 `~/.pm2/logs/feishu-bot-error.log` 进行排查。
+
+---
+
+## 📝 更新记录 (Changelog)
+
+### v2.0 - 核心架构重构与安全加固 (2026.06)
+- **[Refactor]** 将庞大的入口文件 `ws_bot.py` 拆解更名为 `main.py`，剥离全部业务逻辑至独立模块。
+- **[Refactor]** 新增 `commands.py` 统管所有 Slash Commands（如 `/help`, `/clear`, `/memory`）。
+- **[Refactor]** 新增 `lark_client.py` 统一封装飞书互动卡片、流式文本的回复方法。
+- **[Feature]** 引入 SQLite 取代 JSON 本地存储方案，增加旧数据自适应无损迁移脚本，彻底避免 I/O 数据损坏。
+- **[Feature]** 加入系统层级的 Graceful Shutdown，在停止程序前精准点杀后台僵尸子进程，杜绝内存泄漏。
+- **[Security]** 引入 `.env` 环境隔离机制与严格的 `.gitignore` 保护网，通过 Git `filter-branch` 实现了整个代码历史提交记录的秘钥清除操作。
+- **[UX]** 优化了选项卡片（交互按钮）的体验，增加按钮消抖和操作确认反馈提示 `✅ 您已选择...`。
