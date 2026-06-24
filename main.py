@@ -329,6 +329,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     last_update_text = ""
     last_tool_action = ""
     last_patch_time = time.time()
+    process_start_time = time.time()
     
     while process.returncode is None:
         await asyncio.sleep(0.5)
