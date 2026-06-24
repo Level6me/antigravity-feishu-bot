@@ -12,7 +12,7 @@ from lark_oapi.api.im.v1 import *
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger, P2CardActionTriggerResponse
 
 from config import APP_ID, APP_SECRET, SESSION_FILE, PROFILE_FILE, ANTIGRAVITY_BIN
-from database import load_sessions, save_sessions, load_profiles, save_profiles
+from database import get_session_async, get_profile_async
 from multimodal import extract_and_upload_resources
 from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, patch_interactive_card_sdk, download_message_resource_sdk, set_emoji_sdk, delete_emoji_sdk
 from commands import handle_slash_command
@@ -108,14 +108,11 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         raw_text = raw_text.strip()
 
     # Load sessions early for slash commands
-    sessions = load_sessions()
-    if chat_id not in sessions:
-        sessions[chat_id] = {"conversation": "", "model": "Gemini 3.5 Flash"}
-    session_data = sessions[chat_id]
+    session_data = await get_session_async(chat_id)
 
     # Handle slash commands first (this allows /stop to bypass the lock)
     if message_type == "text" and raw_text.startswith("/"):
-        handled, _ = await handle_slash_command(raw_text, message_id, chat_id, sessions, running_processes)
+        handled, _ = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes)
         if handled:
             return
 
@@ -232,16 +229,14 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     final_prompt = user_text
     is_new_conversation = not session_data.get("conversation")
     if is_new_conversation:
-        profiles = load_profiles()
-        memories = profiles.get(chat_id, [])
+        memories = await get_profile_async(chat_id)
         if memories:
             memory_block = "\n".join([f"- {m}" for m in memories])
             final_prompt = f"[System Context: Please strictly follow the user's permanent preferences below:]\n{memory_block}\n\n[User's Message:]\n{user_text}"
             
     # Delegate execution to executor
-    # Delegate execution to executor
     is_error = await execute_antigravity(
-        chat_id, user_text, message_id, bot_reply_msg_id, session_data, sessions, 
+        chat_id, user_text, message_id, bot_reply_msg_id, session_data, 
         is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
         download_success, running_processes
     )

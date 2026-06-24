@@ -95,3 +95,54 @@ def save_profiles(profiles):
 # Initialize DB and migrate upon import
 init_db()
 migrate_from_json()
+import asyncio
+
+def _get_session(chat_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return json.loads(row['data'])
+    return {"conversation": "", "model": "Gemini 3.5 Flash", "role": "无"}
+
+def _save_session(chat_id, data):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
+    conn.commit()
+    conn.close()
+
+def _get_profile(user_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT data FROM user_profiles WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return json.loads(row['data'])
+    return []
+
+def _save_profile(user_id, data):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO user_profiles (user_id, data) VALUES (?, ?)', (user_id, json.dumps(data)))
+    conn.commit()
+    conn.close()
+
+async def get_session_async(chat_id):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _get_session, chat_id)
+
+async def save_session_async(chat_id, data):
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _save_session, chat_id, data)
+
+async def get_profile_async(user_id):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _get_profile, user_id)
+
+async def save_profile_async(user_id, data):
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _save_profile, user_id, data)

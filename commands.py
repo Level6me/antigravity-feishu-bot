@@ -1,18 +1,17 @@
 import asyncio
 import subprocess
 import uuid
-from database import load_profiles, save_profiles, save_sessions
+from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
 from card_builder import CardBuilder
 from config import ANTIGRAVITY_BIN
 
-async def handle_slash_command(user_text, message_id, chat_id, sessions, running_processes):
+async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes):
     """
     Parses and handles slash commands. Returns True if a command was handled, False otherwise.
     Returns (handled: bool, override_user_text: str)
     """
-    session_data = sessions.get(chat_id, {})
     
     if user_text == "/stop":
         if chat_id in running_processes:
@@ -28,26 +27,23 @@ async def handle_slash_command(user_text, message_id, chat_id, sessions, running
         return True, user_text
         
     elif user_text.startswith("/clear"):
-        sessions[chat_id]["conversation"] = uuid.uuid4().hex
-        save_sessions(sessions)
+        session_data["conversation"] = uuid.uuid4().hex
+        await save_session_async(chat_id, session_data)
         reply_text = "🔄 上下文已清空，开启新对话！"
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
         
     elif user_text.startswith("/remember "):
         memory_text = user_text[len("/remember "):].strip()
-        profiles = load_profiles()
-        if chat_id not in profiles:
-            profiles[chat_id] = []
-        profiles[chat_id].append(memory_text)
-        save_profiles(profiles)
+        memories = await get_profile_async(chat_id)
+        memories.append(memory_text)
+        await save_profile_async(chat_id, memories)
         reply_text = f"🧠 已为您永久记录偏好：\n- {memory_text}"
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
         
     elif user_text.startswith("/memory"):
-        profiles = load_profiles()
-        memories = profiles.get(chat_id, [])
+        memories = await get_profile_async(chat_id)
         if not memories:
             reply_text = "📭 当前没有记录您的任何长时偏好。您可以通过 `/remember <偏好>` 来添加。"
         else:
@@ -56,18 +52,15 @@ async def handle_slash_command(user_text, message_id, chat_id, sessions, running
         return True, user_text
         
     elif user_text.startswith("/forget"):
-        profiles = load_profiles()
-        if chat_id in profiles:
-            del profiles[chat_id]
-            save_profiles(profiles)
+        await save_profile_async(chat_id, [])
         reply_text = "🗑️ 您的所有长时记忆偏好已被彻底清空！"
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
 
     elif user_text.startswith("/role "):
         new_role = user_text.split(" ", 1)[1].strip()
-        sessions[chat_id]["role"] = new_role
-        save_sessions(sessions)
+        session_data["role"] = new_role
+        await save_session_async(chat_id, session_data)
         user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
         return False, user_text
         

@@ -10,10 +10,10 @@ from logger import log
 from card_builder import CardBuilder
 from lark_client import patch_interactive_card_sdk, send_interactive_card_sdk, api_client
 from multimodal import extract_and_upload_resources
-from database import save_sessions
+from database import save_session_async
 
 async def execute_antigravity(
-    chat_id, user_text, message_id, bot_reply_msg_id, session_data, sessions, 
+    chat_id, user_text, message_id, bot_reply_msg_id, session_data, 
     is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
     download_success, running_processes
 ):
@@ -176,8 +176,8 @@ async def execute_antigravity(
         if match:
             new_conv_id = match.group(1)
             if session_data.get("conversation") != new_conv_id:
-                sessions[chat_id]["conversation"] = new_conv_id
-                save_sessions(sessions)
+                session_data["conversation"] = new_conv_id
+                await save_session_async(chat_id, session_data)
         os.remove(log_file_path)
     
     is_error = False
