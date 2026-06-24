@@ -13,6 +13,34 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
     Returns (handled: bool, override_user_text: str)
     """
     
+    pending_command = session_data.get("pending_command")
+    
+    # If the user typed a new slash command, clear any pending state
+    if user_text.startswith("/") and pending_command:
+        session_data.pop("pending_command", None)
+        await save_session_async(chat_id, session_data)
+        pending_command = None
+        
+    if not user_text.startswith("/") and pending_command:
+        if pending_command == "remember":
+            memory_text = user_text.strip()
+            memories = await get_profile_async(chat_id)
+            memories.append(memory_text)
+            await save_profile_async(chat_id, memories)
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            reply_text = f"🧠 已为您永久记录偏好：\n- {memory_text}"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+            
+        elif pending_command == "role":
+            new_role = user_text.strip()
+            session_data["role"] = new_role
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
+            return False, user_text
+
     if user_text == "/stop":
         cleared = False
         if chat_id in chat_queues:
@@ -44,14 +72,22 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
         
-    elif user_text.startswith("/remember "):
-        memory_text = user_text[len("/remember "):].strip()
-        memories = await get_profile_async(chat_id)
-        memories.append(memory_text)
-        await save_profile_async(chat_id, memories)
-        reply_text = f"🧠 已为您永久记录偏好：\n- {memory_text}"
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-        return True, user_text
+    elif user_text.startswith("/remember"):
+        parts = user_text.split(" ", 1)
+        if len(parts) > 1 and parts[1].strip():
+            memory_text = parts[1].strip()
+            memories = await get_profile_async(chat_id)
+            memories.append(memory_text)
+            await save_profile_async(chat_id, memories)
+            reply_text = f"🧠 已为您永久记录偏好：\n- {memory_text}"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+        else:
+            session_data["pending_command"] = "remember"
+            await save_session_async(chat_id, session_data)
+            reply_text = "🧠 请直接输入您希望我永久记住的偏好或设定："
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
         
     elif user_text.startswith("/memory"):
         memories = await get_profile_async(chat_id)
@@ -129,12 +165,20 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
 
-    elif user_text.startswith("/role "):
-        new_role = user_text.split(" ", 1)[1].strip()
-        session_data["role"] = new_role
-        await save_session_async(chat_id, session_data)
-        user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
-        return False, user_text
+    elif user_text.startswith("/role"):
+        parts = user_text.split(" ", 1)
+        if len(parts) > 1 and parts[1].strip():
+            new_role = parts[1].strip()
+            session_data["role"] = new_role
+            await save_session_async(chat_id, session_data)
+            user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
+            return False, user_text
+        else:
+            session_data["pending_command"] = "role"
+            await save_session_async(chat_id, session_data)
+            reply_text = "🎭 请直接输入您希望我扮演的角色（例如：资深Python工程师）："
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
         
     elif user_text.startswith("/help"):
         reply_text = """💡 **Antigravity 机器人高级操作指南**

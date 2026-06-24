@@ -256,10 +256,12 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     session_data = await get_session_async(chat_id)
 
     # Handle slash commands first (this allows /stop to bypass the lock)
-    if message_type == "text" and raw_text.startswith("/"):
-        handled, _ = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes, chat_queues)
+    if message_type == "text" and (raw_text.startswith("/") or session_data.get("pending_command")):
+        handled, override_text = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes, chat_queues)
         if handled:
             return
+        if override_text:
+            raw_text = override_text
 
     # QUEUEING SYSTEM
     if chat_id not in chat_queues:
