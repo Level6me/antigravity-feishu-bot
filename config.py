@@ -37,7 +37,6 @@ def find_antigravity_bin():
         "/root/.local/bin/antigravity",
         "/usr/local/bin/agy",
         "/usr/local/bin/antigravity",
-        "/Users/YOUR_USERNAME/.local/bin/antigravity",
     ]
     for c in candidates:
         if os.path.exists(c):
