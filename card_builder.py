@@ -67,8 +67,25 @@ class CardBuilder:
             return "✨ AI 思考中...", "正在为您深度分析与生成回复，请稍候..."
 
     @staticmethod
-    def build_typing_indicator(downloaded_file_name=None, download_success=True, user_text=""):
+    def _get_dynamic_think_text(base_text, think_seconds):
+        if think_seconds <= 0:
+            return base_text
+            
+        phrases = [
+            "🧠 正在深度思考上下文...",
+            "🔍 正在系统内检索相关线索...",
+            "⚙️ 正在为您规划行动路径...",
+            "💡 马上就好，正在组织语言...",
+            "🚀 正在全速冲刺，请稍等..."
+        ]
+        # Rotate phrase every 2 seconds
+        idx = (think_seconds // 2) % len(phrases)
+        return f"{base_text}\n\n*( {phrases[idx]} 已耗时 {think_seconds}s )*"
+
+    @staticmethod
+    def build_typing_indicator(downloaded_file_name=None, download_success=True, user_text="", think_seconds=0):
         title, content = CardBuilder._guess_intent(user_text)
+        content = CardBuilder._get_dynamic_think_text(content, think_seconds)
         
         if downloaded_file_name:
             if download_success:
@@ -92,11 +109,12 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_tool_indicator(tool_action, user_text="", downloaded_file_name=None, download_success=True):
+    def build_tool_indicator(tool_action, user_text="", downloaded_file_name=None, download_success=True, think_seconds=0):
         title, content = CardBuilder._guess_intent(user_text)
         
         # Override the text with the actual tool action
-        content = f"**当前动作：** `{tool_action}`\n\n*(AI 正在运行底层命令或操作文件，请稍候...)*"
+        time_hint = f"已运行 {think_seconds}s" if think_seconds > 0 else "请稍候..."
+        content = f"**当前动作：** `{tool_action}`\n\n*(AI 正在运行底层命令或操作文件，{time_hint})*"
         
         if downloaded_file_name:
             if download_success:

@@ -352,6 +352,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             # Check for tool execution updates
             if not accumulated_text.strip() and time.time() - last_patch_time >= 1.0:
                 transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
+                action = ""
                 if transcript_path and os.path.exists(transcript_path):
                     try:
                         with open(transcript_path, 'r', encoding='utf-8') as f:
@@ -367,17 +368,21 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                                         break
                                         
                                     if "tool_calls" in data and len(data["tool_calls"]) > 0:
-                                        action = data["tool_calls"][-1].get("args", {}).get("toolAction", "")
-                                        action = action.replace('"', '').strip()
-                                        if action and action != last_tool_action:
-                                            last_tool_action = action
-                                            last_patch_time = time.time()
-                                            indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success)
-                                            if bot_reply_msg_id:
-                                                await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
+                                        action = data["tool_calls"][-1].get("args", {}).get("toolAction", "").replace('"', '').strip()
                                         break
                     except Exception:
                         pass
+                
+                think_seconds = int(time.time() - process_start_time)
+                if action:
+                    last_tool_action = action
+                    indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success, think_seconds)
+                else:
+                    indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
+                
+                last_patch_time = time.time()
+                if bot_reply_msg_id:
+                    await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
                         
         if stdout_task.done() and stderr_task.done():
             break
