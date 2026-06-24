@@ -7,19 +7,30 @@ from logger import log
 from card_builder import CardBuilder
 from config import ANTIGRAVITY_BIN
 
-async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes):
+async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues):
     """
     Parses and handles slash commands. Returns True if a command was handled, False otherwise.
     Returns (handled: bool, override_user_text: str)
     """
     
     if user_text == "/stop":
-        if chat_id in running_processes:
+        cleared = False
+        if chat_id in chat_queues:
+            while not chat_queues[chat_id].empty():
+                try:
+                    chat_queues[chat_id].get_nowait()
+                    chat_queues[chat_id].task_done()
+                    cleared = True
+                except asyncio.QueueEmpty:
+                    break
+                    
+        if chat_id in running_processes or cleared:
             try:
-                running_processes[chat_id].kill()
+                if chat_id in running_processes:
+                    running_processes[chat_id].kill()
             except:
                 pass
-            reply_text = "🛑 当前任务已被紧急叫停！"
+            reply_text = "🛑 当前任务已被紧急叫停，排队中的任务也已清空！"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         else:
             reply_text = "ℹ️ 当前没有正在运行的任务。"

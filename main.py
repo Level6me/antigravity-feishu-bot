@@ -24,108 +24,34 @@ import time
 
 main_loop = None
 running_processes = {}
+chat_queues = {}
+chat_workers = {}
 
+async def process_chat_queue(chat_id):
+    queue = chat_queues[chat_id]
+    while not queue.empty():
+        task = await queue.get()
+        try:
+            await _process_single_task(chat_id, task)
+        except Exception as e:
+            log.error(f"Error processing queued task for {chat_id}: {e}")
+        finally:
+            queue.task_done()
+    if chat_id in chat_workers:
+        del chat_workers[chat_id]
 
-
-
-
-
-async def set_emoji(message_id, emoji_type):
-    # Map custom / obsolete emojis to standard Lark emoji names
-    mapping = {
-        "StatusReading": "Typing",
-        "CrossMark": "CrossMark",
-        "DONE": "DONE"
-    }
-    mapped_type = mapping.get(emoji_type, emoji_type)
+async def _process_single_task(chat_id, task):
+    message_id = task["message_id"]
+    message_type = task["message_type"]
+    content_json = task["content_json"]
+    content_raw = task["content_raw"]
+    raw_text = task["raw_text"]
     
     loop = asyncio.get_running_loop()
-    try:
-        reaction_id = await loop.run_in_executor(None, lambda: set_emoji_sdk(message_id, mapped_type))
-        return reaction_id
-    except Exception as e:
-        log.error(f"Failed to set emoji reaction {emoji_type}: {e}")
-        return None
-
-async def delete_emoji(message_id, reaction_id):
-    if not reaction_id:
-        return
-    loop = asyncio.get_running_loop()
-    try:
-        await loop.run_in_executor(None, lambda: delete_emoji_sdk(message_id, reaction_id))
-    except Exception as e:
-        log.error(f"Failed to delete emoji reaction: {e}")
-
-# emoji_spinner removed
-
-async def send_reply(message_id, reply_text):
-    reply_proc = await asyncio.create_subprocess_exec(
-        "lark-cli", "im", "+messages-reply", 
-        "--message-id", message_id,
-        "--text", reply_text,
-        "--as", "bot",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await reply_proc.communicate()
-    if reply_proc.returncode != 0:
-        print(f"[Error send_reply] {stderr.decode()}", flush=True)
-
-async def send_interactive_card(message_id, card_content):
-    reply_proc = await asyncio.create_subprocess_exec(
-        "lark-cli", "im", "+messages-reply", 
-        "--message-id", message_id,
-        "--msg-type", "interactive",
-        "--content", json.dumps(card_content),
-        "--as", "bot",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    await reply_proc.communicate()
-
-async def handle_message_async(message_id, chat_id, message_type, content_raw):
-    try:
-        await _handle_message_async_internal(message_id, chat_id, message_type, content_raw)
-    except Exception as e:
-        import traceback
-        log.error(f"[FATAL ERROR in handle_message_async]: {e}")
-        traceback.print_exc()
-
-async def _handle_message_async_internal(message_id, chat_id, message_type, content_raw):
-    loop = asyncio.get_running_loop()
-    bot_reply_msg_id = None
-
-    try:
-        content_json = json.loads(content_raw)
-    except Exception as e:
-        log.error(f"Failed to parse content_raw JSON: {e}")
-        return
-
-    # Quick parsing for slash commands
-    raw_text = ""
-    if message_type == "text":
-        raw_text = content_json.get("text", "") if content_json.get("text") else content_raw
-        raw_text = raw_text.strip()
-
-    # Load sessions early for slash commands
     session_data = await get_session_async(chat_id)
-
-    # Handle slash commands first (this allows /stop to bypass the lock)
-    if message_type == "text" and raw_text.startswith("/"):
-        handled, _ = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes)
-        if handled:
-            return
-
-    # CONCURRENT PROTECTION LOCK
-    if chat_id in running_processes and running_processes[chat_id].returncode is None:
-        log.warning(f"Rejecting concurrent request from {chat_id}")
-        warning_msg = "⚠️ 当前有任务正在深度思考或执行中，请等待任务完成，或发送 `/stop` 强行终止当前任务。"
-        await loop.run_in_executor(None, lambda: send_reply_sdk(message_id, warning_msg))
-        return
-
-    user_text = ""
     downloaded_file_name = None
     download_success = True
+    bot_reply_msg_id = None
 
     if message_type == "text":
         user_text = raw_text
@@ -245,6 +171,120 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         await set_emoji(message_id, "CrossMark")
     else:
         await set_emoji(message_id, "DONE")
+
+
+
+
+async def set_emoji(message_id, emoji_type):
+    # Map custom / obsolete emojis to standard Lark emoji names
+    mapping = {
+        "StatusReading": "Typing",
+        "CrossMark": "CrossMark",
+        "DONE": "DONE"
+    }
+    mapped_type = mapping.get(emoji_type, emoji_type)
+    
+    loop = asyncio.get_running_loop()
+    try:
+        reaction_id = await loop.run_in_executor(None, lambda: set_emoji_sdk(message_id, mapped_type))
+        return reaction_id
+    except Exception as e:
+        log.error(f"Failed to set emoji reaction {emoji_type}: {e}")
+        return None
+
+async def delete_emoji(message_id, reaction_id):
+    if not reaction_id:
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, lambda: delete_emoji_sdk(message_id, reaction_id))
+    except Exception as e:
+        log.error(f"Failed to delete emoji reaction: {e}")
+
+# emoji_spinner removed
+
+async def send_reply(message_id, reply_text):
+    reply_proc = await asyncio.create_subprocess_exec(
+        "lark-cli", "im", "+messages-reply", 
+        "--message-id", message_id,
+        "--text", reply_text,
+        "--as", "bot",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await reply_proc.communicate()
+    if reply_proc.returncode != 0:
+        print(f"[Error send_reply] {stderr.decode()}", flush=True)
+
+async def send_interactive_card(message_id, card_content):
+    reply_proc = await asyncio.create_subprocess_exec(
+        "lark-cli", "im", "+messages-reply", 
+        "--message-id", message_id,
+        "--msg-type", "interactive",
+        "--content", json.dumps(card_content),
+        "--as", "bot",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    await reply_proc.communicate()
+
+async def handle_message_async(message_id, chat_id, message_type, content_raw):
+    try:
+        await _handle_message_async_internal(message_id, chat_id, message_type, content_raw)
+    except Exception as e:
+        import traceback
+        log.error(f"[FATAL ERROR in handle_message_async]: {e}")
+        traceback.print_exc()
+
+async def _handle_message_async_internal(message_id, chat_id, message_type, content_raw):
+    loop = asyncio.get_running_loop()
+    bot_reply_msg_id = None
+
+    try:
+        content_json = json.loads(content_raw)
+    except Exception as e:
+        log.error(f"Failed to parse content_raw JSON: {e}")
+        return
+
+    # Quick parsing for slash commands
+    raw_text = ""
+    if message_type == "text":
+        raw_text = content_json.get("text", "") if content_json.get("text") else content_raw
+        raw_text = raw_text.strip()
+
+    # Load sessions early for slash commands
+    session_data = await get_session_async(chat_id)
+
+    # Handle slash commands first (this allows /stop to bypass the lock)
+    if message_type == "text" and raw_text.startswith("/"):
+        handled, _ = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes, chat_queues)
+        if handled:
+            return
+
+    # QUEUEING SYSTEM
+    if chat_id not in chat_queues:
+        chat_queues[chat_id] = asyncio.Queue()
+        
+    task_payload = {
+        "message_id": message_id,
+        "message_type": message_type,
+        "content_json": content_json,
+        "content_raw": content_raw,
+        "raw_text": raw_text
+    }
+    
+    if chat_id in chat_workers and not chat_workers[chat_id].done():
+        qsize = chat_queues[chat_id].qsize()
+        warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {qsize + 1} 个任务)..."
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, warning_msg))
+        await chat_queues[chat_id].put(task_payload)
+        return
+    else:
+        # No worker running, put in queue and start worker
+        await chat_queues[chat_id].put(task_payload)
+        chat_workers[chat_id] = asyncio.create_task(process_chat_queue(chat_id))
+        return
+
 
 def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     message_id = data.event.message.message_id
