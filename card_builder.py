@@ -240,3 +240,31 @@ class CardBuilder:
             },
             "elements": elements
         }
+
+    @staticmethod
+    def build_update_card(current_version, latest_version, changelog):
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "orange",
+                "title": {"content": "🔄 系统 OTA 升级提醒", "tag": "plain_text"}
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**当前版本**：`{current_version}`\n**发现新版本**：`{latest_version}`\n\n**更新日志 (Changelog)**：\n{changelog}\n\n<font color='red'>⚠️ 警告：执行升级将进行强制同步，会覆盖本地所有未提交的代码修改（您的 .env 配置和本地数据库不受影响）。</font>"
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "确认并执行升级"},
+                            "type": "primary",
+                            "value": {"action": "user_choice", "choice": "/update confirm", "label": "确认并执行升级"}
+                        }
+                    ]
+                },
+                CardBuilder._create_footer()
+            ]
+        }

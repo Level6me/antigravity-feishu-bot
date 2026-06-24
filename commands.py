@@ -58,9 +58,70 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         if not memories:
             reply_text = "📭 当前没有记录您的任何长时偏好。您可以通过 `/remember <偏好>` 来添加。"
         else:
-            reply_text = "🧠 **当前已永久记住您的以下偏好**：\n" + "\n".join([f"- {m}" for m in memories])
+            memory_list = "\n".join([f"- {m}" for m in memories])
+            reply_text = f"🧠 **您的长时偏好记录：**\n{memory_list}\n\n*(如需清空请发送 `/clear memory`)*"
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
+        
+    elif user_text == "/update":
+        reply_text = "🔍 正在从云端拉取最新版本信息，请稍候..."
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        
+        try:
+            # Fetch latest from github
+            subprocess.run(["git", "fetch", "github", "main"], capture_output=True, text=True, check=True)
+            
+            # Get current version
+            local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+            
+            # Get remote version
+            remote_hash = subprocess.run(["git", "rev-parse", "--short", "github/main"], capture_output=True, text=True).stdout.strip()
+            
+            if local_hash == remote_hash:
+                reply_text = f"✅ 当前已是最新版本 (Build: {local_hash})，无需更新。"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            else:
+                # Get changelog
+                changelog_cmd = ["git", "log", f"{local_hash}..github/main", "--pretty=format:- %s"]
+                changelog = subprocess.run(changelog_cmd, capture_output=True, text=True).stdout.strip()
+                if not changelog:
+                    changelog = "- 未知更新"
+                
+                # Send update card
+                update_card = CardBuilder.build_update_card(f"Build: {local_hash}", f"Build: {remote_hash}", changelog)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, update_card))
+                
+        except Exception as e:
+            log.error(f"Failed to check for updates: {e}")
+            error_text = f"❌ 检查更新失败: {e}"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, error_text))
+            
+        return True, user_text
+        
+    elif user_text == "/update confirm":
+        reply_text = "⬇️ 正在执行核心系统升级，请勿中断..."
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        
+        try:
+            # Hard reset to github/main
+            subprocess.run(["git", "reset", "--hard", "github/main"], capture_output=True, text=True, check=True)
+            
+            # Install new requirements if any
+            pip_cmd = ["venv/bin/pip", "install", "-r", "requirements.txt"]
+            subprocess.run(pip_cmd, capture_output=True, text=True)
+            
+            reply_text = "🔄 系统升级就绪，正在触发自启进程，预计 3 秒后重新上线..."
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            
+            # Restart via pm2 in background without waiting
+            subprocess.Popen(["pm2", "restart", "feishu-bot"])
+        except Exception as e:
+            log.error(f"Failed to apply update: {e}")
+            error_text = f"❌ 升级过程中出现错误: {e}"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, error_text))
+            
+        return True, user_text
+
         
     elif user_text.startswith("/forget"):
         await save_profile_async(chat_id, [])
