@@ -51,11 +51,23 @@
 * **Node.js 和 npm** (仅用于安装 PM2：`npm install -g pm2`)
 * **Antigravity CLI**：确保底层 AI 引擎 `antigravity` 已正确安装在系统中。
 
-### 2. 下载与依赖配置
+### 2. 一键交互式部署 (推荐)
+本项目提供了一个交互式的安装脚本，可以自动帮你配置环境变量、创建虚拟环境、安装依赖并启动 PM2 守护进程。
+
+在项目根目录下运行：
+```bash
+chmod +x install.sh
+./install.sh
+```
+执行后，只需根据提示输入你的 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 即可全自动完成上线。
+
+### 3. 手动部署 (可选)
+如果你希望手动控制部署流程，请按照以下步骤：
+
+**1) 下载与依赖配置**
 建议使用 Python 虚拟环境（venv）进行隔离部署：
 ```bash
 # 进入项目目录并创建虚拟环境
-cd antigravity-feishu-bot
 python3 -m venv venv
 
 # 激活虚拟环境 (Mac/Linux)
@@ -65,19 +77,14 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. 环境变量配置
-在项目根目录复制环境变量模板并填入飞书开发者后台的真实凭证：
+**2) 环境变量配置**
 ```bash
 cp .env.example .env
 ```
-编辑 `.env` 文件：
-```env
-FEISHU_APP_ID=cli_xxxxxxxxxxxx
-FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
+编辑 `.env` 文件填入飞书开发者后台的真实凭证。
 > **注意**：请确保飞书应用已开启“WebSocket 建立长连接”权限，并开通了所有必需的事件与消息权限（如 `im:message`）。
 
-### 4. 启动后台服务
+**3) 启动后台服务**
 使用 PM2 启动机器人即可让其在后台稳定运行：
 ```bash
 # 启动进程（请指定虚拟环境中的 python3 执行）
