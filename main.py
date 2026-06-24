@@ -256,6 +256,16 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     ]
     if not is_new_conversation:
         cmd_args.extend(["--conversation", session_data["conversation"]])
+        
+    target_transcript_path = None
+    initial_transcript_size = 0
+    if not is_new_conversation:
+        conv_id = session_data["conversation"]
+        path = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
+        if os.path.exists(path):
+            target_transcript_path = path
+            initial_transcript_size = os.path.getsize(path)
+
     process = await asyncio.create_subprocess_exec(
         *cmd_args,
         stdout=asyncio.subprocess.PIPE,
@@ -341,10 +351,12 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         else:
             # Check for tool execution updates
             if not accumulated_text.strip() and time.time() - last_patch_time >= 1.0:
-                transcript_path = await loop.run_in_executor(None, get_latest_transcript_file)
-                if transcript_path:
+                transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
+                if transcript_path and os.path.exists(transcript_path):
                     try:
                         with open(transcript_path, 'r', encoding='utf-8') as f:
+                            if transcript_path == target_transcript_path:
+                                f.seek(initial_transcript_size)
                             lines = f.readlines()
                             if lines:
                                 for line in reversed(lines):
