@@ -7,9 +7,11 @@ from lark_oapi.api.im.v1 import (
 )
 from config import APP_ID, APP_SECRET
 from logger import log
+from utils import with_retry
 
 api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
 
+@with_retry()
 def set_emoji_sdk(message_id, emoji_type):
     try:
         req = CreateMessageReactionRequest.builder() \
@@ -28,6 +30,7 @@ def set_emoji_sdk(message_id, emoji_type):
         log.error(f"[set_emoji_sdk] Error: {e}")
         return None
 
+@with_retry()
 def delete_emoji_sdk(message_id, reaction_id):
     if not reaction_id:
         return
@@ -43,6 +46,7 @@ def delete_emoji_sdk(message_id, reaction_id):
         log.error(f"[delete_emoji_sdk] Error: {e}")
 
 
+@with_retry()
 def send_reply_sdk(message_id, reply_text):
     req = ReplyMessageRequest.builder() \
         .message_id(message_id) \
@@ -55,6 +59,7 @@ def send_reply_sdk(message_id, reply_text):
     if resp.code != 0:
         log.error(f"[send_reply_sdk] Failed: {resp.msg}")
 
+@with_retry()
 def send_interactive_card_sdk(message_id, card_content):
     req = ReplyMessageRequest.builder() \
         .message_id(message_id) \
@@ -72,6 +77,7 @@ def send_interactive_card_sdk(message_id, card_content):
     except:
         return None
 
+@with_retry()
 def patch_interactive_card_sdk(message_id, card_content):
     req = PatchMessageRequest.builder() \
         .message_id(message_id) \
@@ -83,6 +89,7 @@ def patch_interactive_card_sdk(message_id, card_content):
     if resp.code != 0:
         log.error(f"[patch_interactive_card_sdk] Failed: {resp.msg}")
 
+@with_retry(max_retries=5, initial_delay=2.0)
 def download_message_resource_sdk(message_id, file_key, resource_type, output_path):
     """
     Downloads a message resource (image, file, audio, media) using the official SDK.
