@@ -78,8 +78,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             remote_hash = subprocess.run(["git", "rev-parse", "--short", "github/main"], capture_output=True, text=True).stdout.strip()
             
             if local_hash == remote_hash:
-                reply_text = f"✅ 当前已是最新版本 (Build: {local_hash})，无需更新。"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+                no_update_card = CardBuilder.build_no_update_card(f"Build: {local_hash}")
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, no_update_card))
             else:
                 # Get changelog
                 changelog_cmd = ["git", "log", f"{local_hash}..github/main", "--pretty=format:- %s"]

@@ -242,6 +242,23 @@ class CardBuilder:
         }
 
     @staticmethod
+    def build_no_update_card(current_version):
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "green",
+                "title": {"content": "✅ 系统已是最新版本", "tag": "plain_text"}
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**当前运行版本**：`{current_version}`\n\n🎉 太棒了！经过全网云端探测，您的机器人的核心引擎已经是最新形态，无需任何更新操作。"
+                },
+                CardBuilder._create_footer()
+            ]
+        }
+
+    @staticmethod
     def build_update_card(current_version, latest_version, changelog):
         return {
             "config": {"wide_screen_mode": True},
