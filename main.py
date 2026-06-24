@@ -18,6 +18,8 @@ from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, p
 from commands import handle_slash_command
 from logger import log
 from card_builder import CardBuilder
+from executor import execute_antigravity
+from garbage_collection import garbage_collector
 import time
 
 main_loop = None
@@ -141,15 +143,16 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             image_key = content_raw[8:-1]
         
         if image_key:
-            output_filename = f"img_{image_key}.jpg"
+            os.makedirs("downloads", exist_ok=True)
+            output_filename = f"downloads/img_{image_key}.jpg"
             
-            dl_card = CardBuilder.build_download_indicator(output_filename, "图片")
+            dl_card = CardBuilder.build_download_indicator(os.path.basename(output_filename), "图片")
             bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
             
             output_path = os.path.abspath(output_filename)
             success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
             
-            downloaded_file_name = output_filename
+            downloaded_file_name = os.path.basename(output_filename)
             download_success = success
             user_text = f"请查看这张图片并做出回应。图片路径: {output_path}"
         else:
@@ -167,7 +170,8 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         user_text = " ".join(texts)
         if image_keys:
             image_key = image_keys[0]
-            output_filename = f"img_{image_key}.jpg"
+            os.makedirs("downloads", exist_ok=True)
+            output_filename = f"downloads/img_{image_key}.jpg"
             
             dl_card = CardBuilder.build_download_indicator("图片内容")
             bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
@@ -175,7 +179,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             output_path = os.path.abspath(output_filename)
             success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
             
-            downloaded_file_name = output_filename
+            downloaded_file_name = os.path.basename(output_filename)
             download_success = success
             user_text += f"\n[附加图片路径: {output_path}]"
     elif message_type in ["file", "audio", "media"]:
@@ -191,16 +195,17 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 else:
                     file_name = f"file_{file_key}"
             
-            # Force .mp4 for media to fix Gemini API unsupported mime type
             if message_type == "media" and not file_name.lower().endswith(".mp4"):
                 file_name = file_key + ".mp4"
             if message_type == "audio" and "." not in file_name:
                 file_name = file_key + ".ogg"
             
+            os.makedirs("downloads", exist_ok=True)
+            output_filename = os.path.join("downloads", file_name)
             dl_card = CardBuilder.build_download_indicator(file_name, message_type)
             bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
 
-            output_path = os.path.abspath(file_name)
+            output_path = os.path.abspath(output_filename)
             success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, file_key, "file", output_path))
             
             downloaded_file_name = file_name
@@ -220,19 +225,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     if not user_text:
         return
 
-    # Sessions are already loaded and slash commands already handled at the top
-    
-    log.info(f"[User {chat_id}]: {user_text}")
-
-    save_sessions(sessions)
-
-    r_id = await set_emoji(message_id, "StatusReading")
-    await asyncio.sleep(1)
-    await delete_emoji(message_id, r_id)
-
-    # Spinner removed; rely on typing indicator stream
-
-    # Inject protocol into prompt
+    # Sessions ar    # Inject protocol into prompt
     system_instruction = "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). Any English text in the response must be limited to code syntax or technical names only. If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. NEVER ask normal text multi-choice questions. ONLY output plain text choices, avoid complex formatting inside choices.]\n\n"
     
     # Load long-term memory if this is a new conversation
@@ -245,216 +238,14 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             memory_block = "\n".join([f"- {m}" for m in memories])
             final_prompt = f"[System Context: Please strictly follow the user's permanent preferences below:]\n{memory_block}\n\n[User's Message:]\n{user_text}"
             
-    log_file_path = f"agy_log_{uuid.uuid4().hex}.txt"
-    cmd_args = [
-        ANTIGRAVITY_BIN, 
-        "-p", system_instruction + final_prompt, 
-        "--dangerously-skip-permissions", 
-        "--model", session_data["model"],
-        "--print-timeout", "60m",
-        "--log-file", log_file_path
-    ]
-    if not is_new_conversation:
-        cmd_args.extend(["--conversation", session_data["conversation"]])
-        
-    target_transcript_path = None
-    initial_transcript_size = 0
-    if not is_new_conversation:
-        conv_id = session_data["conversation"]
-        path = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
-        if os.path.exists(path):
-            target_transcript_path = path
-            initial_transcript_size = os.path.getsize(path)
-
-    process = await asyncio.create_subprocess_exec(
-        *cmd_args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=subprocess.DEVNULL
-    )
-    running_processes[chat_id] = process
-    
-    init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text)
-    if bot_reply_msg_id:
-        await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card))
-    else:
-        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, init_card))
-    
-    accumulated_text = ""
-    stderr_text = ""
-    
-    async def read_stdout():
-        nonlocal accumulated_text
-        while True:
-            chunk = await process.stdout.read(64)
-            if not chunk:
-                break
-            accumulated_text += chunk.decode(errors='ignore')
-            
-    async def read_stderr():
-        nonlocal stderr_text
-        while True:
-            chunk = await process.stderr.read(64)
-            if not chunk:
-                break
-            stderr_text += chunk.decode(errors='ignore')
-
-    def get_latest_transcript_file():
-        # Try from session first
-        if session_data.get("conversation"):
-            conv_id = session_data["conversation"]
-            path = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
-            if os.path.exists(path):
-                return path
-        
-        # Fallback to the newest folder
-        base_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain/")
-        if not os.path.exists(base_dir):
-            return None
-        try:
-            dirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
-            if not dirs:
-                return None
-            newest_dir = max(dirs, key=os.path.getmtime)
-            path = os.path.join(newest_dir, ".system_generated/logs/transcript.jsonl")
-            if os.path.exists(path):
-                return path
-        except Exception:
-            pass
-        return None
-
-    stdout_task = asyncio.create_task(read_stdout())
-    stderr_task = asyncio.create_task(read_stderr())
-    
-    last_update_text = ""
-    last_tool_action = ""
-    last_patch_time = time.time()
-    process_start_time = time.time()
-    
-    while process.returncode is None:
-        await asyncio.sleep(0.5)
-        if accumulated_text != last_update_text:
-            if time.time() - last_patch_time >= 1.0:
-                last_update_text = accumulated_text
-                last_patch_time = time.time()
-                clean_text = re.sub(r'\[CHOICE_CARD\].*', '', accumulated_text, flags=re.DOTALL)
-                clean_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', clean_text, flags=re.DOTALL)
-                clean_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', clean_text)
-                if clean_text.strip():
-                    patch_card = CardBuilder.build_ai_response(
-                        clean_text.strip(),
-                        current_model=session_data.get('model', 'Default'),
-                        current_role=session_data.get('role', '无'),
-                        is_streaming=True
-                    )
-                    if bot_reply_msg_id:
-                        await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, patch_card))
-        else:
-            # Check for tool execution updates
-            if not accumulated_text.strip() and time.time() - last_patch_time >= 1.0:
-                transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
-                action = ""
-                if transcript_path and os.path.exists(transcript_path):
-                    try:
-                        with open(transcript_path, 'r', encoding='utf-8') as f:
-                            if transcript_path == target_transcript_path:
-                                f.seek(initial_transcript_size)
-                            lines = f.readlines()
-                            if lines:
-                                for line in reversed(lines):
-                                    data = json.loads(line)
-                                    
-                                    # Stop scanning if we hit the boundary of the current turn
-                                    if data.get("type") == "USER_INPUT":
-                                        break
-                                        
-                                    if "tool_calls" in data and len(data["tool_calls"]) > 0:
-                                        action = data["tool_calls"][-1].get("args", {}).get("toolAction", "").replace('"', '').strip()
-                                        break
-                    except Exception:
-                        pass
-                
-                think_seconds = int(time.time() - process_start_time)
-                if action:
-                    last_tool_action = action
-                    indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success, think_seconds)
-                else:
-                    indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
-                
-                last_patch_time = time.time()
-                if bot_reply_msg_id:
-                    await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
-                        
-        if stdout_task.done() and stderr_task.done():
-            break
-
-    await process.wait()
-    if chat_id in running_processes:
-        del running_processes[chat_id]
-    await stdout_task
-    await stderr_task
-    
-    # Spinner cancellation removed
-    
-    reply_text = accumulated_text.strip()
-    reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
-    reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
-    
-    # Auto-upload extracted files and images
-    await asyncio.get_running_loop().run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client))
-    
-    # Parse log file for conversation ID
-    if os.path.exists(log_file_path):
-        with open(log_file_path, "r") as f:
-            log_content = f.read()
-        match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
-        if match:
-            new_conv_id = match.group(1)
-            if session_data.get("conversation") != new_conv_id:
-                sessions[chat_id]["conversation"] = new_conv_id
-                save_sessions(sessions)
-        os.remove(log_file_path)
-
-    
-    is_error = False
-    if not reply_text:
-        reply_text = stderr_text.strip() or "Sorry, I couldn't generate a response."
-        is_error = True
-
-    # Parse for [CHOICE_CARD]
-    choice_card_data = None
-    if not is_error:
-        choice_pattern = re.compile(r'\[CHOICE_CARD\]\s*Q:\s*(.*?)\n(.*?)\s*\[/CHOICE_CARD\]', re.DOTALL | re.IGNORECASE)
-        match = choice_pattern.search(reply_text)
-        if match:
-            question = match.group(1).strip()
-            options_text = match.group(2).strip()
-            options = [opt.strip()[1:].strip() if opt.strip().startswith('-') else opt.strip() for opt in options_text.split('\n') if opt.strip()]
-            
-            # Remove the block from the text reply
-            reply_text = choice_pattern.sub('', reply_text).strip()
-            choice_card_data = {
-                "question": question,
-                "options": options
-            }
-
-    if reply_text:
-        log.info(f"[Agent text]: {reply_text[:100]}...")
-
-    final_card = CardBuilder.build_ai_response(
-        reply_text, 
-        choice_card_data=choice_card_data,
-        current_model=session_data.get('model', 'Default'),
-        current_role=session_data.get('role', '无'),
-        is_error=is_error,
-        is_streaming=False
+    # Delegate execution to executor
+    # Delegate execution to executor
+    is_error = await execute_antigravity(
+        chat_id, user_text, message_id, bot_reply_msg_id, session_data, sessions, 
+        is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
+        download_success, running_processes
     )
     
-    if bot_reply_msg_id:
-        await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card))
-    else:
-        await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, final_card))
-
     if is_error:
         await set_emoji(message_id, "CrossMark")
     else:
@@ -516,6 +307,9 @@ async def main():
     global main_loop
     main_loop = asyncio.get_running_loop()
     log.info("Starting Lark WS Client...")
+    
+    # Start background GC task
+    gc_task = asyncio.create_task(garbage_collector())
     
     event_handler = lark.EventDispatcherHandler.builder("", "") \
         .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1) \
