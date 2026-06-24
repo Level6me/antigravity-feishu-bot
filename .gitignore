@@ -42,3 +42,4 @@ GiteeClient/
 *.err
 *.out
 *.txt
+github_deploy_key*
