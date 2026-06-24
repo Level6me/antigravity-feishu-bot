@@ -146,6 +146,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 🔹 `/forget` : 清除机器人的长时记忆偏好
 🔹 `/clear` : 清空当前对话的上下文记忆，重新开始
 🔹 `/stop` : 紧急刹车！强制中止正在后台生成的耗时任务
+🔹 `/update` : 检查并获取云端最新版本的机器人引擎核心
 🔹 `/help` : 显示此帮助菜单
 
 *✨ 隐藏黑科技提示：*
