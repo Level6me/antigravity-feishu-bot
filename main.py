@@ -353,6 +353,24 @@ async def main():
     main_loop = asyncio.get_running_loop()
     log.info("Starting Lark WS Client...")
     
+    # Send post-update notification if applicable
+    pending_file = os.path.join(BASE_DIR, ".update_pending.json")
+    if os.path.exists(pending_file):
+        try:
+            with open(pending_file, "r") as f:
+                data = json.load(f)
+            os.remove(pending_file)
+            msg_id = data.get("message_id")
+            if msg_id:
+                from commands import get_version_string
+                v_str = get_version_string("HEAD")
+                text = f"✨ 升级完毕！系统已成功重新上线。\n当前运行版本：{v_str}"
+                # Send the notification in a background task so it doesn't block startup
+                asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(msg_id, text))
+                log.info(f"Sent post-update notification to {msg_id}")
+        except Exception as e:
+            log.error(f"Failed to process post-update notification: {e}")
+            
     # Start background GC task
     gc_task = asyncio.create_task(garbage_collector())
     
