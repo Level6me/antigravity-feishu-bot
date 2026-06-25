@@ -15,6 +15,7 @@ def get_db():
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
+    cursor.execute('PRAGMA journal_mode=WAL')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chat_sessions (
             chat_id TEXT PRIMARY KEY,
