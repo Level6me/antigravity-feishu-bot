@@ -125,22 +125,22 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         
         try:
-            # Fetch latest from github
-            subprocess.run(["git", "fetch", "github", "main"], capture_output=True, text=True, check=True)
+            # Fetch latest from origin
+            subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True, check=True)
             
             # Get hashes for comparison
             local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-            remote_hash = subprocess.run(["git", "rev-parse", "--short", "github/main"], capture_output=True, text=True).stdout.strip()
+            remote_hash = subprocess.run(["git", "rev-parse", "--short", "origin/main"], capture_output=True, text=True).stdout.strip()
             
             local_version_str = get_version_string("HEAD")
-            remote_version_str = get_version_string("github/main")
+            remote_version_str = get_version_string("origin/main")
             
             if local_hash == remote_hash:
                 no_update_card = CardBuilder.build_no_update_card(local_version_str)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, no_update_card))
             else:
                 # Get changelog
-                changelog_cmd = ["git", "log", f"{local_hash}..github/main", "--pretty=format:- %s"]
+                changelog_cmd = ["git", "log", f"{local_hash}..origin/main", "--pretty=format:- %s"]
                 changelog = subprocess.run(changelog_cmd, capture_output=True, text=True).stdout.strip()
                 if not changelog:
                     changelog = "- 未知更新"
@@ -161,8 +161,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         
         try:
-            # Hard reset to github/main
-            subprocess.run(["git", "reset", "--hard", "github/main"], capture_output=True, text=True, check=True)
+            # Hard reset to origin/main
+            subprocess.run(["git", "reset", "--hard", "origin/main"], capture_output=True, text=True, check=True)
             
             # Install new requirements if any
             pip_cmd = ["venv/bin/pip", "install", "-r", "requirements.txt"]
