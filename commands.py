@@ -109,6 +109,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
         
+    elif user_text == "/ping":
+        reply_text = "🏓 Pong! 核心系统运行正常，网络连接畅通。"
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        return True, user_text
+        
     elif user_text == "/update":
         reply_text = "🔍 正在从云端拉取最新版本信息，请稍候..."
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
