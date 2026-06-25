@@ -42,8 +42,12 @@ def find_antigravity_bin():
         if os.path.exists(c):
             return c
             
-    # Fallback
-    return "agy"
-
 ANTIGRAVITY_BIN = find_antigravity_bin()
+
+# --- Versioning Configuration ---
+# To upgrade the major/minor version (e.g. to v1.1.x), change BASE_VERSION_PREFIX to "v1.1." 
+# and update VERSION_START_COMMIT to the current git commit count minus 1.
+BASE_VERSION_PREFIX = "v1.0."
+VERSION_START_COMMIT = 62  # Used to calculate patch number (commit_count - start_commit)
+
 

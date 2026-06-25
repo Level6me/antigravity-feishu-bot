@@ -5,7 +5,17 @@ from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
 from card_builder import CardBuilder
-from config import ANTIGRAVITY_BIN
+from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT
+
+def get_version_string(commit_ref="HEAD"):
+    try:
+        count_str = subprocess.run(["git", "rev-list", "--count", commit_ref], capture_output=True, text=True).stdout.strip()
+        commit_count = int(count_str)
+        patch = max(1, commit_count - VERSION_START_COMMIT)
+        hash_str = subprocess.run(["git", "rev-parse", "--short", commit_ref], capture_output=True, text=True).stdout.strip()
+        return f"{BASE_VERSION_PREFIX}{patch} (Build: {hash_str})"
+    except Exception:
+        return f"Unknown (Build: error)"
 
 async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues):
     """
@@ -107,14 +117,15 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             # Fetch latest from github
             subprocess.run(["git", "fetch", "github", "main"], capture_output=True, text=True, check=True)
             
-            # Get current version
+            # Get hashes for comparison
             local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-            
-            # Get remote version
             remote_hash = subprocess.run(["git", "rev-parse", "--short", "github/main"], capture_output=True, text=True).stdout.strip()
             
+            local_version_str = get_version_string("HEAD")
+            remote_version_str = get_version_string("github/main")
+            
             if local_hash == remote_hash:
-                no_update_card = CardBuilder.build_no_update_card(f"Build: {local_hash}")
+                no_update_card = CardBuilder.build_no_update_card(local_version_str)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, no_update_card))
             else:
                 # Get changelog
@@ -124,7 +135,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                     changelog = "- 未知更新"
                 
                 # Send update card
-                update_card = CardBuilder.build_update_card(f"Build: {local_hash}", f"Build: {remote_hash}", changelog)
+                update_card = CardBuilder.build_update_card(local_version_str, remote_version_str, changelog)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, update_card))
                 
         except Exception as e:
