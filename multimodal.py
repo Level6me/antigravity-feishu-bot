@@ -30,10 +30,11 @@ def extract_and_upload_resources(text, message_id, api_client):
     for img_path in set(images):
         if os.path.exists(img_path):
             try:
-                req = lark.api.im.v1.CreateImageRequest.builder().request_body(
-                    lark.api.im.v1.CreateImageRequestBody.builder().image_type("message").image(open(img_path, "rb")).build()
-                ).build()
-                resp = api_client.im.v1.image.create(req)
+                with open(img_path, "rb") as f:
+                    req = lark.api.im.v1.CreateImageRequest.builder().request_body(
+                        lark.api.im.v1.CreateImageRequestBody.builder().image_type("message").image(f).build()
+                    ).build()
+                    resp = api_client.im.v1.image.create(req)
                 if resp.code == 0:
                     img_key = json.loads(resp.raw.content).get('data', {}).get('image_key')
                     if img_key:
@@ -55,10 +56,11 @@ def extract_and_upload_resources(text, message_id, api_client):
 
         if os.path.exists(file_path):
             try:
-                req = lark.api.im.v1.CreateFileRequest.builder().request_body(
-                    lark.api.im.v1.CreateFileRequestBody.builder().file_type("stream").file_name(os.path.basename(file_path)).file(open(file_path, "rb")).build()
-                ).build()
-                resp = api_client.im.v1.file.create(req)
+                with open(file_path, "rb") as f:
+                    req = lark.api.im.v1.CreateFileRequest.builder().request_body(
+                        lark.api.im.v1.CreateFileRequestBody.builder().file_type("stream").file_name(os.path.basename(file_path)).file(f).build()
+                    ).build()
+                    resp = api_client.im.v1.file.create(req)
                 if resp.code == 0:
                     file_key = json.loads(resp.raw.content).get('data', {}).get('file_key')
                     if file_key:

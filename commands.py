@@ -65,7 +65,13 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         if chat_id in running_processes or cleared:
             try:
                 if chat_id in running_processes:
-                    running_processes[chat_id].kill()
+                    import os
+                    import signal
+                    process = running_processes[chat_id]
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    except:
+                        process.kill()
             except:
                 pass
             reply_text = "🛑 当前任务已被紧急叫停，排队中的任务也已清空！"

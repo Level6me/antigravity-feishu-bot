@@ -45,7 +45,8 @@ async def execute_antigravity(
         *cmd_args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        stdin=subprocess.DEVNULL
+        stdin=subprocess.DEVNULL,
+        preexec_fn=os.setsid
     )
     running_processes[chat_id] = process
     
@@ -60,19 +61,25 @@ async def execute_antigravity(
     
     async def read_stdout():
         nonlocal accumulated_text
+        import codecs
+        decoder = codecs.getincrementaldecoder('utf-8')()
         while True:
             chunk = await process.stdout.read(64)
             if not chunk:
                 break
-            accumulated_text += chunk.decode(errors='ignore')
+            accumulated_text += decoder.decode(chunk)
+        accumulated_text += decoder.decode(b'', final=True)
             
     async def read_stderr():
         nonlocal stderr_text
+        import codecs
+        decoder = codecs.getincrementaldecoder('utf-8')()
         while True:
             chunk = await process.stderr.read(64)
             if not chunk:
                 break
-            stderr_text += chunk.decode(errors='ignore')
+            stderr_text += decoder.decode(chunk)
+        stderr_text += decoder.decode(b'', final=True)
 
     def get_latest_transcript_file():
         if session_data.get("conversation"):
@@ -157,7 +164,18 @@ async def execute_antigravity(
         if stdout_task.done() and stderr_task.done():
             break
 
-    await process.wait()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=3600.0)
+    except asyncio.TimeoutError:
+        log.error("Process execution timed out, terminating process group...")
+        import signal
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
     if chat_id in running_processes:
         del running_processes[chat_id]
     await stdout_task

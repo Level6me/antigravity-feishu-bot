@@ -7,6 +7,11 @@ import re
 import sys
 import signal
 
+# Add local bin paths to PATH
+home = os.path.expanduser("~")
+os.environ["PATH"] += os.pathsep + os.path.join(home, ".npm-global/bin") + os.pathsep + os.path.join(home, ".local/bin")
+
+
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger, P2CardActionTriggerResponse
@@ -309,14 +314,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     if action_value.get("action") == "switch_model":
         new_model = action_value.get("model")
         
-        sessions = load_sessions()
-        if chat_id not in sessions:
-            sessions[chat_id] = {"model": new_model}
-        else:
-            sessions[chat_id]["model"] = new_model
-        save_sessions(sessions)
+        if main_loop and main_loop.is_running():
+            async def do_switch():
+                session_data = await get_session_async(chat_id)
+                session_data["model"] = new_model
+                await save_session_async(chat_id, session_data)
+                log.info(f"Switched model to {new_model} in chat {chat_id}")
+            asyncio.run_coroutine_threadsafe(do_switch(), main_loop)
 
-        log.info(f"Switched model to {new_model} in chat {chat_id}")
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"模型已成功切换为 {new_model}！"}})
 
     elif action_value.get("action") == "user_choice":
@@ -370,9 +375,12 @@ def cleanup(signum, frame):
     log.warning("Gracefully shutting down... killing zombie processes")
     for process in running_processes.values():
         try:
-            process.kill()
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         except:
-            pass
+            try:
+                process.kill()
+            except:
+                pass
     sys.exit(0)
 
 if __name__ == "__main__":
