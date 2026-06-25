@@ -362,16 +362,17 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
         if main_loop and main_loop.is_running():
             async def notify_and_process():
-                # Notify the user visually in the chat
-                user_display_text = f"✅ **您已选择：{label}**\n*(选项内容已发送给 AI 进行下一步处理...)*"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, user_display_text))
-                
-                # Send the choice to the LLM backend
                 if choice.startswith("/"):
-                    simulated_content = json.dumps({"text": choice})
+                    # For slash commands, directly call the command handler
+                    # Use card_message_id as the reply target
+                    session_data = await get_session_async(chat_id)
+                    await handle_slash_command(choice, card_message_id, chat_id, session_data, running_processes, chat_queues)
                 else:
+                    # For regular choices, notify and send to LLM
+                    user_display_text = f"✅ **您已选择：{label}**\n*(选项内容已发送给 AI 进行下一步处理...)*"
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, user_display_text))
                     simulated_content = json.dumps({"text": f"我的选择是：{choice}"})
-                await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
+                    await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
 
             asyncio.run_coroutine_threadsafe(notify_and_process(), main_loop)
             
