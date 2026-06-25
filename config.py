@@ -50,4 +50,9 @@ ANTIGRAVITY_BIN = find_antigravity_bin()
 BASE_VERSION_PREFIX = "v1.0."
 VERSION_START_COMMIT = 62  # Used to calculate patch number (commit_count - start_commit)
 
+# --- Whitelist & Permission Configuration ---
+ALLOWED_USERS = [uid.strip() for uid in os.getenv("ALLOWED_USERS", "").split(",") if uid.strip()]
+ALLOWED_CHATS = [cid.strip() for cid in os.getenv("ALLOWED_CHATS", "").split(",") if cid.strip()]
+DANGEROUSLY_SKIP_PERMISSIONS = os.getenv("DANGEROUSLY_SKIP_PERMISSIONS", "true").lower() == "true"
+
 

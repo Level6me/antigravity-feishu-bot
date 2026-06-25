@@ -16,7 +16,7 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger, P2CardActionTriggerResponse
 
-from config import APP_ID, APP_SECRET, SESSION_FILE, PROFILE_FILE, ANTIGRAVITY_BIN
+from config import APP_ID, APP_SECRET, SESSION_FILE, PROFILE_FILE, ANTIGRAVITY_BIN, ALLOWED_USERS, ALLOWED_CHATS
 from database import get_session_async, get_profile_async
 from multimodal import extract_and_upload_resources
 from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, patch_interactive_card_sdk, download_message_resource_sdk, set_emoji_sdk, delete_emoji_sdk
@@ -127,6 +127,9 @@ async def _process_single_task(chat_id, task):
                 file_name = file_key + ".mp4"
             if message_type == "audio" and "." not in file_name:
                 file_name = file_key + ".ogg"
+            
+            # Purify file_name to prevent directory traversal
+            file_name = os.path.basename(file_name)
             
             os.makedirs("downloads", exist_ok=True)
             output_filename = os.path.join("downloads", file_name)
@@ -299,6 +302,20 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     message_type = data.event.message.message_type
     content_raw = data.event.message.content
     
+    # Check whitelist if configured
+    is_allowed = True
+    if ALLOWED_USERS or ALLOWED_CHATS:
+        is_allowed = False
+        sender_id = data.event.sender.sender_id.open_id if data.event.sender and data.event.sender.sender_id else None
+        if ALLOWED_USERS and sender_id in ALLOWED_USERS:
+            is_allowed = True
+        if ALLOWED_CHATS and chat_id in ALLOWED_CHATS:
+            is_allowed = True
+            
+    if not is_allowed:
+        log.warning(f"Unauthorized message event ignored. chat_id: {chat_id}, sender_id: {sender_id if 'sender_id' in locals() else None}")
+        return
+        
     if main_loop and main_loop.is_running():
         asyncio.run_coroutine_threadsafe(handle_message_async(message_id, chat_id, message_type, content_raw), main_loop)
     else:
@@ -311,6 +328,20 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     chat_id = data.event.context.open_chat_id
     card_message_id = data.event.context.open_message_id
     
+    # Check whitelist if configured
+    is_allowed = True
+    if ALLOWED_USERS or ALLOWED_CHATS:
+        is_allowed = False
+        sender_id = data.event.operator.operator_id.open_id if data.event.operator and data.event.operator.operator_id else None
+        if ALLOWED_USERS and sender_id in ALLOWED_USERS:
+            is_allowed = True
+        if ALLOWED_CHATS and chat_id in ALLOWED_CHATS:
+            is_allowed = True
+            
+    if not is_allowed:
+        log.warning(f"Unauthorized card action ignored. chat_id: {chat_id}, operator_id: {sender_id if 'sender_id' in locals() else None}")
+        return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "您无权操作此卡片！"}})
+        
     if action_value.get("action") == "switch_model":
         new_model = action_value.get("model")
         
