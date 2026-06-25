@@ -331,7 +331,10 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, user_display_text))
                 
                 # Send the choice to the LLM backend
-                simulated_content = json.dumps({"text": f"我的选择是：{choice}"})
+                if choice.startswith("/"):
+                    simulated_content = json.dumps({"text": choice})
+                else:
+                    simulated_content = json.dumps({"text": f"我的选择是：{choice}"})
                 await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
 
             asyncio.run_coroutine_threadsafe(notify_and_process(), main_loop)
