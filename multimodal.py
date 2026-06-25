@@ -10,6 +10,23 @@ def extract_and_upload_resources(text, message_id, api_client):
     images = re.findall(r'!\[.*?\]\((?:file://)?(' + home_dir_esc + r'/[^)]+)\)', text)
     files = re.findall(r'(?<!!)\[.*?\]\((?:file://)?(' + home_dir_esc + r'/[^)]+)\)', text)
     
+    workspace_dir = os.path.dirname(os.path.abspath(__file__))
+    safe_prefixes = [
+        os.path.join(workspace_dir, "downloads"),
+        os.path.join(workspace_dir, "scratch"),
+        os.path.expanduser("~/.gemini/antigravity-cli/brain")
+    ]
+    
+    def is_safe_path(path):
+        try:
+            abs_path = os.path.abspath(path)
+            for prefix in safe_prefixes:
+                if abs_path.startswith(os.path.abspath(prefix)):
+                    return True
+        except:
+            pass
+        return False
+    
     IGNORED_EXTENSIONS = {
         '.py', '.swift', '.js', '.ts', '.html', '.css', '.json', '.md', 
         '.java', '.cpp', '.c', '.h', '.m', '.txt', '.log', '.sh', '.rb', 
@@ -28,6 +45,9 @@ def extract_and_upload_resources(text, message_id, api_client):
                 log.error(f"[Multimodal] Error scanning md file: {e}")
     
     for img_path in set(images):
+        if not is_safe_path(img_path):
+            log.warning(f"[Multimodal] Blocked unsafe image upload path: {img_path}")
+            continue
         if os.path.exists(img_path):
             try:
                 with open(img_path, "rb") as f:
@@ -49,6 +69,9 @@ def extract_and_upload_resources(text, message_id, api_client):
                 log.error(f"[Multimodal] Error uploading image: {e}")
 
     for file_path in set(files):
+        if not is_safe_path(file_path):
+            log.warning(f"[Multimodal] Blocked unsafe file upload path: {file_path}")
+            continue
         _, ext = os.path.splitext(file_path)
         if ext.lower() in IGNORED_EXTENSIONS:
             log.info(f"[Multimodal] Skipping auto-upload for code/text file: {file_path}")

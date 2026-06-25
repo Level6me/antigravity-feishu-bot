@@ -5,7 +5,7 @@ import json
 import uuid
 import re
 import subprocess
-from config import ANTIGRAVITY_BIN
+from config import ANTIGRAVITY_BIN, DANGEROUSLY_SKIP_PERMISSIONS
 from logger import log
 from card_builder import CardBuilder
 from lark_client import patch_interactive_card_sdk, send_interactive_card_sdk, api_client
@@ -24,11 +24,13 @@ async def execute_antigravity(
     cmd_args = [
         ANTIGRAVITY_BIN, 
         "-p", system_instruction + final_prompt, 
-        "--dangerously-skip-permissions", 
         "--model", session_data["model"],
         "--print-timeout", "60m",
         "--log-file", log_file_path
     ]
+    if DANGEROUSLY_SKIP_PERMISSIONS:
+        cmd_args.append("--dangerously-skip-permissions")
+        
     if not is_new_conversation:
         cmd_args.extend(["--conversation", session_data["conversation"]])
         
