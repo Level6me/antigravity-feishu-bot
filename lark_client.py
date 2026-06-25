@@ -105,7 +105,11 @@ def download_message_resource_sdk(message_id, file_key, resource_type, output_pa
     if resp.code == 0:
         try:
             with open(output_path, "wb") as f:
-                f.write(resp.file.read())
+                while True:
+                    chunk = resp.file.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
             return True
         except Exception as e:
             log.error(f"[download_message_resource_sdk] Error saving file: {e}")
