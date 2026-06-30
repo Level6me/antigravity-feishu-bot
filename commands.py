@@ -17,7 +17,7 @@ def get_version_string(commit_ref="HEAD"):
     except Exception:
         return f"Unknown (Build: error)"
 
-async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues):
+async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers=None):
     """
     Parses and handles slash commands. Returns True if a command was handled, False otherwise.
     Returns (handled: bool, override_user_text: str)
@@ -62,18 +62,29 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 except asyncio.QueueEmpty:
                     break
                     
-        if chat_id in running_processes or cleared:
+        has_running = chat_id in running_processes
+        has_worker = chat_workers and chat_id in chat_workers and not chat_workers[chat_id].done()
+        
+        if has_running or has_worker or cleared:
+            # Kill the subprocess
             try:
                 if chat_id in running_processes:
                     import os
                     import signal
-                    process = running_processes[chat_id]
-                    try:
-                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    except:
-                        process.kill()
+                    process = running_processes.pop(chat_id, None)
+                    if process:
+                        try:
+                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        except:
+                            process.kill()
             except:
                 pass
+            
+            # Cancel the worker task to fully release the queue lock
+            if chat_workers and chat_id in chat_workers:
+                chat_workers[chat_id].cancel()
+                chat_workers.pop(chat_id, None)
+                
             reply_text = "🛑 当前任务已被紧急叫停，排队中的任务也已清空！"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         else:
