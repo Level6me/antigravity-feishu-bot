@@ -34,16 +34,21 @@ chat_workers = {}
 
 async def process_chat_queue(chat_id):
     queue = chat_queues[chat_id]
-    while not queue.empty():
-        task = await queue.get()
-        try:
-            await _process_single_task(chat_id, task)
-        except Exception as e:
-            log.error(f"Error processing queued task for {chat_id}: {e}")
-        finally:
-            queue.task_done()
-    if chat_id in chat_workers:
-        del chat_workers[chat_id]
+    try:
+        while not queue.empty():
+            task = await queue.get()
+            try:
+                await _process_single_task(chat_id, task)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error(f"Error processing queued task for {chat_id}: {e}")
+            finally:
+                queue.task_done()
+    except asyncio.CancelledError:
+        log.info(f"Chat worker for {chat_id} was cancelled by /stop")
+    finally:
+        chat_workers.pop(chat_id, None)
 
 async def _process_single_task(chat_id, task):
     message_id = task["message_id"]
@@ -265,7 +270,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
 
     # Handle slash commands first (this allows /stop to bypass the lock)
     if message_type == "text" and (raw_text.startswith("/") or session_data.get("pending_command")):
-        handled, override_text = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes, chat_queues)
+        handled, override_text = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
         if handled:
             return
         if override_text:
@@ -366,7 +371,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     # For slash commands, directly call the command handler
                     # Use card_message_id as the reply target
                     session_data = await get_session_async(chat_id)
-                    await handle_slash_command(choice, card_message_id, chat_id, session_data, running_processes, chat_queues)
+                    await handle_slash_command(choice, card_message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
                 else:
                     # For regular choices, notify and send to LLM
                     user_display_text = f"✅ **您已选择：{label}**\n*(选项内容已发送给 AI 进行下一步处理...)*"
