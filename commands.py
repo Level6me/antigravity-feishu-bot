@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 import uuid
+import os
 from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
@@ -236,11 +237,14 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
         else:
-            current = session_data.get("project", "默认")
-            session_data["pending_command"] = "project"
-            await save_session_async(chat_id, session_data)
-            reply_text = f"📂 当前处于项目：`{current}`\n\n请直接回复您希望切换的项目目录或项目名称（如 `/opt/keycloak-auth-manager`）："
-            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            start_path = session_data.get("project", "默认")
+            if start_path in ["默认", "Default"] or not os.path.exists(start_path):
+                start_path = "/home/jiang.guest"
+                if not os.path.exists(start_path):
+                    start_path = "/"
+            
+            browser_card = CardBuilder.build_dir_browser_card(start_path)
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, browser_card))
             return True, user_text
         
     elif user_text.startswith("/help"):
