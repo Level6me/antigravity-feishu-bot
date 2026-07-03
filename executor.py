@@ -31,6 +31,9 @@ async def execute_antigravity(
     if DANGEROUSLY_SKIP_PERMISSIONS:
         cmd_args.append("--dangerously-skip-permissions")
         
+    if session_data.get("project") and session_data["project"] not in ["默认", "Default"]:
+        cmd_args.extend(["--project", session_data["project"]])
+        
     if not is_new_conversation:
         cmd_args.extend(["--conversation", session_data["conversation"]])
         
@@ -127,6 +130,7 @@ async def execute_antigravity(
                         clean_text.strip(),
                         current_model=session_data.get('model', 'Default'),
                         current_role=session_data.get('role', '无'),
+                        current_project=session_data.get('project', '默认'),
                         is_streaming=True
                     )
                     if bot_reply_msg_id:
@@ -243,6 +247,7 @@ async def execute_antigravity(
         choice_card_data=choice_card_data,
         current_model=session_data.get('model', 'Default'),
         current_role=session_data.get('role', '无'),
+        current_project=session_data.get('project', '默认'),
         is_error=is_error,
         is_streaming=False
     )
