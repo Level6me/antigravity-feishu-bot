@@ -31,8 +31,14 @@ async def execute_antigravity(
     if DANGEROUSLY_SKIP_PERMISSIONS:
         cmd_args.append("--dangerously-skip-permissions")
         
+    cwd_dir = None
     if session_data.get("project") and session_data["project"] not in ["默认", "Default"]:
-        cmd_args.extend(["--project", session_data["project"]])
+        proj_val = session_data["project"]
+        if os.path.isdir(proj_val):
+            cwd_dir = proj_val
+            cmd_args.extend(["--add-dir", proj_val])
+        else:
+            cmd_args.extend(["--project", proj_val])
         
     if not is_new_conversation:
         cmd_args.extend(["--conversation", session_data["conversation"]])
@@ -51,7 +57,8 @@ async def execute_antigravity(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         stdin=subprocess.DEVNULL,
-        preexec_fn=os.setsid
+        preexec_fn=os.setsid,
+        cwd=cwd_dir
     )
     running_processes[chat_id] = process
     
