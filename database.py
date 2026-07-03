@@ -67,7 +67,7 @@ async def get_session_async(chat_id):
             row = await cursor.fetchone()
             if row:
                 return json.loads(row['data'])
-            return {"conversation": "", "model": "Gemini 3.5 Flash", "role": "无"}
+            return {"conversation": "", "model": "Gemini 3.5 Flash", "role": "无", "project": "默认"}
 
 async def save_session_async(chat_id, data):
     async with aiosqlite.connect(DB_FILE) as db:

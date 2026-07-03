@@ -155,7 +155,7 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_ai_response(reply_text, choice_card_data=None, current_model="Default", current_role="无", is_error=False, is_streaming=False):
+    def build_ai_response(reply_text, choice_card_data=None, current_model="Default", current_role="无", current_project="默认", is_error=False, is_streaming=False):
         elements = []
         
         # 1. Main Text
@@ -223,7 +223,7 @@ class CardBuilder:
         if not is_error:
             elements.append({
                 "tag": "markdown",
-                "content": f"<font color='grey'>🤖 模型: {current_model} | 🎭 角色: {current_role} | 💡 键入 /help 查看指令</font>"
+                "content": f"<font color='grey'>🤖 模型: {current_model} | 🎭 角色: {current_role} | 📂 项目: {current_project} | 💡 键入 /help 查看指令</font>"
             })
 
         # 4. Standard Footer
