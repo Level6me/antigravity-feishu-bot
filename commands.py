@@ -2,6 +2,7 @@ import asyncio
 import subprocess
 import uuid
 import os
+import signal
 from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
@@ -79,8 +80,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         if chat_id in running_processes or cleared:
             try:
                 if chat_id in running_processes:
-                    import os
-                    import signal
                     process = running_processes[chat_id]
                     try:
                         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
