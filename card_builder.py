@@ -298,25 +298,44 @@ class CardBuilder:
             visible_dirs = sub_dirs[:15]
             for name, full_path in visible_dirs:
                 elements.append({
-                    "tag": "div",
-                    "text": {"tag": "lark_md", "content": f"📁 **{name}**"},
-                    "extra": {
-                        "tag": "action",
-                        "actions": [
-                            {
-                                "tag": "button",
-                                "text": {"tag": "plain_text", "content": "📂 进入"},
-                                "type": "default",
-                                "value": {"action": "browse_dir", "path": full_path}
-                            },
-                            {
-                                "tag": "button",
-                                "text": {"tag": "plain_text", "content": "🎯 选择"},
-                                "type": "primary",
-                                "value": {"action": "select_project", "path": full_path}
-                            }
-                        ]
-                    }
+                    "tag": "column_set",
+                    "flex_mode": "bisect",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "elements": [
+                                {
+                                    "tag": "markdown",
+                                    "content": f"📁 **{name}**"
+                                }
+                            ]
+                        },
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [
+                                {
+                                    "tag": "action",
+                                    "actions": [
+                                        {
+                                            "tag": "button",
+                                            "text": {"tag": "plain_text", "content": "📂 进入"},
+                                            "type": "default",
+                                            "value": {"action": "browse_dir", "path": full_path}
+                                        },
+                                        {
+                                            "tag": "button",
+                                            "text": {"tag": "plain_text", "content": "🎯 选择"},
+                                            "type": "primary",
+                                            "value": {"action": "select_project", "path": full_path}
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
                 })
             if len(sub_dirs) > 15:
                 elements.append({
