@@ -3,6 +3,7 @@ import subprocess
 import uuid
 import os
 import signal
+import json
 from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
@@ -185,7 +186,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             
             # Save pending update state for post-reboot notification
-            import json, os
             from config import BASE_DIR
             pending_file = os.path.join(BASE_DIR, ".update_pending.json")
             with open(pending_file, "w") as f:
