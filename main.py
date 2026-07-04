@@ -274,13 +274,21 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     if message_type == "text":
         raw_text = content_json.get("text", "") if content_json.get("text") else content_raw
         raw_text = raw_text.strip()
+    elif message_type == "post":
+        # 兼容飞书将 URL 或富文本转换为 post 的行为，抽取所有文本或超链接文本作为解析输入
+        texts = []
+        for line in content_json.get("content", []):
+            for elem in line:
+                if elem.get("tag") in ["text", "a"]:
+                    texts.append(elem.get("text", ""))
+        raw_text = " ".join(texts).strip()
 
     # Load sessions early for slash commands
     session_data = await get_session_async(chat_id)
     log.info(f"Message received: chat_id={chat_id}, message_type={message_type}, raw_text='{raw_text}', pending_command='{session_data.get('pending_command')}'")
 
     # Handle slash commands first (this allows /stop to bypass the lock)
-    if message_type == "text" and (raw_text.startswith("/") or session_data.get("pending_command")):
+    if session_data.get("pending_command") or (raw_text.startswith("/") and message_type in ["text", "post"]):
         handled, override_text = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
         if handled:
             return
