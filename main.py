@@ -338,6 +338,9 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
 
 
 def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
+    # 最前端 Raw 物理日志打印，百分百捕捉 WebSocket 传入的一切数据包
+    log.info(f"[RAW RECEIVE EVENT] message_id={data.event.message.message_id}, message_type={data.event.message.message_type}, content_raw={data.event.message.content}")
+    
     message_id = data.event.message.message_id
     chat_id = data.event.message.chat_id
     message_type = data.event.message.message_type
