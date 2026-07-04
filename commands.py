@@ -4,6 +4,7 @@ import uuid
 import os
 import signal
 import json
+import re
 from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
