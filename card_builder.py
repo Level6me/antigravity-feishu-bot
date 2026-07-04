@@ -250,13 +250,21 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_dir_browser_card(active_project_path, recent_projects=None, recent_page=1):
+    def build_dir_browser_card(active_project_path, recent_projects=None, recent_page=1, workspace_root=None):
         elements = []
         
         # 1. 顶部当前活跃项目展示
         elements.append({
             "tag": "markdown",
             "content": f"📂 **当前活跃开发工作区**：\n`{active_project_path}`"
+        })
+        
+        # 确定公共根目录
+        proj_root = workspace_root if workspace_root else WORKSPACE_ROOT
+        
+        elements.append({
+            "tag": "markdown",
+            "content": f"⚙️ **当前公共项目根目录**：\n`{proj_root}`"
         })
         
         # 2. 新建项目动作行
@@ -267,14 +275,14 @@ class CardBuilder:
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "➕ 新建项目"},
                     "type": "default",
-                    "value": {"action": "create_project_prompt", "parent_path": WORKSPACE_ROOT}
+                    "value": {"action": "create_project_prompt", "parent_path": proj_root}
                 }
             ]
         })
         elements.append({"tag": "hr"})
         
-        # 3. 扫描项目根目录 WORKSPACE_ROOT 下的所有子文件夹作为项目列表
-        proj_root = WORKSPACE_ROOT
+        # 3. 扫描项目根目录 proj_root 下的所有子文件夹作为项目列表
+        proj_root = proj_root
         all_projects = []
         try:
             for name in os.listdir(proj_root):

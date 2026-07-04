@@ -70,7 +70,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             
         elif pending_command == "create_project":
             project_name = user_text.strip()
-            parent_path = WORKSPACE_ROOT
+            ws_root = session_data.get("workspace_root")
+            parent_path = ws_root if ws_root and os.path.exists(ws_root) else WORKSPACE_ROOT
             new_project_path = os.path.join(parent_path, project_name)
             
             try:
@@ -277,27 +278,41 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             return True, user_text
             
     elif user_text.startswith("/project"):
-        parts = user_text.split(" ", 1)
-        if len(parts) > 1 and parts[1].strip():
-            new_project = parts[1].strip()
-            if new_project.lower() in ["clear", "default", "默认", "reset"]:
-                session_data["project"] = "默认"
-                reply_text = "📂 已将项目重置为默认工作空间！"
-            else:
-                session_data["project"] = new_project
-                reply_text = f"📂 已成功将当前项目切换为：`{new_project}`"
-            await save_session_async(chat_id, session_data)
+        args = user_text[len("/project"):].strip()
+        if args:
+            target_path = args
+            if target_path.startswith("~"):
+                target_path = os.path.expanduser(target_path)
+            target_path = os.path.abspath(target_path)
+            
+            try:
+                os.makedirs(target_path, exist_ok=True)
+                session_data["project"] = target_path
+                session_data["workspace_root"] = target_path
+                
+                recent = session_data.get("recent_projects", [])
+                if target_path in recent:
+                    recent.remove(target_path)
+                recent.insert(0, target_path)
+                session_data["recent_projects"] = recent[:5]
+                await save_session_async(chat_id, session_data)
+                
+                reply_text = f"⚙️ **公共根目录设定成功！**\n\n- 当前公共根目录已变更为：`{target_path}`\n- 从此所有新建项目都将**默认创建在此目录下**，项目列表也将绑定至此。\n- 当前活跃开发工作区也已切换至此。"
+            except Exception as e:
+                reply_text = f"❌ **设定失败**（无法访问或创建该目录，可能是权限不足）:\n`{str(e)}`"
+                
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
         else:
             start_path = session_data.get("project", "默认")
+            ws_root = session_data.get("workspace_root")
+            proj_root = ws_root if ws_root and os.path.exists(ws_root) else WORKSPACE_ROOT
+            
             if start_path in ["默认", "Default"] or not os.path.exists(start_path):
-                start_path = WORKSPACE_ROOT
-                if not os.path.exists(start_path):
-                    start_path = "/"
+                start_path = proj_root
             
             recent_projects = session_data.get("recent_projects", [])
-            browser_card = CardBuilder.build_dir_browser_card(start_path, recent_projects)
+            browser_card = CardBuilder.build_dir_browser_card(start_path, recent_projects, workspace_root=proj_root)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, browser_card))
             return True, user_text
         
