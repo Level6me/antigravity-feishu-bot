@@ -370,6 +370,17 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 target_path = os.path.expanduser(target_path)
             target_path = os.path.abspath(target_path)
             
+            # 检验路径是否存在以及是否为文件夹
+            if not os.path.exists(target_path):
+                reply_text = f"❌ **路径设定失败！**\n\n您输入的物理路径在系统上不存在，请核对拼写：\n`{target_path}`"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+                return True, user_text
+                
+            if not os.path.isdir(target_path):
+                reply_text = f"❌ **路径设定失败！**\n\n您输入的路径不是一个合法的目录/文件夹：\n`{target_path}`"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+                return True, user_text
+            
             # 只设定公共项目根目录，不作为当前项目，也不进行物理创建
             session_data["workspace_root"] = target_path
             await save_session_async(chat_id, session_data)
