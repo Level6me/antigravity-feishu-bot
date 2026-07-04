@@ -66,6 +66,47 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await save_session_async(chat_id, session_data)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
+            
+        elif pending_command == "create_project":
+            project_name = user_text.strip()
+            parent_path = session_data.get("create_project_parent")
+            if not parent_path or not os.path.exists(parent_path):
+                parent_path = "/home/jiang.guest"
+                if not os.path.exists(parent_path):
+                    parent_path = "/"
+            
+            new_project_path = os.path.join(parent_path, project_name)
+            
+            try:
+                os.makedirs(new_project_path, exist_ok=True)
+                try:
+                    subprocess.run(["git", "init"], cwd=new_project_path, capture_output=True)
+                except Exception as git_err:
+                    log.warning(f"Failed to auto-init git in {new_project_path}: {git_err}")
+                
+                session_data["project"] = new_project_path
+                recent = session_data.get("recent_projects", [])
+                if new_project_path in recent:
+                    recent.remove(new_project_path)
+                recent.insert(0, new_project_path)
+                session_data["recent_projects"] = recent[:5]
+                
+                reply_text = f"✨ **新项目目录创建并切换成功！**\n\n📁 **物理路径**：`{new_project_path}`\n*(已自动在本地初始化 Git 仓库，当前工作空间已成功锁定该项目。)*"
+            except Exception as e:
+                reply_text = f"❌ **新建项目失败**（无法创建该目录，可能是权限不足）:\n`{str(e)}`"
+                
+            session_data.pop("pending_command", None)
+            session_data.pop("create_project_parent", None)
+            await save_session_async(chat_id, session_data)
+            
+            success_card = CardBuilder.build_ai_response(
+                reply_text,
+                current_model=session_data.get("model", "Default"),
+                current_role=session_data.get("role", "无"),
+                current_project=new_project_path if "new_project_path" in locals() and os.path.exists(new_project_path) else "默认"
+            )
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, success_card))
+            return True, user_text
 
     if user_text == "/stop":
         cleared = False
@@ -253,7 +294,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 if not os.path.exists(start_path):
                     start_path = "/"
             
-            browser_card = CardBuilder.build_dir_browser_card(start_path)
+            recent_projects = session_data.get("recent_projects", [])
+            browser_card = CardBuilder.build_dir_browser_card(start_path, recent_projects)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, browser_card))
             return True, user_text
         
