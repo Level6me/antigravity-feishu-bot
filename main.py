@@ -115,6 +115,11 @@ async def _process_single_task(chat_id, task):
             downloaded_file_name = os.path.basename(output_filename)
             download_success = success
             user_text += f"\n[附加图片路径: {output_path}]"
+    elif message_type == "link":
+        if isinstance(content_json, dict):
+            user_text = content_json.get("url", content_json.get("href", ""))
+        else:
+            user_text = str(content_json)
     elif message_type in ["file", "audio", "media"]:
         file_key = content_json.get("file_key", "")
         file_name = content_json.get("file_name", "")
@@ -272,23 +277,35 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     # Quick parsing for slash commands
     raw_text = ""
     if message_type == "text":
-        raw_text = content_json.get("text", "") if content_json.get("text") else content_raw
+        if isinstance(content_json, dict):
+            raw_text = content_json.get("text", "") if content_json.get("text") else content_raw
+        else:
+            raw_text = str(content_json)
         raw_text = raw_text.strip()
     elif message_type == "post":
-        # 兼容飞书将 URL 或富文本转换为 post 的行为，抽取所有文本或超链接文本作为解析输入
+        # 兼容飞书将 URL 或富文本转换为 post 的行为，优先抽取 a 标签的 href 真实的 URL，避免友好文本屏蔽 URL
         texts = []
-        for line in content_json.get("content", []):
-            for elem in line:
-                if elem.get("tag") in ["text", "a"]:
-                    texts.append(elem.get("text", ""))
+        if isinstance(content_json, dict):
+            for line in content_json.get("content", []):
+                for elem in line:
+                    if elem.get("tag") == "text":
+                        texts.append(elem.get("text", ""))
+                    elif elem.get("tag") == "a":
+                        texts.append(elem.get("href", elem.get("text", "")))
         raw_text = " ".join(texts).strip()
+    elif message_type == "link":
+        if isinstance(content_json, dict):
+            raw_text = content_json.get("url", content_json.get("href", ""))
+        else:
+            raw_text = str(content_json)
+        raw_text = raw_text.strip()
 
     # Load sessions early for slash commands
     session_data = await get_session_async(chat_id)
     log.info(f"Message received: chat_id={chat_id}, message_type={message_type}, raw_text='{raw_text}', pending_command='{session_data.get('pending_command')}'")
 
     # Handle slash commands first (this allows /stop to bypass the lock)
-    if session_data.get("pending_command") or (raw_text.startswith("/") and message_type in ["text", "post"]):
+    if session_data.get("pending_command") or (raw_text.startswith("/") and message_type in ["text", "post", "link"]):
         handled, override_text = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
         if handled:
             return
