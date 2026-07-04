@@ -1,6 +1,7 @@
 import re
 import os
 from datetime import datetime
+from config import WORKSPACE_ROOT
 
 class CardBuilder:
     @staticmethod
@@ -266,14 +267,14 @@ class CardBuilder:
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "➕ 新建项目"},
                     "type": "default",
-                    "value": {"action": "create_project_prompt", "parent_path": "/home/jiang.guest"}
+                    "value": {"action": "create_project_prompt", "parent_path": WORKSPACE_ROOT}
                 }
             ]
         })
         elements.append({"tag": "hr"})
         
-        # 3. 扫描项目根目录 /home/jiang.guest 下的所有子文件夹作为项目列表
-        proj_root = "/home/jiang.guest"
+        # 3. 扫描项目根目录 WORKSPACE_ROOT 下的所有子文件夹作为项目列表
+        proj_root = WORKSPACE_ROOT
         all_projects = []
         try:
             for name in os.listdir(proj_root):
