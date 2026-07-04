@@ -69,35 +69,119 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             return True, user_text
             
         elif pending_command == "create_project":
-            project_name = user_text.strip()
+            input_text = user_text.strip()
             ws_root = session_data.get("workspace_root")
             parent_path = ws_root if ws_root and os.path.exists(ws_root) else WORKSPACE_ROOT
-            new_project_path = os.path.join(parent_path, project_name)
             
-            try:
-                os.makedirs(new_project_path, exist_ok=True)
+            # 正则嗅探是否是 Git 仓库 URL
+            git_pattern = re.compile(r'^(https?://|git@|git://)[^\s]+$', re.IGNORECASE)
+            is_git_url = bool(git_pattern.match(input_text)) or input_text.endswith(".git")
+            
+            # 初始化要保存的变量
+            new_project_path = "默认"
+            reply_text = ""
+            
+            if is_git_url:
+                # 1. 尝试解析项目名称 (从 URL 提取末尾)
+                url_path = input_text
+                if url_path.endswith(".git"):
+                    url_path = url_path[:-4]
+                project_name = url_path.split("/")[-1].split(":")[-1].strip()
+                if not project_name:
+                    import uuid
+                    project_name = f"git_project_{uuid.uuid4().hex[:6]}"
+                
+                new_project_path = os.path.join(parent_path, project_name)
+                if os.path.exists(new_project_path):
+                    reply_text = f"❌ **克隆失败**：目录 `{new_project_path}` 已经存在，无法重复创建。"
+                else:
+                    # 发送克隆中消息，避免挂机误解
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, 
+                        lambda: send_reply_sdk(message_id, f"📥 **正在从远程仓库克隆项目**...\n\n- 目标地址：`{input_text}`\n- 保存路径：`{new_project_path}`\n\n*(已禁用终端密码交互，若为私有仓库请确认已授权，请稍候...)*")
+                    )
+                    
+                    # 2. 执行 git clone
+                    # 设定环境变量 GIT_TERMINAL_PROMPT=0 强制禁用终端密码交互，遇到私有仓库立刻 fail-fast 退出
+                    git_env = os.environ.copy()
+                    git_env["GIT_TERMINAL_PROMPT"] = "0"
+                    
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            "git", "clone", input_text, new_project_path,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            env=git_env
+                        )
+                        # 设置 45 秒超时，双重防挂起
+                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45.0)
+                        
+                        if proc.returncode == 0:
+                            # 3. 克隆成功，切换活跃工作区并持久化
+                            session_data["project"] = new_project_path
+                            
+                            recent = session_data.get("recent_projects", [])
+                            if new_project_path in recent:
+                                recent.remove(new_project_path)
+                            recent.insert(0, new_project_path)
+                            session_data["recent_projects"] = recent[:5]
+                            
+                            # 自动为克隆的项目注入专属 Prompt
+                            prompt_text = f"当前已锁定活跃开发项目 '{project_name}'，其物理路径位于 '{new_project_path}'。您在分析、阅读、修改代码或运行命令等所有操作时，必须严格局限在此项目目录中执行。"
+                            project_prompts = session_data.get("project_prompts", {})
+                            project_prompts[new_project_path] = prompt_text
+                            session_data["project_prompts"] = project_prompts
+                            
+                            reply_text = f"✅ **远程项目克隆并设定成功！**\n\n- 项目名称：`{project_name}`\n- 物理路径：`{new_project_path}`\n\n当前已将此项目设为您的活跃开发工作区。"
+                        else:
+                            err_msg = stderr.decode(errors='ignore').strip()
+                            # 判定是否可能是私有仓库权限问题
+                            auth_hint = ""
+                            if any(phrase in err_msg for phrase in ["terminal prompts disabled", "Permission denied", "fatal: Authentication failed", "fatal: could not read Username"]):
+                                auth_hint = "\n\n💡 *这可能是一个私有仓库。请先确保您的机器人宿主机配置了对应的 SSH 密钥（在 GitHub 绑定 id_rsa.pub），或者使用了带有 Access Token 凭证的 HTTPS URL 格式。*"
+                            
+                            reply_text = f"❌ **仓库克隆失败** (返回码 {proc.returncode})：\n```\n{err_msg}\n```{auth_hint}"
+                            new_project_path = "默认"
+                            
+                    except asyncio.TimeoutError:
+                        try:
+                            proc.kill()
+                        except:
+                            pass
+                        reply_text = "❌ **克隆超时**：45 秒内未完成 Git 克隆，已强制终止进程。\n\n💡 *如果是私有仓库，可能会因为缺乏账户凭证或 SSH 密钥而无法访问，请验证克隆地址或本地权限。*"
+                        new_project_path = "默认"
+                    except Exception as e:
+                        reply_text = f"❌ **执行 Git 克隆时发生意外错误**：\n`{str(e)}`"
+                        new_project_path = "默认"
+            else:
+                # 走普通的本地项目创建逻辑
+                project_name = input_text
+                new_project_path = os.path.join(parent_path, project_name)
                 try:
-                    subprocess.run(["git", "init"], cwd=new_project_path, capture_output=True)
-                except Exception as git_err:
-                    log.warning(f"Failed to auto-init git in {new_project_path}: {git_err}")
-                
-                session_data["project"] = new_project_path
-                recent = session_data.get("recent_projects", [])
-                if new_project_path in recent:
-                    recent.remove(new_project_path)
-                recent.insert(0, new_project_path)
-                session_data["recent_projects"] = recent[:5]
-                
-                # 自动设定项目的专属 Prompt 提示词（融合名称与目录绝对路径）
-                auto_prompt = f"当前已锁定活跃开发项目 '{project_name}'，其物理路径位于 '{new_project_path}'。您在分析、阅读、修改代码或运行命令等所有操作时，必须严格局限在此项目目录中执行。"
-                prompts = session_data.get("project_prompts", {})
-                prompts[new_project_path] = auto_prompt
-                session_data["project_prompts"] = prompts
-                
-                reply_text = f"✨ **新项目目录创建并切换成功！**\n\n📁 **物理路径**：`{new_project_path}`\n*(已自动在本地初始化 Git 仓库)*\n\n🎯 **项目专属 Prompt 已自动绑定**：\n> {auto_prompt}\n\n当前工作空间已成功锁定该项目，您可以开始发送开发指令了！"
-            except Exception as e:
-                reply_text = f"❌ **新建项目失败**（无法创建该目录，可能是权限不足）:\n`{str(e)}`"
-                
+                    os.makedirs(new_project_path, exist_ok=True)
+                    try:
+                        subprocess.run(["git", "init"], cwd=new_project_path, capture_output=True)
+                    except Exception as git_err:
+                        log.warning(f"Failed to auto-init git in {new_project_path}: {git_err}")
+                    
+                    session_data["project"] = new_project_path
+                    recent = session_data.get("recent_projects", [])
+                    if new_project_path in recent:
+                        recent.remove(new_project_path)
+                    recent.insert(0, new_project_path)
+                    session_data["recent_projects"] = recent[:5]
+                    
+                    # 自动设定项目的专属 Prompt 提示词（融合名称与目录绝对路径）
+                    auto_prompt = f"当前已锁定活跃开发项目 '{project_name}'，其物理路径位于 '{new_project_path}'。您在分析、阅读、修改代码或运行命令等所有操作时，必须严格局限在此项目目录中执行。"
+                    prompts = session_data.get("project_prompts", {})
+                    prompts[new_project_path] = auto_prompt
+                    session_data["project_prompts"] = prompts
+                    
+                    reply_text = f"✨ **新项目目录创建并切换成功！**\n\n📁 **物理路径**：`{new_project_path}`\n*(已自动在本地初始化 Git 仓库)*\n\n🎯 **项目专属 Prompt 已自动绑定**：\n> {auto_prompt}\n\n当前工作空间已成功锁定该项目，您可以开始发送开发指令了！"
+                except Exception as e:
+                    reply_text = f"❌ **新建项目失败**（无法创建该目录，可能是权限不足）:\n`{str(e)}`"
+                    new_project_path = "默认"
+            
             session_data.pop("pending_command", None)
             session_data.pop("create_project_parent", None)
             await save_session_async(chat_id, session_data)
@@ -106,7 +190,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 reply_text,
                 current_model=session_data.get("model", "Default"),
                 current_role=session_data.get("role", "无"),
-                current_project=new_project_path if "new_project_path" in locals() and os.path.exists(new_project_path) else "默认"
+                current_project=new_project_path if os.path.exists(new_project_path) else "默认"
             )
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, success_card))
             return True, user_text
