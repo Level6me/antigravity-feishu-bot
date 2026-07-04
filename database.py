@@ -60,19 +60,28 @@ def migrate_from_json():
 init_db()
 migrate_from_json()
 
+_session_locks = {}
+
+def _get_session_lock(chat_id):
+    if chat_id not in _session_locks:
+        _session_locks[chat_id] = asyncio.Lock()
+    return _session_locks[chat_id]
+
 async def get_session_async(chat_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                return json.loads(row['data'])
-            return {"conversation": "", "model": "Gemini 3.5 Flash", "role": "无", "project": "默认"}
+    async with _get_session_lock(chat_id):
+        async with aiosqlite.connect(DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return json.loads(row['data'])
+                return {"conversation": "", "model": "Gemini 3.5 Flash", "role": "无", "project": "默认"}
 
 async def save_session_async(chat_id, data):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
-        await db.commit()
+    async with _get_session_lock(chat_id):
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
+            await db.commit()
 
 async def get_profile_async(user_id):
     async with aiosqlite.connect(DB_FILE) as db:
