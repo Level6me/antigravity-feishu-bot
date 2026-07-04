@@ -250,7 +250,7 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_dir_browser_card(active_project_path, recent_projects=None, recent_page=1, workspace_root=None):
+    def build_dir_browser_card(active_project_path, recent_projects=None, recent_page=1, workspace_root=None, ignored_projects=None):
         elements = []
         
         # 1. 顶部当前活跃项目展示
@@ -289,6 +289,8 @@ class CardBuilder:
                 if name.startswith('.') or name in ["venv", "downloads"]:
                     continue
                 full_path = os.path.join(proj_root, name)
+                if ignored_projects and full_path in ignored_projects:
+                    continue
                 if os.path.isdir(full_path):
                     all_projects.append((name, full_path))
             # 排序
@@ -299,6 +301,8 @@ class CardBuilder:
         # 4. 合并数据库中记录的 recent_projects（防止有用户在外部路径单独添加的项目）
         if recent_projects:
             for p in recent_projects:
+                if ignored_projects and p in ignored_projects:
+                    continue
                 if os.path.exists(p) and p not in [x[1] for x in all_projects] and p != "/":
                     all_projects.append((os.path.basename(p) or p, p))
                     
@@ -338,7 +342,7 @@ class CardBuilder:
                     }
                 ]
                 
-                # 如果不是当前活跃项目，提供选择按钮
+                # 如果不是当前活跃项目，提供选择按钮和列表删除按钮并排在右侧
                 if not is_active:
                     columns.append({
                         "tag": "column",
@@ -346,9 +350,21 @@ class CardBuilder:
                         "elements": [
                             {
                                 "tag": "button",
-                                "text": {"tag": "plain_text", "content": "🎯 选择"},
+                                "text": {"tag": "plain_text", "content": "选择"},
                                 "type": "primary",
                                 "value": {"action": "select_project", "path": p}
+                            }
+                        ]
+                    })
+                    columns.append({
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [
+                            {
+                                "tag": "button",
+                                "text": {"tag": "plain_text", "content": "删除"},
+                                "type": "danger",
+                                "value": {"action": "remove_project_from_list", "path": p}
                             }
                         ]
                     })
@@ -368,7 +384,7 @@ class CardBuilder:
                     
                 elements.append({
                     "tag": "column_set",
-                    "flex_mode": "bisect",
+                    "flex_mode": "none",
                     "columns": columns
                 })
                 

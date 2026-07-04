@@ -427,8 +427,9 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
         session_data = get_session_sync(chat_id)
         recent_projects = session_data.get("recent_projects", [])
+        ignored_projects = session_data.get("ignored_projects", [])
         ws_root = session_data.get("workspace_root")
-        new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, workspace_root=ws_root)
+        new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, workspace_root=ws_root, ignored_projects=ignored_projects)
         
         return P2CardActionTriggerResponse({
             "card": {
@@ -469,6 +470,40 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             "toast": {"type": "success", "content": "项目设定成功！"}
         })
 
+    elif action_value.get("action") == "remove_project_from_list":
+        target_path = action_value.get("path")
+        
+        session_data = get_session_sync(chat_id)
+        ignored = session_data.get("ignored_projects", [])
+        if target_path not in ignored:
+            ignored.append(target_path)
+        session_data["ignored_projects"] = ignored
+        
+        recent = session_data.get("recent_projects", [])
+        if target_path in recent:
+            recent.remove(target_path)
+        session_data["recent_projects"] = recent
+        
+        save_session_sync(chat_id, session_data)
+        
+        active_project = session_data.get("project", "默认")
+        ws_root = session_data.get("workspace_root")
+        new_card = CardBuilder.build_dir_browser_card(
+            active_project, 
+            recent, 
+            recent_page=1, 
+            workspace_root=ws_root, 
+            ignored_projects=ignored
+        )
+        
+        return P2CardActionTriggerResponse({
+            "card": {
+                "type": "raw",
+                "data": new_card
+            },
+            "toast": {"type": "success", "content": "项目已成功从列表中移出！"}
+        })
+
     elif action_value.get("action") == "create_project_prompt":
         parent_path = action_value.get("parent_path")
         
@@ -491,8 +526,9 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
         session_data = get_session_sync(chat_id)
         recent_projects = session_data.get("recent_projects", [])
+        ignored_projects = session_data.get("ignored_projects", [])
         ws_root = session_data.get("workspace_root")
-        new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, target_page, workspace_root=ws_root)
+        new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, target_page, workspace_root=ws_root, ignored_projects=ignored_projects)
         
         return P2CardActionTriggerResponse({
             "card": {
