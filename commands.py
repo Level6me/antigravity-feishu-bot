@@ -261,12 +261,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         
     elif user_text.startswith("/memory"):
         memories = await get_profile_async(chat_id)
-        if not memories:
-            reply_text = "📭 当前没有记录您的任何长时偏好。您可以通过 `/remember <偏好>` 来添加。"
-        else:
-            memory_list = "\n".join([f"- {m}" for m in memories])
-            reply_text = f"🧠 **您的长时偏好记录：**\n{memory_list}\n\n*(如需清空请发送 `/clear memory`)*"
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        memory_card = CardBuilder.build_memory_card(memories)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, memory_card))
         return True, user_text
         
     elif user_text == "/ping":
