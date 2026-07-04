@@ -17,7 +17,7 @@ from lark_oapi.api.im.v1 import *
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger, P2CardActionTriggerResponse
 
 from config import APP_ID, APP_SECRET, SESSION_FILE, PROFILE_FILE, ANTIGRAVITY_BIN, ALLOWED_USERS, ALLOWED_CHATS, BASE_DIR
-from database import get_session_async, get_profile_async
+from database import get_session_async, get_profile_async, save_session_async
 from multimodal import extract_and_upload_resources
 from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, patch_interactive_card_sdk, download_message_resource_sdk, set_emoji_sdk, delete_emoji_sdk
 from commands import handle_slash_command
@@ -267,6 +267,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
 
     # Load sessions early for slash commands
     session_data = await get_session_async(chat_id)
+    log.info(f"Message received: chat_id={chat_id}, message_type={message_type}, raw_text='{raw_text}', pending_command='{session_data.get('pending_command')}'")
 
     # Handle slash commands first (this allows /stop to bypass the lock)
     if message_type == "text" and (raw_text.startswith("/") or session_data.get("pending_command")):
@@ -388,10 +389,13 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
         if main_loop and main_loop.is_running():
             async def handle_browse():
-                session_data = await get_session_async(chat_id)
-                recent_projects = session_data.get("recent_projects", [])
-                new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+                try:
+                    session_data = await get_session_async(chat_id)
+                    recent_projects = session_data.get("recent_projects", [])
+                    new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects)
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+                except Exception as ex:
+                    log.error(f"Error in handle_browse: {ex}")
             asyncio.run_coroutine_threadsafe(handle_browse(), main_loop)
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在载入目录..."}})
@@ -401,26 +405,29 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
         if main_loop and main_loop.is_running():
             async def handle_select():
-                session_data = await get_session_async(chat_id)
-                session_data["project"] = target_path
-                
-                # 记录最近使用的项目
-                recent = session_data.get("recent_projects", [])
-                if target_path in recent:
-                    recent.remove(target_path)
-                recent.insert(0, target_path)
-                session_data["recent_projects"] = recent[:5]
-                
-                await save_session_async(chat_id, session_data)
-                
-                success_text = f"📂 **工作区项目切换成功！**\n\n当前已将活跃目录设定为：\n`{target_path}`"
-                success_card = CardBuilder.build_ai_response(
-                    success_text,
-                    current_model=session_data.get('model', 'Default'),
-                    current_role=session_data.get('role', '无'),
-                    current_project=target_path
-                )
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, success_card))
+                try:
+                    session_data = await get_session_async(chat_id)
+                    session_data["project"] = target_path
+                    
+                    # 记录最近使用的项目
+                    recent = session_data.get("recent_projects", [])
+                    if target_path in recent:
+                        recent.remove(target_path)
+                    recent.insert(0, target_path)
+                    session_data["recent_projects"] = recent[:5]
+                    
+                    await save_session_async(chat_id, session_data)
+                    
+                    success_text = f"📂 **工作区项目切换成功！**\n\n当前已将活跃目录设定为：\n`{target_path}`"
+                    success_card = CardBuilder.build_ai_response(
+                        success_text,
+                        current_model=session_data.get('model', 'Default'),
+                        current_role=session_data.get('role', '无'),
+                        current_project=target_path
+                    )
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, success_card))
+                except Exception as ex:
+                    log.error(f"Error in handle_select: {ex}")
                 
             asyncio.run_coroutine_threadsafe(handle_select(), main_loop)
             
@@ -431,13 +438,16 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
         if main_loop and main_loop.is_running():
             async def handle_prompt():
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = "create_project"
-                session_data["create_project_parent"] = parent_path
-                await save_session_async(chat_id, session_data)
-                
-                prompt_msg = f"📂 **请输入项目名称新建项目**：\n\n*(将在父目录 `{parent_path}` 下进行新建，请输入纯英文、数字拼音组合作为新目录名)*"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, prompt_msg))
+                try:
+                    session_data = await get_session_async(chat_id)
+                    session_data["pending_command"] = "create_project"
+                    session_data["create_project_parent"] = parent_path
+                    await save_session_async(chat_id, session_data)
+                    
+                    prompt_msg = f"📂 **请输入项目名称新建项目**：\n\n*(将在父目录 `{parent_path}` 下进行新建，请输入纯英文、数字拼音组合作为新目录名)*"
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, prompt_msg))
+                except Exception as ex:
+                    log.error(f"Error in handle_prompt: {ex}")
                 
             asyncio.run_coroutine_threadsafe(handle_prompt(), main_loop)
             
