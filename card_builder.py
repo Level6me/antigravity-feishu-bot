@@ -471,3 +471,132 @@ class CardBuilder:
                 CardBuilder._create_footer()
             ]
         }
+
+    @staticmethod
+    def build_welcome_card():
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "green",
+                "title": {"content": "🎉 部署成功！欢迎使用 Antigravity 助手", "tag": "plain_text"}
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "您好！我是您的 **Antigravity 智能编程与系统开发助理**。\n\n当您看到这条消息，说明您的飞书机器人已经**成功部署并激活绑定**！\n\n我可以读取并修改您电脑上的文件、直接执行终端命令、跨网检索知识，还能接收并分析您发送给我的 PDF 文件、语音或截图。\n\n期待与您的合作，让我们开始吧！"
+                },
+                {
+                    "tag": "hr"
+                },
+                {
+                    "tag": "markdown",
+                    "content": "💡 **快捷功能推荐** (点击下方按钮立即体验)："
+                },
+                {
+                    "tag": "action",
+                    "layout": "flow",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "📁 工作区项目"},
+                            "type": "primary",
+                            "value": {"action": "user_choice", "choice": "/project", "label": "工作区项目"}
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "🤖 切换模型"},
+                            "type": "default",
+                            "value": {"action": "user_choice", "choice": "/model", "label": "切换模型"}
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "🎭 查看帮助"},
+                            "type": "default",
+                            "value": {"action": "user_choice", "choice": "/help", "label": "查看帮助"}
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "🧹 清空上下文"},
+                            "type": "default",
+                            "value": {"action": "user_choice", "choice": "/clear", "label": "清空上下文"}
+                        }
+                    ]
+                },
+                CardBuilder._create_footer()
+            ]
+        }
+
+    @staticmethod
+    def build_memory_card(memories):
+        elements = []
+        if not memories:
+            elements.append({
+                "tag": "markdown",
+                "content": "📭 **当前没有记录您的任何长时偏好。**\n\n您可以通过发送 `/remember <偏好>` 来快速添加（例如：`/remember 我开发只用 Python`）。"
+            })
+        else:
+            elements.append({
+                "tag": "markdown",
+                "content": "🧠 **您的长时偏好与设定记录**：\n*(点击右侧「忘记」可立即在机器人记忆中擦除对应条目)*"
+            })
+            elements.append({"tag": "hr"})
+            
+            for idx, m in enumerate(memories):
+                columns = [
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": f"🔹 {m}"
+                            }
+                        ]
+                    },
+                    {
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [
+                            {
+                                "tag": "button",
+                                "text": {"tag": "plain_text", "content": "忘记"},
+                                "type": "danger",
+                                "value": {"action": "forget_single_memory", "index": idx}
+                            }
+                        ]
+                    }
+                ]
+                elements.append({
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": columns
+                })
+                
+        elements.append(CardBuilder._create_footer())
+        
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "purple",
+                "title": {"content": "🧠 偏好记忆管理器", "tag": "plain_text"}
+            },
+            "elements": elements
+        }
+
+    @staticmethod
+    def build_security_warning(blocked_command):
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "red",
+                "title": {"content": "⚠️ 安全威胁拦截警告", "tag": "plain_text"}
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"🚨 **高危系统命令执行请求已被安全沙箱拦截！**\n\n您的输入中检测到了包含系统破坏性或高风险的黑名单特征指令，为了保护基座宿主系统的运行安全，已对该请求进行强行拦截与截断。\n\n**拦截的请求特征**：\n> `{blocked_command}`\n\n*(如果您确实有系统维护管理需求，请登录物理终端进行手动执行。)*"
+                },
+                CardBuilder._create_footer()
+            ]
+        }
