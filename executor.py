@@ -183,8 +183,12 @@ async def execute_antigravity(
         log.error("Process execution timed out, terminating process group...")
         import signal
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except Exception:
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            log.warning(f"Process {process.pid} already exited when trying to terminate.")
+        except Exception as e:
+            log.error(f"Failed to kill process group {process.pid}: {e}")
             try:
                 process.kill()
             except Exception:
