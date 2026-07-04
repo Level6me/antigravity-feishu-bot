@@ -306,7 +306,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 
 🔹 `/model` : 弹出交互式控制面板，自由切换大模型
 🔹 `/role <设定>` : 让机器人扮演特定角色 (例如: `/role 资深Python工程师`)
-🔹 `/project <路径>` : 切换当前活跃的工作区或项目 (例如: `/project /opt/keycloak-auth-manager`)
+🔹 `/project [路径]` : 管理及切换工作区项目 (不带参发送可视化项目管理器，支持翻页选择与新建；带参直接精准切换至指定路径)
 🔹 `/remember <设定>` : 让机器人永久记住你的偏好 (例如: `/remember 我写代码只用 Python`)
 🔹 `/memory` : 查看机器人当前记住的所有偏好
 🔹 `/forget` : 清除机器人的长时记忆偏好
