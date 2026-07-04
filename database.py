@@ -103,3 +103,20 @@ def save_sessions(sessions):
         cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
     conn.commit()
     conn.close()
+
+def get_session_sync(chat_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return json.loads(row['data'])
+    return {"conversation": "", "model": "Gemini 3.5 Flash", "role": "无", "project": "默认"}
+
+def save_session_sync(chat_id, data):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
+    conn.commit()
+    conn.close()
