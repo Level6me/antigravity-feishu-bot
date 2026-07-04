@@ -387,7 +387,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 start_path = proj_root
             
             recent_projects = session_data.get("recent_projects", [])
-            browser_card = CardBuilder.build_dir_browser_card(start_path, recent_projects, workspace_root=proj_root)
+            ignored_projects = session_data.get("ignored_projects", [])
+            browser_card = CardBuilder.build_dir_browser_card(start_path, recent_projects, workspace_root=proj_root, ignored_projects=ignored_projects)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, browser_card))
             return True, user_text
         
