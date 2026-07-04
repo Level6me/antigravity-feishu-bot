@@ -317,21 +317,22 @@ class CardBuilder:
                             "width": "auto",
                             "elements": [
                                 {
-                                    "tag": "action",
-                                    "actions": [
-                                        {
-                                            "tag": "button",
-                                            "text": {"tag": "plain_text", "content": "📂 进入"},
-                                            "type": "default",
-                                            "value": {"action": "browse_dir", "path": full_path}
-                                        },
-                                        {
-                                            "tag": "button",
-                                            "text": {"tag": "plain_text", "content": "🎯 选择"},
-                                            "type": "primary",
-                                            "value": {"action": "select_project", "path": full_path}
-                                        }
-                                    ]
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "📂 进入"},
+                                    "type": "default",
+                                    "value": {"action": "browse_dir", "path": full_path}
+                                }
+                            ]
+                        },
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "🎯 选择"},
+                                    "type": "primary",
+                                    "value": {"action": "select_project", "path": full_path}
                                 }
                             ]
                         }
