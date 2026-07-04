@@ -525,11 +525,15 @@ def cleanup(signum, frame):
     log.warning("Gracefully shutting down... killing zombie processes")
     for process in running_processes.values():
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except:
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            log.error(f"Failed to kill process group {process.pid}: {e}")
             try:
                 process.kill()
-            except:
+            except Exception:
                 pass
     sys.exit(0)
 
