@@ -222,9 +222,15 @@ class CardBuilder:
 
         # 3. Context Info Row
         if not is_error:
+            project_name_only = "默认"
+            if current_project and current_project not in ["默认", "Default"]:
+                project_name_only = os.path.basename(current_project) or current_project
+            else:
+                project_name_only = current_project or "默认"
+                
             elements.append({
                 "tag": "markdown",
-                "content": f"<font color='grey'>🤖 模型: {current_model} | 🎭 角色: {current_role} | 📂 项目: {current_project} | 💡 键入 /help 查看指令</font>"
+                "content": f"<font color='grey'>🤖 模型: {current_model} | 🎭 角色: {current_role} | 📂 项目: {project_name_only} | 💡 键入 /help 查看指令</font>"
             })
 
         # 4. Standard Footer
