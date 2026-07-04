@@ -462,6 +462,23 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(handle_prompt(), main_loop)
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "请输入项目名称！"}})
+
+    elif action_value.get("action") == "browse_recent_page":
+        target_path = action_value.get("current_path")
+        target_page = action_value.get("page", 1)
+        
+        if main_loop and main_loop.is_running():
+            async def handle_browse_page():
+                try:
+                    session_data = await get_session_async(chat_id)
+                    recent_projects = session_data.get("recent_projects", [])
+                    new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, target_page)
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+                except Exception as ex:
+                    log.error(f"Error in handle_browse_page: {ex}")
+            asyncio.run_coroutine_threadsafe(handle_browse_page(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"正在载入第 {target_page} 页项目..."}})
     
     return P2CardActionTriggerResponse()
 
