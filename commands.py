@@ -8,7 +8,7 @@ from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
 from card_builder import CardBuilder
-from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT
+from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT
 
 def get_version_string(commit_ref="HEAD"):
     try:
@@ -70,7 +70,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             
         elif pending_command == "create_project":
             project_name = user_text.strip()
-            parent_path = "/home/jiang.guest"
+            parent_path = WORKSPACE_ROOT
             new_project_path = os.path.join(parent_path, project_name)
             
             try:
@@ -292,7 +292,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         else:
             start_path = session_data.get("project", "默认")
             if start_path in ["默认", "Default"] or not os.path.exists(start_path):
-                start_path = "/home/jiang.guest"
+                start_path = WORKSPACE_ROOT
                 if not os.path.exists(start_path):
                     start_path = "/"
             
@@ -306,7 +306,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 
 🔹 `/model` : 弹出交互式控制面板，自由切换大模型
 🔹 `/role <设定>` : 让机器人扮演特定角色 (例如: `/role 资深Python工程师`)
-🔹 `/project <路径>` : 切换当前活跃的工作区或项目 (例如: `/project /opt/keycloak-auth-manager`)
+🔹 `/project [路径]` : 管理及切换工作区项目 (不带参发送可视化项目管理器，支持翻页选择与新建；带参直接精准切换至指定路径)
 🔹 `/remember <设定>` : 让机器人永久记住你的偏好 (例如: `/remember 我写代码只用 Python`)
 🔹 `/memory` : 查看机器人当前记住的所有偏好
 🔹 `/forget` : 清除机器人的长时记忆偏好

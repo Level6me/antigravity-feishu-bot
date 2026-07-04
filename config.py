@@ -55,4 +55,8 @@ ALLOWED_USERS = [uid.strip() for uid in os.getenv("ALLOWED_USERS", "").split(","
 ALLOWED_CHATS = [cid.strip() for cid in os.getenv("ALLOWED_CHATS", "").split(",") if cid.strip()]
 DANGEROUSLY_SKIP_PERMISSIONS = os.getenv("DANGEROUSLY_SKIP_PERMISSIONS", "true").lower() == "true"
 
+# --- Workspace & Project Directory Configuration ---
+# Defaults to user's home directory (e.g. /home/username or /Users/username)
+WORKSPACE_ROOT = os.getenv("WORKSPACE_ROOT") or os.path.expanduser("~")
+
 
