@@ -369,21 +369,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 target_path = os.path.expanduser(target_path)
             target_path = os.path.abspath(target_path)
             
-            try:
-                os.makedirs(target_path, exist_ok=True)
-                session_data["project"] = target_path
-                session_data["workspace_root"] = target_path
-                
-                recent = session_data.get("recent_projects", [])
-                if target_path in recent:
-                    recent.remove(target_path)
-                recent.insert(0, target_path)
-                session_data["recent_projects"] = recent[:5]
-                await save_session_async(chat_id, session_data)
-                
-                reply_text = f"⚙️ **公共根目录设定成功！**\n\n- 当前公共根目录已变更为：`{target_path}`\n- 从此所有新建项目都将**默认创建在此目录下**，项目列表也将绑定至此。\n- 当前活跃开发工作区也已切换至此。"
-            except Exception as e:
-                reply_text = f"❌ **设定失败**（无法访问或创建该目录，可能是权限不足）:\n`{str(e)}`"
+            # 只设定公共项目根目录，不作为当前项目，也不进行物理创建
+            session_data["workspace_root"] = target_path
+            await save_session_async(chat_id, session_data)
+            
+            reply_text = f"⚙️ **公共项目根目录设定成功！**\n\n- 当前公共项目根目录已设定为：`{target_path}`\n- 后续所有新建项目都将**默认创建在此目录下**，列表面板也将绑定至此。\n*(当前活跃开发工作区保持不变)*"
                 
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
