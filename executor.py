@@ -189,8 +189,7 @@ async def execute_antigravity(
                 process.kill()
             except Exception:
                 pass
-    if chat_id in running_processes:
-        del running_processes[chat_id]
+    running_processes.pop(chat_id, None)
     await stdout_task
     await stderr_task
     
