@@ -17,7 +17,7 @@ from lark_oapi.api.im.v1 import *
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTrigger, P2CardActionTriggerResponse
 
 from config import APP_ID, APP_SECRET, SESSION_FILE, PROFILE_FILE, ANTIGRAVITY_BIN, ALLOWED_USERS, ALLOWED_CHATS, BASE_DIR
-from database import get_session_async, get_profile_async, save_session_async, get_session_sync, save_session_sync
+from database import get_session_async, get_profile_async, save_session_async, get_session_sync, save_session_sync, save_profile_async
 from multimodal import extract_and_upload_resources
 from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, patch_interactive_card_sdk, download_message_resource_sdk, set_emoji_sdk, delete_emoji_sdk
 from commands import handle_slash_command
@@ -31,6 +31,7 @@ main_loop = None
 running_processes = {}
 chat_queues = {}
 chat_workers = {}
+chat_media_batches = {}
 
 async def process_chat_queue(chat_id):
     queue = chat_queues[chat_id]
@@ -166,12 +167,73 @@ async def _process_single_task(chat_id, task):
                 user_text = f"请仔细听这段语音内容（语音文件路径: {output_path}），并做出响应。"
             elif message_type == "media":
                 user_text = f"请仔细观看这段视频内容（视频文件路径: {output_path}），并做出响应。"
-        else:
-            user_text = f"[未获取到{message_type}的资源键]"
+    elif message_type == "batch_media":
+        items = content_json.get("items", [])
+        media_hints = []
+        download_success = True
+        
+        # 批量下发资源加载指示器
+        dl_card = CardBuilder.build_download_indicator(f"合并批处理 ({len(items)} 个文件)", "多媒体组")
+        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
+        
+        os.makedirs("downloads", exist_ok=True)
+        
+        for idx, item in enumerate(items):
+            m_type = item["message_type"]
+            c_json = item["content_json"]
+            c_raw = item["content_raw"]
+            
+            file_key = ""
+            file_name = ""
+            if m_type == "image":
+                file_key = c_json.get("image_key", "")
+                if not file_key:
+                    match = re.search(r'img_[a-zA-Z0-9_\-]+', c_raw)
+                    if match:
+                        file_key = match.group(0)
+                file_name = f"batch_img_{idx}_{file_key}.jpg"
+            else:
+                file_key = c_json.get("file_key", "")
+                file_name = c_json.get("file_name", f"batch_file_{idx}_{file_key}")
+                file_name = os.path.basename(file_name)
+                
+            if file_key:
+                output_path = os.path.abspath(os.path.join("downloads", file_name))
+                success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, file_key, "image" if m_type == "image" else "file", output_path))
+                if success:
+                    media_hints.append(f"{idx+1}. 多模态 {m_type.upper()} 文件路径: `{output_path}`")
+                else:
+                    download_success = False
+                    media_hints.append(f"{idx+1}. 多模态 {m_type.upper()} 文件 `{file_name}` (下载失败)")
+                    
+        user_text = f"请查看以下 {len(items)} 个关联多模态文件并做出综合关联回应：\n\n" + "\n".join(media_hints)
+        downloaded_file_name = f"合并批处理 ({len(items)} 个文件)"
     else:
         user_text = f"[暂不支持的消息类型: {message_type}]"
 
     if not user_text:
+        return
+
+    # 方案二：安全沙箱前置命令高危扫描过滤
+    dangerous_patterns = [
+        r"\brm\s+-rf\b",
+        r"\bchmod\s+-(R\s+)?777\b",
+        r"\bdd\s+if=\b",
+        r"\bmkfs\b",
+        r"\bshutdown\b",
+        r"\breboot\b",
+        r"\bpoweroff\b",
+        r":\(\){\s*:\s*\|\s*:\s*&\s*}\s*;\s*:"
+    ]
+    is_dangerous = False
+    for pattern in dangerous_patterns:
+        if re.search(pattern, user_text, re.IGNORECASE):
+            is_dangerous = True
+            break
+            
+    if is_dangerous:
+        warn_card = CardBuilder.build_security_warning(user_text)
+        await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, warn_card))
         return
 
     # Sessions ar    # Inject protocol into prompt
@@ -320,29 +382,73 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         if override_text:
             raw_text = override_text
 
-    # QUEUEING SYSTEM
-    if chat_id not in chat_queues:
-        chat_queues[chat_id] = asyncio.Queue()
+    # 辅助任务分发函数
+    async def dispatch_task(c_id, msg_id, m_type, c_json, c_raw, r_text):
+        if c_id not in chat_queues:
+            chat_queues[c_id] = asyncio.Queue()
+            
+        task_payload = {
+            "message_id": msg_id,
+            "message_type": m_type,
+            "content_json": c_json,
+            "content_raw": c_raw,
+            "raw_text": r_text
+        }
         
-    task_payload = {
-        "message_id": message_id,
-        "message_type": message_type,
-        "content_json": content_json,
-        "content_raw": content_raw,
-        "raw_text": raw_text
-    }
-    
-    if chat_id in chat_workers and not chat_workers[chat_id].done():
-        qsize = chat_queues[chat_id].qsize()
-        warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {qsize + 1} 个任务)..."
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, warning_msg))
-        await chat_queues[chat_id].put(task_payload)
+        if c_id in chat_workers and not chat_workers[c_id].done():
+            qsize = chat_queues[c_id].qsize()
+            warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {qsize + 1} 个任务)..."
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(msg_id, warning_msg))
+            await chat_queues[c_id].put(task_payload)
+        else:
+            await chat_queues[c_id].put(task_payload)
+            chat_workers[c_id] = asyncio.create_task(process_chat_queue(c_id))
+
+    # 方案四：多模态多图合并批处理防抖机制
+    if message_type in ["image", "file", "audio", "media"]:
+        if chat_id not in chat_media_batches:
+            chat_media_batches[chat_id] = {
+                "items": [],
+                "timer_task": None
+            }
+            
+        batch = chat_media_batches[chat_id]
+        batch["items"].append({
+            "message_id": message_id,
+            "message_type": message_type,
+            "content_json": content_json,
+            "content_raw": content_raw
+        })
+        
+        if batch["timer_task"] and not batch["timer_task"].done():
+            batch["timer_task"].cancel()
+            
+        async def delay_dispatch():
+            try:
+                await asyncio.sleep(1.5)
+                items = batch["items"]
+                chat_media_batches.pop(chat_id, None)
+                
+                if len(items) == 1:
+                    single = items[0]
+                    await dispatch_task(
+                        chat_id, single["message_id"], single["message_type"], 
+                        single["content_json"], single["content_raw"], raw_text
+                    )
+                else:
+                    target_msg_id = items[-1]["message_id"]
+                    await dispatch_task(
+                        chat_id, target_msg_id, "batch_media", 
+                        {"items": items}, "", ""
+                    )
+            except asyncio.CancelledError:
+                pass
+                
+        batch["timer_task"] = asyncio.create_task(delay_dispatch())
         return
-    else:
-        # No worker running, put in queue and start worker
-        await chat_queues[chat_id].put(task_payload)
-        chat_workers[chat_id] = asyncio.create_task(process_chat_queue(chat_id))
-        return
+        
+    # 普通非媒体消息直接分发
+    await dispatch_task(chat_id, message_id, message_type, content_json, content_raw, raw_text)
 
 
 def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
@@ -511,6 +617,23 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             },
             "toast": {"type": "success", "content": "项目已成功从列表中移出！"}
         })
+
+    elif action_value.get("action") == "forget_single_memory":
+        idx = int(action_value.get("index"))
+        
+        if main_loop and main_loop.is_running():
+            async def do_forget():
+                memories = await get_profile_async(chat_id)
+                if 0 <= idx < len(memories):
+                    removed = memories.pop(idx)
+                    await save_profile_async(chat_id, memories)
+                    log.info(f"Removed memory preference: '{removed}' in chat {chat_id}")
+                    
+                    new_card = CardBuilder.build_memory_card(memories)
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_forget(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功擦除该偏好记录！"}})
 
     elif action_value.get("action") == "create_project_prompt":
         parent_path = action_value.get("parent_path")
