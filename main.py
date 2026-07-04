@@ -382,6 +382,39 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(notify_and_process(), main_loop)
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"已确认：{label[:15]}"}})
+        
+    elif action_value.get("action") == "browse_dir":
+        target_path = action_value.get("path")
+        
+        if main_loop and main_loop.is_running():
+            async def handle_browse():
+                new_card = CardBuilder.build_dir_browser_card(target_path)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(handle_browse(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在载入目录..."}})
+        
+    elif action_value.get("action") == "select_project":
+        target_path = action_value.get("path")
+        
+        if main_loop and main_loop.is_running():
+            async def handle_select():
+                session_data = await get_session_async(chat_id)
+                session_data["project"] = target_path
+                await save_session_async(chat_id, session_data)
+                
+                success_text = f"📂 **工作区项目切换成功！**\n\n当前已将活跃目录设定为：\n`{target_path}`"
+                success_card = CardBuilder.build_ai_response(
+                    success_text,
+                    current_model=session_data.get('model', 'Default'),
+                    current_role=session_data.get('role', '无'),
+                    current_project=target_path
+                )
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, success_card))
+                
+            asyncio.run_coroutine_threadsafe(handle_select(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目设定成功！"}})
     
     return P2CardActionTriggerResponse()
 
