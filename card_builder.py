@@ -1,4 +1,5 @@
 import re
+import os
 from datetime import datetime
 
 class CardBuilder:
@@ -237,6 +238,125 @@ class CardBuilder:
             "header": {
                 "template": "blue" if not is_error else "red",
                 "title": {"content": header_title, "tag": "plain_text"}
+            },
+            "elements": elements
+        }
+
+    @staticmethod
+    def build_dir_browser_card(current_path):
+        current_path = os.path.abspath(current_path)
+        elements = []
+        
+        # 1. 顶部当前路径提示
+        elements.append({
+            "tag": "markdown",
+            "content": f"📁 **当前浏览路径**：`{current_path}`"
+        })
+        
+        # 2. 返回上级与快捷绑定当前目录按钮
+        parent_path = os.path.dirname(current_path)
+        header_actions = []
+        if current_path != parent_path:
+            header_actions.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "⬆️ 返回上级"},
+                "type": "default",
+                "value": {"action": "browse_dir", "path": parent_path}
+            })
+            
+        header_actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "🎯 设定当前目录为项目工作区"},
+            "type": "primary",
+            "value": {"action": "select_project", "path": current_path}
+        })
+        
+        elements.append({
+            "tag": "action",
+            "actions": header_actions
+        })
+        elements.append({"tag": "hr"})
+        
+        # 3. 列出子目录
+        sub_dirs = []
+        try:
+            for name in os.listdir(current_path):
+                if name.startswith('.'):
+                    continue
+                full_path = os.path.join(current_path, name)
+                if os.path.isdir(full_path):
+                    sub_dirs.append((name, full_path))
+            sub_dirs.sort(key=lambda x: x[0].lower())
+        except Exception as e:
+            elements.append({
+                "tag": "markdown",
+                "content": f"⚠️ **无法读取此目录**（权限不足或路径不存在）: {str(e)}"
+            })
+            
+        if sub_dirs:
+            # 限制最多显示前 15 个，防止卡片长度溢出
+            visible_dirs = sub_dirs[:15]
+            for name, full_path in visible_dirs:
+                elements.append({
+                    "tag": "column_set",
+                    "flex_mode": "bisect",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "elements": [
+                                {
+                                    "tag": "markdown",
+                                    "content": f"📁 **{name}**"
+                                }
+                            ]
+                        },
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "📂 进入"},
+                                    "type": "default",
+                                    "value": {"action": "browse_dir", "path": full_path}
+                                }
+                            ]
+                        },
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "🎯 选择"},
+                                    "type": "primary",
+                                    "value": {"action": "select_project", "path": full_path}
+                                }
+                            ]
+                        }
+                    ]
+                })
+            if len(sub_dirs) > 15:
+                elements.append({
+                    "tag": "markdown",
+                    "content": f"*💡 还有 {len(sub_dirs) - 15} 个子目录未全部列出，您可以使用 `/project <绝对路径>` 精确设置。*"
+                })
+        else:
+            if not any(isinstance(el, dict) and "无法读取此目录" in el.get("content", "") for el in elements):
+                elements.append({
+                    "tag": "markdown",
+                    "content": "📭 *当前目录下没有可读的子目录。*"
+                })
+                
+        elements.append(CardBuilder._create_footer())
+        
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "blue",
+                "title": {"content": "📁 工作区目录浏览器", "tag": "plain_text"}
             },
             "elements": elements
         }
