@@ -21,6 +21,7 @@ def get_version_string(commit_ref="HEAD"):
         return f"Unknown (Build: error)"
 
 async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers=None):
+    log.info(f"handle_slash_command call: user_text='{user_text}', pending_command='{session_data.get('pending_command')}'")
     """
     Parses and handles slash commands. Returns True if a command was handled, False otherwise.
     Returns (handled: bool, override_user_text: str)
@@ -65,6 +66,77 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             session_data.pop("pending_command", None)
             await save_session_async(chat_id, session_data)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+            
+        elif pending_command == "create_project":
+            project_name = user_text.strip()
+            parent_path = session_data.get("create_project_parent")
+            if not parent_path or not os.path.exists(parent_path):
+                parent_path = "/home/jiang.guest"
+                if not os.path.exists(parent_path):
+                    parent_path = "/"
+            
+            new_project_path = os.path.join(parent_path, project_name)
+            
+            try:
+                os.makedirs(new_project_path, exist_ok=True)
+                try:
+                    subprocess.run(["git", "init"], cwd=new_project_path, capture_output=True)
+                except Exception as git_err:
+                    log.warning(f"Failed to auto-init git in {new_project_path}: {git_err}")
+                
+                session_data["project"] = new_project_path
+                recent = session_data.get("recent_projects", [])
+                if new_project_path in recent:
+                    recent.remove(new_project_path)
+                recent.insert(0, new_project_path)
+                session_data["recent_projects"] = recent[:5]
+                
+                session_data["pending_command"] = "set_project_prompt"
+                session_data["prompt_target_project"] = new_project_path
+                reply_text = f"✨ **新项目目录创建并切换成功！**\n\n📁 **物理路径**：`{new_project_path}`\n*(已自动在本地初始化 Git 仓库)*\n\n💬 **请直接在此回复并发送该项目的专属 Prompt（提示词设定）**，用于指导 AI 遵守特定编码规则。例如：\n*“这是一个 Keycloak 授权管理项目，编写时必须使用 python 及 cryptography 加密库...”*\n\n*(若不需设定，可直接回复「跳过」或「skip」)*"
+            except Exception as e:
+                reply_text = f"❌ **新建项目失败**（无法创建该目录，可能是权限不足）:\n`{str(e)}`"
+                session_data.pop("pending_command", None)
+                
+            session_data.pop("create_project_parent", None)
+            await save_session_async(chat_id, session_data)
+            
+            success_card = CardBuilder.build_ai_response(
+                reply_text,
+                current_model=session_data.get("model", "Default"),
+                current_role=session_data.get("role", "无"),
+                current_project=new_project_path if "new_project_path" in locals() and os.path.exists(new_project_path) else "默认"
+            )
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, success_card))
+            return True, user_text
+            
+        elif pending_command == "set_project_prompt":
+            prompt_content = user_text.strip()
+            target_proj = session_data.get("prompt_target_project")
+            
+            if not target_proj:
+                target_proj = session_data.get("project", "默认")
+                
+            if prompt_content.lower() in ["跳过", "skip", "无", "none", "默认"]:
+                reply_text = "✅ **已跳过专属 Prompt 设定。**\n\n当前工作空间已成功锁定该项目，您可以随时发送开发指令！"
+            else:
+                prompts = session_data.get("project_prompts", {})
+                prompts[target_proj] = prompt_content
+                session_data["project_prompts"] = prompts
+                reply_text = f"✅ **该项目专属 Prompt 设定成功！**\n\n🎯 **设定规则**：\n> {prompt_content}\n\n当前工作空间已成功载入该规则，您可以开始向 AI 发送开发指令了！"
+                
+            session_data.pop("pending_command", None)
+            session_data.pop("prompt_target_project", None)
+            await save_session_async(chat_id, session_data)
+            
+            success_card = CardBuilder.build_ai_response(
+                reply_text,
+                current_model=session_data.get("model", "Default"),
+                current_role=session_data.get("role", "无"),
+                current_project=target_proj
+            )
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, success_card))
             return True, user_text
 
     if user_text == "/stop":
@@ -253,7 +325,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 if not os.path.exists(start_path):
                     start_path = "/"
             
-            browser_card = CardBuilder.build_dir_browser_card(start_path)
+            recent_projects = session_data.get("recent_projects", [])
+            browser_card = CardBuilder.build_dir_browser_card(start_path, recent_projects)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, browser_card))
             return True, user_text
         
