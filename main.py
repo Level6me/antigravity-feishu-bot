@@ -399,7 +399,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
         session_data = get_session_sync(chat_id)
         recent_projects = session_data.get("recent_projects", [])
-        new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects)
+        ws_root = session_data.get("workspace_root")
+        new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, workspace_root=ws_root)
         
         return P2CardActionTriggerResponse({
             "card": {
@@ -466,7 +467,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
         session_data = get_session_sync(chat_id)
         recent_projects = session_data.get("recent_projects", [])
-        new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, target_page)
+        ws_root = session_data.get("workspace_root")
+        new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, target_page, workspace_root=ws_root)
         
         return P2CardActionTriggerResponse({
             "card": {
