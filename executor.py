@@ -217,7 +217,11 @@ async def execute_antigravity(
         except Exception as e:
             log.error(f"Failed to extract generated images from transcript: {e}")
     
-    await loop.run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client))
+    active_project = session_data.get("project")
+    ws_root = session_data.get("workspace_root")
+    allowed_dirs = [active_project, ws_root]
+    
+    await loop.run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs))
     
     if os.path.exists(log_file_path):
         with open(log_file_path, "r") as f:
