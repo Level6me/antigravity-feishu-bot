@@ -162,7 +162,17 @@ async def _process_single_task(chat_id, task):
         return
 
     # Sessions ar    # Inject protocol into prompt
-    system_instruction = "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). Any English text in the response must be limited to code syntax or technical names only. If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. NEVER ask normal text multi-choice questions. ONLY output plain text choices, avoid complex formatting inside choices.]\n\n"
+    current_proj = session_data.get("project", "默认")
+    system_instruction = f"[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). Any English text in the response must be limited to code syntax or technical names only. If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. NEVER ask normal text multi-choice questions. ONLY output plain text choices, avoid complex formatting inside choices.]\n\n"
+    
+    # 注入当前活跃项目环境参数
+    system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n- All file reads, writes, and analysis commands you execute should target this active workspace directory.\n\n"
+    
+    # 注入该项目专属 Prompt
+    project_prompts = session_data.get("project_prompts", {})
+    if current_proj in project_prompts and project_prompts[current_proj]:
+        proj_prompt_text = project_prompts[current_proj]
+        system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
     
     # Load long-term memory if this is a new conversation
     final_prompt = user_text
