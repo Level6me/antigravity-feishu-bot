@@ -471,3 +471,57 @@ class CardBuilder:
                 CardBuilder._create_footer()
             ]
         }
+
+    @staticmethod
+    def build_welcome_card():
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "green",
+                "title": {"content": "🎉 部署成功！欢迎使用 Antigravity 助手", "tag": "plain_text"}
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "您好！我是您的 **Antigravity 智能编程与系统开发助理**。\n\n当您看到这条消息，说明您的飞书机器人已经**成功部署并激活绑定**！\n\n我可以读取并修改您电脑上的文件、直接执行终端命令、跨网检索知识，还能接收并分析您发送给我的 PDF 文件、语音或截图。\n\n期待与您的合作，让我们开始吧！"
+                },
+                {
+                    "tag": "hr"
+                },
+                {
+                    "tag": "markdown",
+                    "content": "💡 **快捷功能推荐** (点击下方按钮立即体验)："
+                },
+                {
+                    "tag": "action",
+                    "layout": "flow",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "📁 工作区项目"},
+                            "type": "primary",
+                            "value": {"action": "user_choice", "choice": "/project", "label": "工作区项目"}
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "🤖 切换模型"},
+                            "type": "default",
+                            "value": {"action": "user_choice", "choice": "/model", "label": "切换模型"}
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "🎭 查看帮助"},
+                            "type": "default",
+                            "value": {"action": "user_choice", "choice": "/help", "label": "查看帮助"}
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "🧹 清空上下文"},
+                            "type": "default",
+                            "value": {"action": "user_choice", "choice": "/clear", "label": "清空上下文"}
+                        }
+                    ]
+                },
+                CardBuilder._create_footer()
+            ]
+        }

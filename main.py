@@ -59,6 +59,14 @@ async def _process_single_task(chat_id, task):
     
     loop = asyncio.get_running_loop()
     session_data = await get_session_async(chat_id)
+    
+    # 首次部署成功后的欢迎引导消息推送
+    if not session_data.get("welcome_sent"):
+        session_data["welcome_sent"] = True
+        await save_session_async(chat_id, session_data)
+        welcome_card = CardBuilder.build_welcome_card()
+        await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, welcome_card))
+        
     downloaded_file_name = None
     download_success = True
     bot_reply_msg_id = None
