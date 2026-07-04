@@ -4,11 +4,9 @@ import json
 import lark_oapi as lark
 from logger import log
 
-def extract_and_upload_resources(text, message_id, api_client):
-    home_dir = os.path.expanduser("~")
-    home_dir_esc = re.escape(home_dir)
-    images = re.findall(r'!\[.*?\]\((?:file://)?(' + home_dir_esc + r'/[^)]+)\)', text)
-    files = re.findall(r'(?<!!)\[.*?\]\((?:file://)?(' + home_dir_esc + r'/[^)]+)\)', text)
+def extract_and_upload_resources(text, message_id, api_client, additional_safe_dirs=None):
+    images = [img for img in re.findall(r'!\[.*?\]\((?:file://)?([^)]+)\)', text) if not img.startswith(('http://', 'https://'))]
+    files = [f for f in re.findall(r'(?<!!)\[.*?\]\((?:file://)?([^)]+)\)', text) if not f.startswith(('http://', 'https://'))]
     
     workspace_dir = os.path.dirname(os.path.abspath(__file__))
     safe_prefixes = [
@@ -16,6 +14,11 @@ def extract_and_upload_resources(text, message_id, api_client):
         os.path.join(workspace_dir, "scratch"),
         os.path.expanduser("~/.gemini/antigravity-cli/brain")
     ]
+    
+    if additional_safe_dirs:
+        for d in additional_safe_dirs:
+            if d and d not in ["默认", "Default"]:
+                safe_prefixes.append(d)
     
     def is_safe_path(path):
         try:
@@ -39,7 +42,7 @@ def extract_and_upload_resources(text, message_id, api_client):
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     md_content = f.read()
-                    imgs = re.findall(r'!\[.*?\]\((?:file://)?(' + home_dir_esc + r'/[^)]+)\)', md_content)
+                    imgs = [img for img in re.findall(r'!\[.*?\]\((?:file://)?([^)]+)\)', md_content) if not img.startswith(('http://', 'https://'))]
                     images.extend(imgs)
             except Exception as e:
                 log.error(f"[Multimodal] Error scanning md file: {e}")
