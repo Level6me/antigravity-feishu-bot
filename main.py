@@ -452,7 +452,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     session_data["create_project_parent"] = parent_path
                     await save_session_async(chat_id, session_data)
                     
-                    prompt_msg = f"📂 **请输入项目名称新建项目**：\n\n*(将在父目录 `{parent_path}` 下进行新建，请输入纯英文、数字拼音组合作为新目录名)*"
+                    prompt_msg = f"📂 **请输入新建项目的名称，或直接输入项目的 Git 仓库地址**：\n\n*(支持通过 Git URL 克隆；若输入项目名，将在公共根目录 `{parent_path}` 下新建并初始化)*"
                     await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, prompt_msg))
                 except Exception as ex:
                     log.error(f"Error in handle_prompt: {ex}")
