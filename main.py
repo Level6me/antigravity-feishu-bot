@@ -402,7 +402,10 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects)
         
         return P2CardActionTriggerResponse({
-            "card": new_card,
+            "card": {
+                "type": "raw",
+                "data": new_card
+            },
             "toast": {"type": "success", "content": "正在载入目录..."}
         })
         
@@ -430,7 +433,10 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         )
         
         return P2CardActionTriggerResponse({
-            "card": success_card,
+            "card": {
+                "type": "raw",
+                "data": success_card
+            },
             "toast": {"type": "success", "content": "项目设定成功！"}
         })
 
@@ -463,7 +469,10 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, target_page)
         
         return P2CardActionTriggerResponse({
-            "card": new_card,
+            "card": {
+                "type": "raw",
+                "data": new_card
+            },
             "toast": {"type": "success", "content": f"正在载入第 {target_page} 页项目..."}
         })
     
