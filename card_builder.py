@@ -243,7 +243,7 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_dir_browser_card(current_path):
+    def build_dir_browser_card(current_path, recent_projects=None):
         current_path = os.path.abspath(current_path)
         elements = []
         
@@ -253,7 +253,7 @@ class CardBuilder:
             "content": f"📁 **当前浏览路径**：`{current_path}`"
         })
         
-        # 2. 返回上级与快捷绑定当前目录按钮
+        # 2. 返回上级、选择目录、➕ 新建项目 按钮行
         parent_path = os.path.dirname(current_path)
         header_actions = []
         if current_path != parent_path:
@@ -266,9 +266,16 @@ class CardBuilder:
             
         header_actions.append({
             "tag": "button",
-            "text": {"tag": "plain_text", "content": "🎯 设定当前目录为项目工作区"},
+            "text": {"tag": "plain_text", "content": "🎯 设定此目录"},
             "type": "primary",
             "value": {"action": "select_project", "path": current_path}
+        })
+        
+        header_actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "➕ 新建项目"},
+            "type": "default",
+            "value": {"action": "create_project_prompt", "parent_path": current_path}
         })
         
         elements.append({
@@ -277,7 +284,29 @@ class CardBuilder:
         })
         elements.append({"tag": "hr"})
         
-        # 3. 列出子目录
+        # 3. 列出最近项目（若有）
+        if recent_projects:
+            valid_recents = [p for p in recent_projects if p != current_path and os.path.exists(p)]
+            if valid_recents:
+                elements.append({
+                    "tag": "markdown",
+                    "content": "🕒 **最近使用项目**（点击快速切换）："
+                })
+                recent_actions = []
+                for p in valid_recents[:3]:
+                    recent_actions.append({
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": os.path.basename(p) or p},
+                        "type": "default",
+                        "value": {"action": "select_project", "path": p}
+                    })
+                elements.append({
+                    "tag": "action",
+                    "actions": recent_actions
+                })
+                elements.append({"tag": "hr"})
+        
+        # 4. 列出子目录
         sub_dirs = []
         try:
             for name in os.listdir(current_path):
