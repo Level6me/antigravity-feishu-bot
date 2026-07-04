@@ -243,7 +243,7 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_dir_browser_card(current_path, recent_projects=None):
+    def build_dir_browser_card(current_path, recent_projects=None, recent_page=1):
         current_path = os.path.abspath(current_path)
         elements = []
         
@@ -284,26 +284,79 @@ class CardBuilder:
         })
         elements.append({"tag": "hr"})
         
-        # 3. 列出最近项目（若有）
+        # 3. 列出最近项目（方案四：内嵌分页列表逻辑）
         if recent_projects:
             valid_recents = [p for p in recent_projects if p != current_path and os.path.exists(p)]
             if valid_recents:
+                items_per_page = 3
+                total_items = len(valid_recents)
+                total_pages = max(1, (total_items + items_per_page - 1) // items_per_page)
+                
+                page = max(1, min(recent_page, total_pages))
+                
                 elements.append({
                     "tag": "markdown",
-                    "content": "🕒 **最近使用项目**（点击快速切换）："
+                    "content": f"🕒 **最近使用项目** (内嵌翻页 - 第 {page}/{total_pages} 页)："
                 })
-                recent_actions = []
-                for p in valid_recents[:3]:
-                    recent_actions.append({
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": os.path.basename(p) or p},
-                        "type": "default",
-                        "value": {"action": "select_project", "path": p}
+                
+                start_idx = (page - 1) * items_per_page
+                end_idx = start_idx + items_per_page
+                page_items = valid_recents[start_idx:end_idx]
+                
+                for p in page_items:
+                    elements.append({
+                        "tag": "column_set",
+                        "flex_mode": "bisect",
+                        "columns": [
+                            {
+                                "tag": "column",
+                                "width": "weighted",
+                                "weight": 1,
+                                "elements": [
+                                    {
+                                        "tag": "markdown",
+                                        "content": f"📁 **{os.path.basename(p) or p}**\n*`{p}`*"
+                                    }
+                                ]
+                            },
+                            {
+                                "tag": "column",
+                                "width": "auto",
+                                "elements": [
+                                    {
+                                        "tag": "button",
+                                        "text": {"tag": "plain_text", "content": "🎯 选择"},
+                                        "type": "primary",
+                                        "value": {"action": "select_project", "path": p}
+                                    }
+                                ]
+                            }
+                        ]
                     })
-                elements.append({
-                    "tag": "action",
-                    "actions": recent_actions
-                })
+                
+                # 翻页控制按钮行
+                page_actions = []
+                if page > 1:
+                    page_actions.append({
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "◀️ 上一页"},
+                        "type": "default",
+                        "value": {"action": "browse_recent_page", "page": page - 1, "current_path": current_path}
+                    })
+                if page < total_pages:
+                    page_actions.append({
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "下一页 ▶️"},
+                        "type": "default",
+                        "value": {"action": "browse_recent_page", "page": page + 1, "current_path": current_path}
+                    })
+                
+                if page_actions:
+                    elements.append({
+                        "tag": "action",
+                        "actions": page_actions
+                    })
+                
                 elements.append({"tag": "hr"})
         
         # 4. 列出子目录
