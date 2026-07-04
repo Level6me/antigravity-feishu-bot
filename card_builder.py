@@ -243,190 +243,155 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_dir_browser_card(current_path, recent_projects=None, recent_page=1):
-        current_path = os.path.abspath(current_path)
+    def build_dir_browser_card(active_project_path, recent_projects=None, recent_page=1):
         elements = []
         
-        # 1. 顶部当前路径提示
+        # 1. 顶部当前活跃项目展示
         elements.append({
             "tag": "markdown",
-            "content": f"📁 **当前浏览路径**：`{current_path}`"
+            "content": f"📂 **当前活跃开发工作区**：\n`{active_project_path}`"
         })
         
-        # 2. 返回上级、选择目录、➕ 新建项目 按钮行
-        parent_path = os.path.dirname(current_path)
-        header_actions = []
-        if current_path != parent_path:
-            header_actions.append({
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "⬆️ 返回上级"},
-                "type": "default",
-                "value": {"action": "browse_dir", "path": parent_path}
-            })
-            
-        header_actions.append({
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": "🎯 设定此目录"},
-            "type": "primary",
-            "value": {"action": "select_project", "path": current_path}
-        })
-        
-        header_actions.append({
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": "➕ 新建项目"},
-            "type": "default",
-            "value": {"action": "create_project_prompt", "parent_path": "/home/jiang.guest"}
-        })
-        
+        # 2. 新建项目动作行
         elements.append({
             "tag": "action",
-            "actions": header_actions
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "➕ 新建项目"},
+                    "type": "default",
+                    "value": {"action": "create_project_prompt", "parent_path": "/home/jiang.guest"}
+                }
+            ]
         })
         elements.append({"tag": "hr"})
         
-        # 3. 列出最近项目（方案四：内嵌分页列表逻辑）
+        # 3. 扫描项目根目录 /home/jiang.guest 下的所有子文件夹作为项目列表
+        proj_root = "/home/jiang.guest"
+        all_projects = []
+        try:
+            for name in os.listdir(proj_root):
+                if name.startswith('.') or name in ["venv", "downloads"]:
+                    continue
+                full_path = os.path.join(proj_root, name)
+                if os.path.isdir(full_path):
+                    all_projects.append((name, full_path))
+            # 排序
+            all_projects.sort(key=lambda x: x[0].lower())
+        except Exception as e:
+            log.error(f"Failed to scan project root: {e}")
+            
+        # 4. 合并数据库中记录的 recent_projects（防止有用户在外部路径单独添加的项目）
         if recent_projects:
-            valid_recents = [p for p in recent_projects if p != current_path and os.path.exists(p)]
-            if valid_recents:
-                items_per_page = 3
-                total_items = len(valid_recents)
-                total_pages = max(1, (total_items + items_per_page - 1) // items_per_page)
+            for p in recent_projects:
+                if os.path.exists(p) and p not in [x[1] for x in all_projects] and p != "/":
+                    all_projects.append((os.path.basename(p) or p, p))
+                    
+        # 5. 内嵌分页展示全部项目列表
+        if all_projects:
+            items_per_page = 5
+            total_items = len(all_projects)
+            total_pages = max(1, (total_items + items_per_page - 1) // items_per_page)
+            
+            page = max(1, min(recent_page, total_pages))
+            
+            elements.append({
+                "tag": "markdown",
+                "content": f"📁 **项目选择列表** (第 {page}/{total_pages} 页)："
+            })
+            
+            start_idx = (page - 1) * items_per_page
+            end_idx = start_idx + items_per_page
+            page_items = all_projects[start_idx:end_idx]
+            
+            for name, p in page_items:
+                # 高亮当前活跃项目
+                is_active = (p == active_project_path)
+                name_display = f"🌟 **{name} (当前活跃)**" if is_active else f"📁 **{name}**"
                 
-                page = max(1, min(recent_page, total_pages))
-                
-                elements.append({
-                    "tag": "markdown",
-                    "content": f"🕒 **最近使用项目** (内嵌翻页 - 第 {page}/{total_pages} 页)："
-                })
-                
-                start_idx = (page - 1) * items_per_page
-                end_idx = start_idx + items_per_page
-                page_items = valid_recents[start_idx:end_idx]
-                
-                for p in page_items:
-                    elements.append({
-                        "tag": "column_set",
-                        "flex_mode": "bisect",
-                        "columns": [
+                columns = [
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "elements": [
                             {
-                                "tag": "column",
-                                "width": "weighted",
-                                "weight": 1,
-                                "elements": [
-                                    {
-                                        "tag": "markdown",
-                                        "content": f"📁 **{os.path.basename(p) or p}**\n*`{p}`*"
-                                    }
-                                ]
-                            },
+                                "tag": "markdown",
+                                "content": f"{name_display}\n*`{p}`*"
+                            }
+                        ]
+                    }
+                ]
+                
+                # 如果不是当前活跃项目，提供选择按钮
+                if not is_active:
+                    columns.append({
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [
                             {
-                                "tag": "column",
-                                "width": "auto",
-                                "elements": [
-                                    {
-                                        "tag": "button",
-                                        "text": {"tag": "plain_text", "content": "🎯 选择"},
-                                        "type": "primary",
-                                        "value": {"action": "select_project", "path": p}
-                                    }
-                                ]
+                                "tag": "button",
+                                "text": {"tag": "plain_text", "content": "🎯 选择"},
+                                "type": "primary",
+                                "value": {"action": "select_project", "path": p}
                             }
                         ]
                     })
-                
-                # 翻页控制按钮行
-                page_actions = []
-                if page > 1:
-                    page_actions.append({
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "◀️ 上一页"},
-                        "type": "default",
-                        "value": {"action": "browse_recent_page", "page": page - 1, "current_path": current_path}
+                else:
+                    columns.append({
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [
+                            {
+                                "tag": "button",
+                                "text": {"tag": "plain_text", "content": "✅ 已选"},
+                                "type": "default",
+                                "value": {"action": "already_active"}
+                            }
+                        ]
                     })
-                if page < total_pages:
-                    page_actions.append({
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "下一页 ▶️"},
-                        "type": "default",
-                        "value": {"action": "browse_recent_page", "page": page + 1, "current_path": current_path}
-                    })
-                
-                if page_actions:
-                    elements.append({
-                        "tag": "action",
-                        "actions": page_actions
-                    })
-                
-                elements.append({"tag": "hr"})
-        
-        # 4. 列出子目录
-        sub_dirs = []
-        try:
-            for name in os.listdir(current_path):
-                if name.startswith('.'):
-                    continue
-                full_path = os.path.join(current_path, name)
-                if os.path.isdir(full_path):
-                    sub_dirs.append((name, full_path))
-            sub_dirs.sort(key=lambda x: x[0].lower())
-        except Exception as e:
-            elements.append({
-                "tag": "markdown",
-                "content": f"⚠️ **无法读取此目录**（权限不足或路径不存在）: {str(e)}"
-            })
-            
-        if sub_dirs:
-            # 限制最多显示前 15 个，防止卡片长度溢出
-            visible_dirs = sub_dirs[:15]
-            for name, full_path in visible_dirs:
+                    
                 elements.append({
                     "tag": "column_set",
                     "flex_mode": "bisect",
-                    "columns": [
-                        {
-                            "tag": "column",
-                            "width": "weighted",
-                            "weight": 1,
-                            "elements": [
-                                {
-                                    "tag": "markdown",
-                                    "content": f"📁 **{name}**"
-                                }
-                            ]
-                        },
-                        {
-                            "tag": "column",
-                            "width": "auto",
-                            "elements": [
-                                {
-                                    "tag": "button",
-                                    "text": {"tag": "plain_text", "content": "📂 进入"},
-                                    "type": "default",
-                                    "value": {"action": "browse_dir", "path": full_path}
-                                }
-                            ]
-                        }
-                    ]
-                })
-            if len(sub_dirs) > 15:
-                elements.append({
-                    "tag": "markdown",
-                    "content": f"*💡 还有 {len(sub_dirs) - 15} 个子目录未全部列出，您可以使用 `/project <绝对路径>` 精确设置。*"
-                })
-        else:
-            if not any(isinstance(el, dict) and "无法读取此目录" in el.get("content", "") for el in elements):
-                elements.append({
-                    "tag": "markdown",
-                    "content": "📭 *当前目录下没有可读的子目录。*"
+                    "columns": columns
                 })
                 
+            # 分页控制
+            page_actions = []
+            if page > 1:
+                page_actions.append({
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "◀️ 上一页"},
+                    "type": "default",
+                    "value": {"action": "browse_recent_page", "page": page - 1, "current_path": active_project_path}
+                })
+            if page < total_pages:
+                page_actions.append({
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "下一页 ▶️"},
+                    "type": "default",
+                    "value": {"action": "browse_recent_page", "page": page + 1, "current_path": active_project_path}
+                })
+                
+            if page_actions:
+                elements.append({
+                    "tag": "action",
+                    "actions": page_actions
+                })
+        else:
+            elements.append({
+                "tag": "markdown",
+                "content": "📭 *当前没有可用的项目，请点击上方按钮新建一个项目！*"
+            })
+            
         elements.append(CardBuilder._create_footer())
         
         return {
             "config": {"wide_screen_mode": True},
             "header": {
                 "template": "blue",
-                "title": {"content": "📁 工作区目录浏览器", "tag": "plain_text"}
+                "title": {"content": "📁 项目管理器", "tag": "plain_text"}
             },
             "elements": elements
         }
