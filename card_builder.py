@@ -275,7 +275,7 @@ class CardBuilder:
             "tag": "button",
             "text": {"tag": "plain_text", "content": "➕ 新建项目"},
             "type": "default",
-            "value": {"action": "create_project_prompt", "parent_path": current_path}
+            "value": {"action": "create_project_prompt", "parent_path": "/home/jiang.guest"}
         })
         
         elements.append({
