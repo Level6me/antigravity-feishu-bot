@@ -388,7 +388,9 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
         if main_loop and main_loop.is_running():
             async def handle_browse():
-                new_card = CardBuilder.build_dir_browser_card(target_path)
+                session_data = await get_session_async(chat_id)
+                recent_projects = session_data.get("recent_projects", [])
+                new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             asyncio.run_coroutine_threadsafe(handle_browse(), main_loop)
             
@@ -401,6 +403,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             async def handle_select():
                 session_data = await get_session_async(chat_id)
                 session_data["project"] = target_path
+                
+                # 记录最近使用的项目
+                recent = session_data.get("recent_projects", [])
+                if target_path in recent:
+                    recent.remove(target_path)
+                recent.insert(0, target_path)
+                session_data["recent_projects"] = recent[:5]
+                
                 await save_session_async(chat_id, session_data)
                 
                 success_text = f"📂 **工作区项目切换成功！**\n\n当前已将活跃目录设定为：\n`{target_path}`"
@@ -415,6 +425,23 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(handle_select(), main_loop)
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目设定成功！"}})
+
+    elif action_value.get("action") == "create_project_prompt":
+        parent_path = action_value.get("parent_path")
+        
+        if main_loop and main_loop.is_running():
+            async def handle_prompt():
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = "create_project"
+                session_data["create_project_parent"] = parent_path
+                await save_session_async(chat_id, session_data)
+                
+                prompt_msg = f"📂 **请输入项目名称新建项目**：\n\n*(将在父目录 `{parent_path}` 下进行新建，请输入纯英文、数字拼音组合作为新目录名)*"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, prompt_msg))
+                
+            asyncio.run_coroutine_threadsafe(handle_prompt(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "请输入项目名称！"}})
     
     return P2CardActionTriggerResponse()
 
