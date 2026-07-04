@@ -452,22 +452,18 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     elif action_value.get("action") == "create_project_prompt":
         parent_path = action_value.get("parent_path")
         
+        # 同步读取和保存会话，消除多线程协程写入延迟，确保挂起指令瞬时落库
+        session_data = get_session_sync(chat_id)
+        session_data["pending_command"] = "create_project"
+        session_data["create_project_parent"] = parent_path
+        save_session_sync(chat_id, session_data)
+        
+        prompt_msg = f"📂 **请输入新建项目的名称，或直接输入项目的 Git 仓库地址**：\n\n*(支持通过 Git URL 克隆；若输入项目名，将在公共根目录 `{parent_path}` 下新建并初始化)*"
+        
         if main_loop and main_loop.is_running():
-            async def handle_prompt():
-                try:
-                    session_data = await get_session_async(chat_id)
-                    session_data["pending_command"] = "create_project"
-                    session_data["create_project_parent"] = parent_path
-                    await save_session_async(chat_id, session_data)
-                    
-                    prompt_msg = f"📂 **请输入新建项目的名称，或直接输入项目的 Git 仓库地址**：\n\n*(支持通过 Git URL 克隆；若输入项目名，将在公共根目录 `{parent_path}` 下新建并初始化)*"
-                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, prompt_msg))
-                except Exception as ex:
-                    log.error(f"Error in handle_prompt: {ex}")
-                
-            asyncio.run_coroutine_threadsafe(handle_prompt(), main_loop)
+            main_loop.run_in_executor(None, lambda: send_reply_sdk(card_message_id, prompt_msg))
             
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "请输入项目名称！"}})
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "请输入项目名或Git仓库地址！"}})
 
     elif action_value.get("action") == "browse_recent_page":
         target_path = action_value.get("current_path")
