@@ -525,3 +525,78 @@ class CardBuilder:
                 CardBuilder._create_footer()
             ]
         }
+
+    @staticmethod
+    def build_memory_card(memories):
+        elements = []
+        if not memories:
+            elements.append({
+                "tag": "markdown",
+                "content": "📭 **当前没有记录您的任何长时偏好。**\n\n您可以通过发送 `/remember <偏好>` 来快速添加（例如：`/remember 我开发只用 Python`）。"
+            })
+        else:
+            elements.append({
+                "tag": "markdown",
+                "content": "🧠 **您的长时偏好与设定记录**：\n*(点击右侧「忘记」可立即在机器人记忆中擦除对应条目)*"
+            })
+            elements.append({"tag": "hr"})
+            
+            for idx, m in enumerate(memories):
+                columns = [
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": f"🔹 {m}"
+                            }
+                        ]
+                    },
+                    {
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [
+                            {
+                                "tag": "button",
+                                "text": {"tag": "plain_text", "content": "忘记"},
+                                "type": "danger",
+                                "value": {"action": "forget_single_memory", "index": idx}
+                            }
+                        ]
+                    }
+                ]
+                elements.append({
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": columns
+                })
+                
+        elements.append(CardBuilder._create_footer())
+        
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "purple",
+                "title": {"content": "🧠 偏好记忆管理器", "tag": "plain_text"}
+            },
+            "elements": elements
+        }
+
+    @staticmethod
+    def build_security_warning(blocked_command):
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "red",
+                "title": {"content": "⚠️ 安全威胁拦截警告", "tag": "plain_text"}
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"🚨 **高危系统命令执行请求已被安全沙箱拦截！**\n\n您的输入中检测到了包含系统破坏性或高风险的黑名单特征指令，为了保护基座宿主系统的运行安全，已对该请求进行强行拦截与截断。\n\n**拦截的请求特征**：\n> `{blocked_command}`\n\n*(如果您确实有系统维护管理需求，请登录物理终端进行手动执行。)*"
+                },
+                CardBuilder._create_footer()
+            ]
+        }
