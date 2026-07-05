@@ -6,13 +6,13 @@
 
 ## 📸 界面预览
 
-| 首次部署欢迎与快捷引导 | 交互式工作区项目管理器 | 机器人大模型控制面板 |
+| 首次部署欢迎与快捷引导 | 交互式工作区项目管理器 | 实时动作与工具耗时指示 |
 | :---: | :---: | :---: |
-| ![欢迎卡片](docs/images/screenshot_0.jpg) | ![项目管理器](docs/images/screenshot_1.jpg) | ![模型面板](docs/images/screenshot_2.jpg) |
+| ![欢迎卡片](docs/images/screenshot_1.jpg) | ![项目管理器](docs/images/screenshot_3.jpg) | ![耗时指示](docs/images/screenshot_2.jpg) |
 
-| 可视化偏好记忆管理器 | 危险指令沙箱安全警告 | 系统 OTA 云端热升级 |
+| 视频多模态深度解析 | 生成物自动捕获与回传 | 系统 OTA 自我热升级 |
 | :---: | :---: | :---: |
-| ![记忆管理器](docs/images/screenshot_3.jpg) | ![安全警告](docs/images/screenshot_4.jpg) | ![OTA升级](docs/images/screenshot_5.jpg) |
+| ![视频解析](docs/images/screenshot_4.jpg) | ![生成物回传](docs/images/screenshot_5.jpg) | ![系统升级](docs/images/screenshot_0.jpg) |
 
 ---
 
