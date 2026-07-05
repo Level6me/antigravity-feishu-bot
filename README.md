@@ -4,6 +4,18 @@
 
 ---
 
+## 📸 界面预览
+
+| 首次部署欢迎与快捷引导 | 交互式工作区项目管理器 | 机器人大模型控制面板 |
+| :---: | :---: | :---: |
+| ![欢迎卡片](docs/images/screenshot_0.jpg) | ![项目管理器](docs/images/screenshot_1.jpg) | ![模型面板](docs/images/screenshot_2.jpg) |
+
+| 可视化偏好记忆管理器 | 危险指令沙箱安全警告 | 系统 OTA 云端热升级 |
+| :---: | :---: | :---: |
+| ![记忆管理器](docs/images/screenshot_3.jpg) | ![安全警告](docs/images/screenshot_4.jpg) | ![OTA升级](docs/images/screenshot_5.jpg) |
+
+---
+
 ## 🌟 核心功能清单
 
 本项目通过纯 Python 原生架构实现了与飞书和底层操作系统的深度交互，主要功能包括：
