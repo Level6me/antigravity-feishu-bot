@@ -43,3 +43,6 @@ GiteeClient/
 *.out
 *.txt
 github_deploy_key*
+
+# Whitelist docs images
+!docs/images/*.jpg
