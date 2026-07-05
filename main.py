@@ -199,7 +199,7 @@ async def _process_single_task(chat_id, task):
                 
             if file_key:
                 output_path = os.path.abspath(os.path.join("downloads", file_name))
-                success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, file_key, "image" if m_type == "image" else "file", output_path))
+                success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(item["message_id"], file_key, "image" if m_type == "image" else "file", output_path))
                 if success:
                     media_hints.append(f"{idx+1}. 多模态 {m_type.upper()} 文件路径: `{output_path}`")
                 else:
