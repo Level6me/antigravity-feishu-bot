@@ -177,7 +177,7 @@ class CardBuilder:
                 
             actions = []
             markdown_options = []
-            is_long_options = any(len(opt) > 15 for opt in choice_card_data["options"])
+            is_long_options = any(len(opt) > 6 for opt in choice_card_data["options"])
             
             for i, opt in enumerate(choice_card_data["options"][:10]):
                 prefix_match = re.match(r'^([a-zA-Z0-9\u4e00-\u9fa5]+)[:：.、]\s*(.*)$', opt)
@@ -215,9 +215,17 @@ class CardBuilder:
                 "tag": "markdown",
                 "content": question_text
             })
+            
+            # 根据选项数量动态设置布局，保证按钮等宽对齐
+            layout_mode = "flow"
+            if len(actions) == 2:
+                layout_mode = "bisect"
+            elif len(actions) == 3:
+                layout_mode = "trisection"
+                
             elements.append({
                 "tag": "action",
-                "layout": "flow",
+                "layout": layout_mode,
                 "actions": actions
             })
 
