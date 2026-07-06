@@ -12,6 +12,29 @@ from lark_client import patch_interactive_card_sdk, send_interactive_card_sdk, a
 from multimodal import extract_and_upload_resources
 from database import save_session_async
 
+def extract_final_response_from_transcript(transcript_path):
+    if not transcript_path or not os.path.exists(transcript_path):
+        return None
+    try:
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        if not lines:
+            return None
+        # 从最后一行开始反向查找最新的 PLANNER_RESPONSE
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            data = json.loads(line)
+            if data.get("source") == "MODEL" and data.get("type") == "PLANNER_RESPONSE":
+                # 如果没有 tool_calls (为 None 或空列表)，说明是主模型的最终文字回复
+                if not data.get("tool_calls"):
+                    content = data.get("content", "")
+                    if content.strip():
+                        return content.strip()
+    except Exception as e:
+        log.error(f"Failed to extract final response from transcript: {e}")
+    return None
+
 async def execute_antigravity(
     chat_id, user_text, message_id, bot_reply_msg_id, session_data, 
     is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
@@ -125,54 +148,38 @@ async def execute_antigravity(
     
     while process.returncode is None:
         await asyncio.sleep(0.5)
-        if accumulated_text != last_update_text:
-            if time.time() - last_patch_time >= 1.0:
-                last_update_text = accumulated_text
-                last_patch_time = time.time()
-                clean_text = re.sub(r'\[CHOICE_CARD\].*', '', accumulated_text, flags=re.DOTALL)
-                clean_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', clean_text, flags=re.DOTALL)
-                clean_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', clean_text)
-                if clean_text.strip():
-                    patch_card = CardBuilder.build_ai_response(
-                        clean_text.strip(),
-                        current_model=session_data.get('model', 'Default'),
-                        current_role=session_data.get('role', '无'),
-                        current_project=session_data.get('project', '默认'),
-                        is_streaming=True
-                    )
-                    if bot_reply_msg_id:
-                        await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, patch_card))
+        
+        # 实时从 transcript.jsonl 中获取最新的工具执行动作以更新状态指示器
+        transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
+        action = ""
+        if transcript_path and os.path.exists(transcript_path):
+            try:
+                with open(transcript_path, 'r', encoding='utf-8') as f:
+                    if transcript_path == target_transcript_path:
+                        f.seek(initial_transcript_size)
+                    lines = f.readlines()
+                    if lines:
+                        for line in reversed(lines):
+                            data = json.loads(line)
+                            if data.get("type") == "USER_INPUT":
+                                break
+                            if "tool_calls" in data and len(data["tool_calls"]) > 0:
+                                action = data["tool_calls"][-1].get("args", {}).get("toolAction", "").replace('"', '').strip()
+                                break
+            except Exception:
+                pass
+        
+        think_seconds = int(time.time() - process_start_time)
+        if action:
+            last_tool_action = action
+            indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success, think_seconds)
         else:
-            if not accumulated_text.strip() and time.time() - last_patch_time >= 1.0:
-                transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
-                action = ""
-                if transcript_path and os.path.exists(transcript_path):
-                    try:
-                        with open(transcript_path, 'r', encoding='utf-8') as f:
-                            if transcript_path == target_transcript_path:
-                                f.seek(initial_transcript_size)
-                            lines = f.readlines()
-                            if lines:
-                                for line in reversed(lines):
-                                    data = json.loads(line)
-                                    if data.get("type") == "USER_INPUT":
-                                        break
-                                    if "tool_calls" in data and len(data["tool_calls"]) > 0:
-                                        action = data["tool_calls"][-1].get("args", {}).get("toolAction", "").replace('"', '').strip()
-                                        break
-                    except Exception:
-                        pass
-                
-                think_seconds = int(time.time() - process_start_time)
-                if action:
-                    last_tool_action = action
-                    indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success, think_seconds)
-                else:
-                    indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
-                
-                last_patch_time = time.time()
-                if bot_reply_msg_id:
-                    await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
+            indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
+        
+        if time.time() - last_patch_time >= 1.0:
+            last_patch_time = time.time()
+            if bot_reply_msg_id:
+                await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
                         
         if stdout_task.done() and stderr_task.done():
             break
@@ -197,9 +204,17 @@ async def execute_antigravity(
     await stdout_task
     await stderr_task
     
-    reply_text = accumulated_text.strip()
-    reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
-    reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
+    # 优先从 transcript.jsonl 中提取干净的最终回复，过滤掉前面的中间思考过程与思维链
+    transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
+    final_reply = extract_final_response_from_transcript(transcript_path)
+    
+    if final_reply:
+        reply_text = final_reply
+    else:
+        # 降级：如果提取失败，使用原本的 accumulated_text 逻辑进行兜底
+        reply_text = accumulated_text.strip()
+        reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
+        reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
     
     # Auto-inject images generated by generate_image tool during this run
     if target_transcript_path and os.path.exists(target_transcript_path):

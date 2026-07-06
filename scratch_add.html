@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>添加认证</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        @media (max-width: 576px) {
+            h2 { font-size: 20px; }
+            .card { margin: 0 -15px; border-radius: 0; }
+        }
+        #logs {
+            background: #1e1e1e;
+            color: #00ff00;
+            font-family: monospace;
+            padding: 15px;
+            border-radius: 8px;
+            min-height: 150px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-size: 13px;
+        }
+        #logs .error { color: #ff4444; }
+        #logs .success { color: #00ff00; }
+        #logs .info { color: #00aaff; }
+        .spinner-border { width: 1rem; height: 1rem; }
+    </style>
+</head>
+<body class="bg-light">
+<div class="container-fluid px-3 mt-4">
+    <h2>➕ 添加认证</h2>
+    <a href="/" class="btn btn-outline-secondary mb-3">← 返回</a>
+    
+    <div class="card shadow-sm">
+        <div class="card-body">
+            <form id="authForm">
+                <div class="mb-3">
+                    <label class="form-label fw-bold">域名</label>
+                    <input type="text" name="domain" id="domain" class="form-control form-control-lg" 
+                           placeholder="例如: app.example.com" required 
+                           autocomplete="off" autocorrect="off" autocapitalize="off">
+                    <small class="text-muted">已在 1Panel 配置好的网站域名</small>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-bold">目标服务端口</label>
+                    <input type="number" name="port" id="port" class="form-control form-control-lg" 
+                           placeholder="例如: 8080" required min="1024" max="65535">
+                    <small class="text-muted">网站反代指向的本地端口</small>
+                <button type="submit" id="submitBtn" class="btn btn-primary btn-lg w-100">
+                    ✅ 创建认证
+                </button>
+            </form>
+        </div>
+    </div>
+    
+    <div class="card shadow-sm mt-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span>📋 实时日志</span>
+            <span id="statusBadge" class="badge bg-secondary">等待操作</span>
+        </div>
+        <div class="card-body">
+            <div id="logs">等待开始...</div>
+        </div>
+    </div>
+    
+    <div class="mt-4">
+        <h5>📌 使用说明</h5>
+        <ol class="text-muted small">
+            <li>输入要绑定的域名和目标服务的端口号</li>
+            <li>点击“开始配置”，后台将全自动在 1Panel 创建反代网站并挂载认证</li>
+            <li>（可选）前往 SSL 证书页面一键申请并绑定 HTTPS</li>
+            <li>访问该域名，测试 Keycloak (Passkey) 认证接入是否成功</li>
+        </ol>
+    </div>
+</div>
+
+<script>
+let eventSource = null;
+
+document.getElementById('authForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const domain = document.getElementById('domain').value;
+    const port = document.getElementById('port').value;
+    const btn = document.getElementById('submitBtn');
+    const logs = document.getElementById('logs');
+    const status = document.getElementById('statusBadge');
+    
+    if (!domain || !port) {
+        alert('请填写域名和端口');
+        return;
+    }
+    
+    // 禁用按钮
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>处理中...';
+    status.className = 'badge bg-warning';
+    status.textContent = '处理中';
+    logs.innerHTML = '';
+    
+    // 连接 SSE 日志
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource('/api/logs');
+    
+    eventSource.onmessage = function(e) {
+        if (e.data === 'heartbeat') return;
+        if (e.data) {
+            const line = document.createElement('div');
+            line.textContent = e.data;
+            if (e.data.includes('失败') || e.data.includes('Error')) {
+                line.className = 'error';
+            } else if (e.data.includes('成功') || e.data.includes('完成')) {
+                line.className = 'success';
+            } else {
+                line.className = 'info';
+            }
+            logs.appendChild(line);
+            logs.scrollTop = logs.scrollHeight;
+        }
+    };
+    
+    // 发送创建请求
+    try {
+        const formData = new FormData();
+        formData.append('domain', domain);
+        formData.append('port', port);
+        
+        const response = await fetch('/api/create', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            status.className = 'badge bg-success';
+            status.textContent = '成功';
+            btn.innerHTML = '✅ 完成!';
+            setTimeout(() => {
+                window.location.href = '/';
+            }, 2000);
+        } else {
+            status.className = 'badge bg-danger';
+            status.textContent = '失败';
+            btn.innerHTML = '✅ 创建认证';
+            btn.disabled = false;
+            logs.innerHTML += '<div class="error">错误: ' + result.error + '</div>';
+        }
+    } catch(err) {
+        status.className = 'badge bg-danger';
+        status.textContent = '错误';
+        btn.disabled = false;
+        btn.innerHTML = '✅ 创建认证';
+        logs.innerHTML += '<div class="error">请求失败: ' + err + '</div>';
+    }
+    
+    // 关闭日志连接
+    if (eventSource) {
+        setTimeout(() => eventSource.close(), 3000);
+    }
+});
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
