@@ -59,9 +59,29 @@ def get_system_status_card_data():
         if not err_logs:
             err_logs = "无报错日志"
             
-        return cpu, mem_mb, uptime_str, status, restarts, err_logs
+        import stats
+        bot_stats = stats.get_stats()
+        
+        git_status = "未知"
+        try:
+            branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
+            commit_info = subprocess.check_output(["git", "log", "-1", "--format=%h - %s (%cr)"], text=True).strip()
+            
+            # try to fetch silently
+            subprocess.run(["git", "fetch"], timeout=3, capture_output=True)
+            status_out = subprocess.check_output(["git", "status", "-sb"], text=True).strip().split('\n')[0]
+            
+            update_hint = ""
+            if "behind" in status_out:
+                update_hint = " ⚠️ **(有新版本可更新)**"
+                
+            git_status = f"分支: `{branch}`\n最新: `{commit_info}`{update_hint}"
+        except Exception:
+            git_status = "无法获取 Git 状态"
+            
+        return cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats
     except Exception as e:
-        return 0, 0, "Error", "error", 0, str(e)
+        return 0, 0, "Error", "error", 0, str(e), "Error", {}
 
 
 async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers=None):
@@ -437,8 +457,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             return True, user_text
 
     elif user_text.strip() == "/status":
-        cpu, mem_mb, uptime_str, status, restarts, err_logs = get_system_status_card_data()
-        status_card = CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs)
+        cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats = get_system_status_card_data()
+        status_card = CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats)
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, status_card))
         return True, user_text
 
