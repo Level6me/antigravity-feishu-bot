@@ -702,13 +702,29 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs):
+    def build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status="未知", bot_stats=None):
         status_emoji = "🟢" if status == "online" else "🔴"
-        
+        if not bot_stats:
+            bot_stats = {"total_requests": 0, "success_requests": 0, "failed_requests": 0}
+            
         elements = [
             {
                 "tag": "markdown",
                 "content": f"**服务状态**：{status_emoji} {status.upper()}\n**运行时长**：{uptime_str}\n**重启次数**：{restarts} 次"
+            },
+            {
+                "tag": "hr"
+            },
+            {
+                "tag": "markdown",
+                "content": f"**🌿 代码库状态 (Git)**\n{git_status}"
+            },
+            {
+                "tag": "hr"
+            },
+            {
+                "tag": "markdown",
+                "content": f"**📈 机器人请求统计**\n- **总请求数**: {bot_stats.get('total_requests', 0)}\n- **成功处理**: {bot_stats.get('success_requests', 0)}\n- **执行异常**: {bot_stats.get('failed_requests', 0)}"
             },
             {
                 "tag": "hr"

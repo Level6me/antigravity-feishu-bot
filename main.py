@@ -23,6 +23,7 @@ from lark_client import api_client, send_reply_sdk, send_interactive_card_sdk, p
 from commands import handle_slash_command
 from logger import log
 from card_builder import CardBuilder
+import stats
 from executor import execute_antigravity
 from garbage_collection import garbage_collector
 import time
@@ -40,9 +41,11 @@ async def process_chat_queue(chat_id):
             task = await queue.get()
             try:
                 await _process_single_task(chat_id, task)
+                stats.record_success()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                stats.record_failure()
                 log.error(f"Error processing queued task for {chat_id}: {e}")
             finally:
                 queue.task_done()
@@ -334,8 +337,10 @@ async def send_interactive_card(message_id, card_content):
 
 async def handle_message_async(message_id, chat_id, message_type, content_raw):
     try:
+        stats.record_request()
         await _handle_message_async_internal(message_id, chat_id, message_type, content_raw)
     except Exception as e:
+        stats.record_failure()
         import traceback
         log.error(f"[FATAL ERROR in handle_message_async]: {e}")
         traceback.print_exc()
@@ -384,6 +389,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     if session_data.get("pending_command") or (raw_text.startswith("/") and message_type in ["text", "post", "link"]):
         handled, override_text = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
         if handled:
+            stats.record_success()
             return
         if override_text:
             raw_text = override_text
@@ -671,8 +677,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if main_loop and main_loop.is_running():
             async def do_refresh_status():
                 from commands import get_system_status_card_data
-                cpu, mem_mb, uptime_str, status, restarts, err_logs = get_system_status_card_data()
-                new_card = CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs)
+                cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats = get_system_status_card_data()
+                new_card = CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             asyncio.run_coroutine_threadsafe(do_refresh_status(), main_loop)
             
