@@ -623,6 +623,13 @@ class CardBuilder:
                 "content": "📝 **您的记事本内容：**"
             })
             for i, note in enumerate(notes):
+                title = note
+                match = re.search(r'^\[(.*?)\]', note)
+                if match:
+                    title = match.group(1)
+                else:
+                    title = note[:15] + ("..." if len(note) > 15 else "")
+                
                 elements.append({
                     "tag": "column_set",
                     "flex_mode": "none",
@@ -636,7 +643,7 @@ class CardBuilder:
                             "elements": [
                                 {
                                     "tag": "markdown",
-                                    "content": f"**{i+1}.** {note}"
+                                    "content": f"**{i+1}.** {title}"
                                 }
                             ]
                         },
@@ -645,6 +652,13 @@ class CardBuilder:
                             "width": "auto",
                             "vertical_align": "top",
                             "elements": [
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "🔍 详情"},
+                                    "type": "default",
+                                    "size": "small",
+                                    "value": {"action": "view_note_detail", "index": i}
+                                },
                                 {
                                     "tag": "button",
                                     "text": {"tag": "plain_text", "content": "🗑️ 删除"},
