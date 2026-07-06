@@ -21,6 +21,45 @@ def get_version_string(commit_ref="HEAD"):
     except Exception:
         return f"Unknown (Build: error)"
 
+def get_system_status_card_data():
+    try:
+        out = subprocess.check_output(['pm2', 'jlist'], text=True)
+        pm2_list = json.loads(out)
+        
+        bot_info = next((item for item in pm2_list if item['name'] == 'feishu-bot'), None)
+        if bot_info:
+            status = bot_info['pm2_env']['status']
+            uptime = bot_info['pm2_env']['pm_uptime']
+            restarts = bot_info['pm2_env']['restart_time']
+            cpu = bot_info['monit']['cpu']
+            mem_mb = round(bot_info['monit']['memory'] / (1024 * 1024), 1)
+        else:
+            return 0, 0, "Unknown", "offline", 0, "No process found"
+            
+        import time
+        now = time.time() * 1000
+        uptime_ms = now - uptime
+        minutes = int(uptime_ms / (1000 * 60)) % 60
+        hours = int(uptime_ms / (1000 * 60 * 60)) % 24
+        days = int(uptime_ms / (1000 * 60 * 60 * 24))
+        
+        uptime_parts = []
+        if days > 0: uptime_parts.append(f"{days}天")
+        if hours > 0: uptime_parts.append(f"{hours}小时")
+        uptime_parts.append(f"{minutes}分钟")
+        uptime_str = "".join(uptime_parts) if uptime_parts else "<1分钟"
+        
+        err_out = subprocess.check_output(['pm2', 'logs', 'feishu-bot', '--err', '--lines', '5', '--nostream'], text=True)
+        err_lines = [l for l in err_out.split('\\n') if not l.startswith('[TAILING]') and not l.startswith('/Users') and l.strip()]
+        err_logs = '\\n'.join(err_lines).strip()
+        if not err_logs:
+            err_logs = "无报错日志"
+            
+        return cpu, mem_mb, uptime_str, status, restarts, err_logs
+    except Exception as e:
+        return 0, 0, "Error", "error", 0, str(e)
+
+
 async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers=None):
     log.info(f"handle_slash_command call: user_text='{user_text}', pending_command='{session_data.get('pending_command')}'")
     """
