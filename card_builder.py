@@ -708,21 +708,21 @@ class CardBuilder:
         elements = [
             {
                 "tag": "markdown",
-                "content": f"**服务状态**：{status_emoji} {status.upper()}\\n**运行时长**：{uptime_str}\\n**重启次数**：{restarts} 次"
+                "content": f"**服务状态**：{status_emoji} {status.upper()}\n**运行时长**：{uptime_str}\n**重启次数**：{restarts} 次"
             },
             {
                 "tag": "hr"
             },
             {
                 "tag": "markdown",
-                "content": f"**💻 资源占用**\\n- **CPU**：{cpu}%\\n- **内存**：{mem_mb} MB"
+                "content": f"**💻 资源占用**\n- **CPU**：{cpu}%\n- **内存**：{mem_mb} MB"
             }
         ]
         
         if err_logs:
             elements.append({
                 "tag": "markdown",
-                "content": f"**⚠️ 最近错误日志**\\n```\\n{err_logs}\\n```"
+                "content": f"**⚠️ 最近错误日志**\n```text\n{err_logs}\n```"
             })
             
         elements.append({
