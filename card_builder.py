@@ -700,3 +700,53 @@ class CardBuilder:
             },
             "elements": elements
         }
+
+    @staticmethod
+    def build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs):
+        status_emoji = "🟢" if status == "online" else "🔴"
+        
+        elements = [
+            {
+                "tag": "markdown",
+                "content": f"**服务状态**：{status_emoji} {status.upper()}\\n**运行时长**：{uptime_str}\\n**重启次数**：{restarts} 次"
+            },
+            {
+                "tag": "hr"
+            },
+            {
+                "tag": "markdown",
+                "content": f"**💻 资源占用**\\n- **CPU**：{cpu}%\\n- **内存**：{mem_mb} MB"
+            }
+        ]
+        
+        if err_logs:
+            elements.append({
+                "tag": "markdown",
+                "content": f"**⚠️ 最近错误日志**\\n```\\n{err_logs}\\n```"
+            })
+            
+        elements.append({
+            "tag": "hr"
+        })
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔄 刷新状态"},
+                    "type": "primary",
+                    "value": {"action": "refresh_status"}
+                }
+            ]
+        })
+        
+        elements.append(CardBuilder._create_footer())
+        
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "blue",
+                "title": {"content": "📊 服务器运行状态", "tag": "plain_text"}
+            },
+            "elements": elements
+        }

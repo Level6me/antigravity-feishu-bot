@@ -666,6 +666,17 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_clear_notes(), main_loop)
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "您的记事本已被全部清空！"}})
+        
+    elif action_value.get("action") == "refresh_status":
+        if main_loop and main_loop.is_running():
+            async def do_refresh_status():
+                from commands import get_system_status_card_data
+                cpu, mem_mb, uptime_str, status, restarts, err_logs = get_system_status_card_data()
+                new_card = CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_refresh_status(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "状态已刷新！"}})
 
     elif action_value.get("action") == "forget_single_memory":
         idx = int(action_value.get("index"))
