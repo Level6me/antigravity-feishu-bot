@@ -623,6 +623,18 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             },
             "toast": {"type": "success", "content": "项目已成功从列表中移出！"}
         })
+    elif action_value.get("action") == "view_note_detail":
+        idx = int(action_value.get("index"))
+        if main_loop and main_loop.is_running():
+            async def do_view_note():
+                session_data = await get_session_async(chat_id)
+                notes = session_data.get("notes", [])
+                if 0 <= idx < len(notes):
+                    note_content = notes[idx]
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, f"📝 **笔记详情**:\\n{note_content}"))
+            asyncio.run_coroutine_threadsafe(do_view_note(), main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "详情已发送到当前会话！"}})
+        
     elif action_value.get("action") == "delete_note":
         idx = int(action_value.get("index"))
         
