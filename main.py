@@ -248,6 +248,12 @@ async def _process_single_task(chat_id, task):
     if current_proj in project_prompts and project_prompts[current_proj]:
         proj_prompt_text = project_prompts[current_proj]
         system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
+        
+    # 注入用户备忘录 Notes
+    notes = session_data.get("notes", [])
+    if notes:
+        notes_block = "\n".join([f"- {note}" for note in notes])
+        system_instruction += f"[User's Permanent Notes / 备忘录]\n{notes_block}\n\n"
     
     # Load long-term memory if this is a new conversation
     final_prompt = user_text

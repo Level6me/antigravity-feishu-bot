@@ -343,6 +343,61 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
 
+    elif user_text.startswith("/note"):
+        parts = user_text.split(" ", 1)
+        subcommand = parts[1].strip() if len(parts) > 1 else ""
+        notes = session_data.get("notes", [])
+        
+        if not subcommand or subcommand == "list" or user_text.strip() == "/notes":
+            if not notes:
+                reply_text = "📝 您的记事本目前是空的。"
+            else:
+                reply_text = "📝 **您的记事本内容：**\n"
+                for idx, note in enumerate(notes, 1):
+                    reply_text += f"{idx}. {note}\n"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text.strip()))
+            return True, user_text
+            
+        elif subcommand.startswith("add "):
+            note_content = subcommand[4:].strip()
+            notes.append(note_content)
+            session_data["notes"] = notes
+            await save_session_async(chat_id, session_data)
+            reply_text = f"✅ 已保存笔记：\n{note_content}"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+            
+        elif subcommand.startswith("del "):
+            try:
+                idx = int(subcommand[4:].strip()) - 1
+                if 0 <= idx < len(notes):
+                    deleted = notes.pop(idx)
+                    session_data["notes"] = notes
+                    await save_session_async(chat_id, session_data)
+                    reply_text = f"🗑️ 已删除笔记：\n{deleted}"
+                else:
+                    reply_text = "❌ 找不到指定编号的笔记，请使用 `/note list` 查看编号。"
+            except ValueError:
+                reply_text = "❌ 格式错误，正确用法：`/note del <编号>`"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+            
+        elif subcommand == "clear":
+            session_data["notes"] = []
+            await save_session_async(chat_id, session_data)
+            reply_text = "🧹 您的记事本已清空！"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+            
+        else:
+            # 默认直接作为添加
+            notes.append(subcommand)
+            session_data["notes"] = notes
+            await save_session_async(chat_id, session_data)
+            reply_text = f"✅ 已保存笔记：\n{subcommand}"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+
     elif user_text.startswith("/role"):
         parts = user_text.split(" ", 1)
         if len(parts) > 1 and parts[1].strip():
@@ -408,6 +463,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 🔹 `/remember <设定>` : 让机器人永久记住你的偏好 (例如: `/remember 我写代码只用 Python`)
 🔹 `/memory` : 查看机器人当前记住的所有偏好
 🔹 `/forget` : 清除机器人的长时记忆偏好
+🔹 `/note [内容]` : 添加或管理备忘录 (支持 add/list/del/clear)
 🔹 `/clear` : 清空当前对话的上下文记忆，重新开始
 🔹 `/stop` : 紧急刹车！强制中止正在后台生成的耗时任务
 🔹 `/update` : 检查并获取云端最新版本的机器人引擎核心
