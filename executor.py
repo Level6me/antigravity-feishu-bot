@@ -38,6 +38,15 @@ def extract_final_response_from_transcript(transcript_path):
 def extract_final_chinese_response(text):
     if not text:
         return ""
+    
+    # 清除可能出现在句首的“我将用中文回复用户”之类的英文申明前缀
+    text = re.sub(
+        r'^(?:I\s+will|Sure,?\s+I\s+will)\s+(?:report|summarize|explain|respond|write|reply|communicate|answer)\b.+?in\s+(?:Simplified\s+)?Chinese\.?\s*',
+        '',
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    ).strip()
+    
     paragraphs = text.split('\n\n')
     
     start_idx = -1
