@@ -20,17 +20,30 @@ def extract_final_response_from_transcript(transcript_path):
             lines = f.readlines()
         if not lines:
             return None
-        # 从最后一行开始反向查找最新的 PLANNER_RESPONSE
+            
+        responses = []
+        # 从最后一行开始反向查找，收集所有的纯文字回复，直到遇到上一个用户的输入
         for line in reversed(lines):
             if not line.strip():
                 continue
             data = json.loads(line)
+            
+            # 如果遇到用户输入，说明属于当前对话回合的日志结束了
+            if data.get("type") == "USER_INPUT":
+                break
+                
             if data.get("source") == "MODEL" and data.get("type") == "PLANNER_RESPONSE":
-                # 如果没有 tool_calls (为 None 或空列表)，说明是主模型的最终文字回复
+                # 如果没有 tool_calls (为 None 或空列表)，说明是主模型的纯文字回复
                 if not data.get("tool_calls"):
                     content = data.get("content", "")
                     if content.strip():
-                        return content.strip()
+                        responses.append(content.strip())
+                        
+        if responses:
+            # 因为是倒序收集的，所以拼接前需要反转顺序
+            responses.reverse()
+            return "\n\n".join(responses)
+            
     except Exception as e:
         log.error(f"Failed to extract final response from transcript: {e}")
     return None
