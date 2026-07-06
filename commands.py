@@ -349,13 +349,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         notes = session_data.get("notes", [])
         
         if not subcommand or subcommand == "list" or user_text.strip() == "/notes":
-            if not notes:
-                reply_text = "📝 您的记事本目前是空的。"
-            else:
-                reply_text = "📝 **您的记事本内容：**\n"
-                for idx, note in enumerate(notes, 1):
-                    reply_text += f"{idx}. {note}\n"
-            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text.strip()))
+            note_card = CardBuilder.build_note_list_card(notes)
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, note_card))
             return True, user_text
             
         elif subcommand.startswith("add "):
