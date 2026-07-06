@@ -50,8 +50,12 @@ def get_system_status_card_data():
         uptime_str = "".join(uptime_parts) if uptime_parts else "<1分钟"
         
         err_out = subprocess.check_output(['pm2', 'logs', 'feishu-bot', '--err', '--lines', '5', '--nostream'], text=True)
-        err_lines = [l for l in err_out.split('\\n') if not l.startswith('[TAILING]') and not l.startswith('/Users') and l.strip()]
-        err_logs = '\\n'.join(err_lines).strip()
+        # Strip ANSI escape codes
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        err_out = ansi_escape.sub('', err_out)
+        
+        err_lines = [l for l in err_out.split('\n') if not l.startswith('[TAILING]') and not l.startswith('/Users') and l.strip()]
+        err_logs = '\n'.join(err_lines).strip()
         if not err_logs:
             err_logs = "无报错日志"
             
