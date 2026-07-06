@@ -608,3 +608,81 @@ class CardBuilder:
                 CardBuilder._create_footer()
             ]
         }
+
+    @staticmethod
+    def build_note_list_card(notes):
+        elements = []
+        if not notes:
+            elements.append({
+                "tag": "markdown",
+                "content": "📝 **您的记事本目前是空的。**"
+            })
+        else:
+            elements.append({
+                "tag": "markdown",
+                "content": "📝 **您的记事本内容：**"
+            })
+            for i, note in enumerate(notes):
+                elements.append({
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "background_style": "default",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "vertical_align": "top",
+                            "elements": [
+                                {
+                                    "tag": "markdown",
+                                    "content": f"**{i+1}.** {note}"
+                                }
+                            ]
+                        },
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "top",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "text": {"tag": "plain_text", "content": "🗑️ 删除"},
+                                    "type": "danger",
+                                    "size": "small",
+                                    "value": {"action": "delete_note", "index": i}
+                                }
+                            ]
+                        }
+                    ]
+                })
+            
+            elements.append({
+                "tag": "hr"
+            })
+            elements.append({
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🧹 清空全部记事本"},
+                        "type": "danger",
+                        "confirm": {
+                            "title": {"tag": "plain_text", "content": "确认清空"},
+                            "text": {"tag": "plain_text", "content": "您确定要清空所有笔记吗？此操作不可撤销。"}
+                        },
+                        "value": {"action": "clear_notes"}
+                    }
+                ]
+            })
+            
+        elements.append(CardBuilder._create_footer())
+        
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "orange",
+                "title": {"content": "📔 机器人记事本", "tag": "plain_text"}
+            },
+            "elements": elements
+        }

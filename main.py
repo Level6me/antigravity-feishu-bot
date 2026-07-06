@@ -623,6 +623,37 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             },
             "toast": {"type": "success", "content": "项目已成功从列表中移出！"}
         })
+    elif action_value.get("action") == "delete_note":
+        idx = int(action_value.get("index"))
+        
+        if main_loop and main_loop.is_running():
+            async def do_delete_note():
+                session_data = await get_session_async(chat_id)
+                notes = session_data.get("notes", [])
+                if 0 <= idx < len(notes):
+                    removed = notes.pop(idx)
+                    session_data["notes"] = notes
+                    await save_session_async(chat_id, session_data)
+                    log.info(f"Removed note: '{removed}' in chat {chat_id}")
+                    
+                    new_card = CardBuilder.build_note_list_card(notes)
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_delete_note(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功删除该条笔记！"}})
+        
+    elif action_value.get("action") == "clear_notes":
+        if main_loop and main_loop.is_running():
+            async def do_clear_notes():
+                session_data = await get_session_async(chat_id)
+                session_data["notes"] = []
+                await save_session_async(chat_id, session_data)
+                
+                new_card = CardBuilder.build_note_list_card([])
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_clear_notes(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "您的记事本已被全部清空！"}})
 
     elif action_value.get("action") == "forget_single_memory":
         idx = int(action_value.get("index"))
