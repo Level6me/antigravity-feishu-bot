@@ -11,6 +11,7 @@ from card_builder import CardBuilder
 from lark_client import patch_interactive_card_sdk, send_interactive_card_sdk, api_client
 from multimodal import extract_and_upload_resources
 from database import save_session_async
+import stats
 
 def extract_final_response_from_transcript(transcript_path):
     if not transcript_path or not os.path.exists(transcript_path):
@@ -297,6 +298,11 @@ async def execute_antigravity(
     if not reply_text:
         reply_text = stderr_text.strip() or "Sorry, I couldn't generate a response."
         is_error = True
+    else:
+        # Rough token estimation for local accounting
+        # Typically 1 Chinese char = ~1 token, English word = ~1.3 tokens
+        approx_tokens = len(user_text) + len(reply_text)
+        stats.record_tokens(approx_tokens)
 
     choice_card_data = None
     if not is_error:
