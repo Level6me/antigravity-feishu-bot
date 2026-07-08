@@ -462,6 +462,20 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, status_card))
         return True, user_text
 
+    elif user_text.strip() == "/memory":
+        memories = []
+        memory_file = os.path.expanduser("~/.gemini/antigravity-cli/global_memory.json")
+        try:
+            if os.path.exists(memory_file):
+                with open(memory_file, "r", encoding="utf-8") as f:
+                    memories = json.load(f)
+        except Exception as e:
+            log.error(f"Error reading memory file: {e}")
+            
+        memory_card = CardBuilder.build_memory_card(memories)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, memory_card))
+        return True, user_text
+
     elif user_text.startswith("/role"):
         parts = user_text.split(" ", 1)
         if len(parts) > 1 and parts[1].strip():
