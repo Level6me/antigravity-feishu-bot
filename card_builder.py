@@ -731,6 +731,13 @@ class CardBuilder:
             },
             {
                 "tag": "markdown",
+                "content": f"**💡 模型算力消耗统计 (自带模型)**\n- **累计消耗 Tokens**: {bot_stats.get('total_tokens', 0):,}\n*(注：因使用内置模型，此为本地模拟统计算法，仅供参考并不产生真实扣费)*"
+            },
+            {
+                "tag": "hr"
+            },
+            {
+                "tag": "markdown",
                 "content": f"**💻 资源占用**\n- **CPU**：{cpu}%\n- **内存**：{mem_mb} MB"
             }
         ]
