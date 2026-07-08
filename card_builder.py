@@ -731,7 +731,7 @@ class CardBuilder:
             },
             {
                 "tag": "markdown",
-                "content": f"**💡 模型算力消耗统计 (自带模型)**\n- **累计消耗 Tokens**: {bot_stats.get('total_tokens', 0):,}\n*(注：因使用内置模型，此为本地模拟统计算法，仅供参考并不产生真实扣费)*"
+                "content": f"**💡 模型算力消耗统计 (自带模型)**\n- **累计消耗 Tokens**: {bot_stats.get('total_tokens', 0):,}"
             },
             {
                 "tag": "hr"
@@ -742,12 +742,6 @@ class CardBuilder:
             }
         ]
         
-        if err_logs:
-            elements.append({
-                "tag": "markdown",
-                "content": f"**⚠️ 最近错误日志**\n```text\n{err_logs}\n```"
-            })
-            
         elements.append({
             "tag": "hr"
         })
