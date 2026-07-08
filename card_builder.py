@@ -766,3 +766,55 @@ class CardBuilder:
             },
             "elements": elements
         }
+
+    @staticmethod
+    def build_memory_card(memories):
+        elements = [
+            {
+                "tag": "markdown",
+                "content": "**🧠 Antigravity 全局记忆核心看板**\n这是一个自动生成的专属看板，用于展示机器人的长期跨会话记忆。所有的内容都会被持久化存储在宿主机本地。"
+            },
+            {
+                "tag": "hr"
+            }
+        ]
+        
+        if not memories:
+            elements.append({
+                "tag": "markdown",
+                "content": "*目前记忆库为空。*"
+            })
+        else:
+            # Reverse to show newest first, limit to last 10 for card size
+            recent_memories = list(reversed(memories))[:10]
+            for idx, mem in enumerate(recent_memories):
+                time_str = mem.get("time", mem.get("timestamp", "未知时间"))
+                content = mem.get("memory", mem.get("content", ""))
+                elements.append({
+                    "tag": "markdown",
+                    "content": f"**🕒 {time_str}**\n{content}"
+                })
+                if idx < len(recent_memories) - 1:
+                    elements.append({
+                        "tag": "hr"
+                    })
+                    
+            if len(memories) > 10:
+                elements.append({
+                    "tag": "hr"
+                })
+                elements.append({
+                    "tag": "markdown",
+                    "content": f"*(还有 {len(memories) - 10} 条较早的记忆被折叠...)*"
+                })
+                
+        elements.append(CardBuilder._create_footer())
+        
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "purple",
+                "title": {"content": "🧠 机器人全局记忆库", "tag": "plain_text"}
+            },
+            "elements": elements
+        }
