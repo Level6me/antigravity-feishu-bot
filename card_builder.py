@@ -768,7 +768,7 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_memory_card(memories):
+    def build_global_memory_card(memories):
         elements = [
             {
                 "tag": "markdown",
