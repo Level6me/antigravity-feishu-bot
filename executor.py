@@ -299,9 +299,20 @@ async def execute_antigravity(
         reply_text = stderr_text.strip() or "Sorry, I couldn't generate a response."
         is_error = True
     else:
-        # Rough token estimation for local accounting
-        # Typically 1 Chinese char = ~1 token, English word = ~1.3 tokens
+        # 统计整体 Agent 执行消耗：
+        # 包含最终回复和用户输入
         approx_tokens = len(user_text) + len(reply_text)
+        
+        # 将 Agent 的底层思考和中间工具调用的过程一并计入耗损
+        if transcript_path and os.path.exists(transcript_path):
+            try:
+                current_size = os.path.getsize(transcript_path)
+                added_bytes = max(0, current_size - initial_transcript_size)
+                # 假设每2个字节的底层 JSON 记录大约折合 1 个 Token 的运算量（这包括了反复提交给大模型的上下文和思考过程）
+                approx_tokens += int(added_bytes * 0.5)
+            except Exception as e:
+                log.error(f"Failed to calculate transcript token usage: {e}")
+                
         stats.record_tokens(approx_tokens)
 
     choice_card_data = None
