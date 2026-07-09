@@ -53,28 +53,17 @@ def extract_final_chinese_response(text):
     if not text:
         return ""
     
-    # 清除可能出现在句首的“我将用中文回复用户”之类的英文申明前缀
+    # 移除常见的英文申明前缀
     text = re.sub(
-        r'^(?:I\s+will|Sure,?\s+I\s+will)\s+(?:report|summarize|explain|respond|write|reply|communicate|answer)\b.+?in\s+(?:Simplified\s+)?Chinese\.?\s*',
+        r'^(?:I\s+will|Sure,?\s+I\s+will|Let\s+me)\s+(?:report|summarize|explain|respond|write|reply|communicate|answer)\b.+?in\s+(?:Simplified\s+)?Chinese\.?\s*',
         '',
         text,
         flags=re.IGNORECASE | re.DOTALL
     ).strip()
     
-    paragraphs = text.split('\n\n')
+    # 移除被 XML 标签包裹的思考过程，如 <thought>...</thought> (防呆)
+    text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
     
-    start_idx = -1
-    for idx, p in enumerate(paragraphs):
-        # 统计中文字符数量
-        chinese_chars = len(re.findall(r'[\u4e00-\u9fa5]', p))
-        if chinese_chars > 0:
-            # 如果段落内中文大于等于 8 个字，或者中文字符比例超过 15%，认为是正式中文回复段落
-            if chinese_chars >= 8 or (chinese_chars / len(p)) >= 0.15:
-                start_idx = idx
-                break
-                
-    if start_idx != -1:
-        return '\n\n'.join(paragraphs[start_idx:])
     return text
 
 async def execute_antigravity(
@@ -227,9 +216,9 @@ async def execute_antigravity(
             break
 
     try:
-        await asyncio.wait_for(process.wait(), timeout=3600.0)
-    except asyncio.TimeoutError:
-        log.error("Process execution timed out, terminating process group...")
+        await process.wait()
+    except Exception as e:
+        log.error(f"Process wait error: {e}")
         import signal
         try:
             pgid = os.getpgid(process.pid)
@@ -308,8 +297,8 @@ async def execute_antigravity(
             try:
                 current_size = os.path.getsize(transcript_path)
                 added_bytes = max(0, current_size - initial_transcript_size)
-                # 假设每2个字节的底层 JSON 记录大约折合 1 个 Token 的运算量（这包括了反复提交给大模型的上下文和思考过程）
-                approx_tokens += int(added_bytes * 0.5)
+                # Better heuristic: 1 token ~ 1.5 chars for Chinese, JSON bytes inflated by ~2.5x vs actual tokens
+                approx_tokens = int((len(user_text) + len(reply_text)) * 1.5 + added_bytes / 2.5)
             except Exception as e:
                 log.error(f"Failed to calculate transcript token usage: {e}")
                 
