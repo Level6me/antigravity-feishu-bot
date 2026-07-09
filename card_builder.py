@@ -623,7 +623,14 @@ class CardBuilder:
                 "content": "📝 **您的记事本内容：**"
             })
             for i, note in enumerate(notes):
-                title = note.split(' ', 1)[0]
+                parts = note.split(' ', 1)
+                title = parts[0]
+                preview = parts[1][:40].replace('\n', ' ') + ("..." if len(parts[1]) > 40 else "") if len(parts) > 1 else ""
+                
+                md_content = f"**{i+1}.** {title}"
+                if preview:
+                    md_content += f"\n<font color='grey'>{preview}</font>"
+
                 elements.append({
                     "tag": "column_set",
                     "flex_mode": "none",
@@ -637,7 +644,7 @@ class CardBuilder:
                             "elements": [
                                 {
                                     "tag": "markdown",
-                                    "content": f"**{i+1}.** {title}"
+                                    "content": md_content
                                 }
                             ]
                         },
