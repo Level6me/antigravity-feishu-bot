@@ -82,7 +82,13 @@ def get_system_status_card_data():
         return cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats
     except Exception as e:
         return 0, 0, "Error", "error", 0, str(e), "Error", {}
+from enum import Enum
 
+class PendingCommand(str, Enum):
+    REMEMBER = "remember"
+    ROLE = "role"
+    PROJECT = "project"
+    CREATE_PROJECT = "create_project"
 
 async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers=None):
     log.info(f"handle_slash_command call: user_text='{user_text}', pending_command='{session_data.get('pending_command')}'")
@@ -100,7 +106,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         pending_command = None
         
     if not user_text.startswith("/") and pending_command:
-        if pending_command == "remember":
+        if pending_command == PendingCommand.REMEMBER:
             memory_text = user_text.strip()
             memories = await get_profile_async(chat_id)
             memories.append(memory_text)
@@ -111,7 +117,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
             
-        elif pending_command == "role":
+        elif pending_command == PendingCommand.ROLE:
             new_role = user_text.strip()
             session_data["role"] = new_role
             session_data.pop("pending_command", None)
@@ -119,7 +125,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
             return False, user_text
             
-        elif pending_command == "project":
+        elif pending_command == PendingCommand.PROJECT:
             new_project = user_text.strip()
             if new_project.lower() in ["clear", "default", "默认", "reset"]:
                 session_data["project"] = "默认"
@@ -132,7 +138,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
             
-        elif pending_command == "create_project":
+        elif pending_command == PendingCommand.CREATE_PROJECT:
             input_text = user_text.strip()
             ws_root = session_data.get("workspace_root")
             parent_path = ws_root if ws_root and os.path.exists(ws_root) else WORKSPACE_ROOT
@@ -316,7 +322,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
         else:
-            session_data["pending_command"] = "remember"
+            session_data["pending_command"] = PendingCommand.REMEMBER
             await save_session_async(chat_id, session_data)
             reply_text = "🧠 请直接输入您希望我永久记住的偏好或设定："
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
@@ -374,8 +380,10 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         
         try:
-            # Hard reset to origin/main
-            subprocess.run(["git", "reset", "--hard", "origin/main"], capture_output=True, text=True, check=True)
+            # Safe update without losing local uncommitted changes
+            subprocess.run(["git", "stash"], capture_output=True, text=True, check=False)
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True)
+            subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False)
             
             # Install new requirements if any
             pip_cmd = ["venv/bin/pip", "install", "-r", "requirements.txt"]
@@ -485,7 +493,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
             return False, user_text
         else:
-            session_data["pending_command"] = "role"
+            session_data["pending_command"] = PendingCommand.ROLE
             await save_session_async(chat_id, session_data)
             reply_text = "🎭 请直接输入您希望我扮演的角色（例如：资深Python工程师）："
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))

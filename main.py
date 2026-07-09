@@ -54,6 +54,157 @@ async def process_chat_queue(chat_id):
     finally:
         chat_workers.pop(chat_id, None)
 
+async def _process_image_message(loop, message_id, content_json, content_raw):
+    image_key = content_json.get("image_key", "")
+    if not image_key:
+        match = re.search(r'img_[a-zA-Z0-9_\-]+', content_raw)
+        if match:
+            image_key = match.group(0)
+
+    if not image_key and content_raw.startswith("[Image: ") and content_raw.endswith("]"):
+        image_key = content_raw[8:-1]
+    
+    bot_reply_msg_id = None
+    if image_key:
+        os.makedirs("downloads", exist_ok=True)
+        output_filename = f"downloads/img_{image_key}.jpg"
+        
+        dl_card = CardBuilder.build_download_indicator(os.path.basename(output_filename), "图片")
+        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
+        
+        output_path = os.path.abspath(output_filename)
+        success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
+        
+        return f"请查看这张图片并做出回应。图片路径: {output_path}", os.path.basename(output_filename), success, bot_reply_msg_id
+    else:
+        return "[未获取到图片]", None, True, None
+
+async def _process_post_message(loop, message_id, content_json):
+    texts = []
+    image_keys = []
+    for line in content_json.get("content", []):
+        for elem in line:
+            if elem.get("tag") == "text":
+                texts.append(elem.get("text", ""))
+            elif elem.get("tag") == "img":
+                image_keys.append(elem.get("image_key", ""))
+    
+    user_text = " ".join(texts)
+    bot_reply_msg_id = None
+    downloaded_file_name = None
+    download_success = True
+    
+    if image_keys:
+        image_key = image_keys[0]
+        os.makedirs("downloads", exist_ok=True)
+        output_filename = f"downloads/img_{image_key}.jpg"
+        
+        dl_card = CardBuilder.build_download_indicator("图片内容")
+        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
+        
+        output_path = os.path.abspath(output_filename)
+        download_success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
+        
+        downloaded_file_name = os.path.basename(output_filename)
+        user_text += f"\n[附加图片路径: {output_path}]"
+        
+    return user_text, downloaded_file_name, download_success, bot_reply_msg_id
+
+async def _process_link_message(content_json):
+    if isinstance(content_json, dict):
+        user_text = content_json.get("url", content_json.get("href", ""))
+    else:
+        user_text = str(content_json)
+    return user_text, None, True, None
+
+async def _process_file_audio_media_message(loop, message_id, message_type, content_json):
+    file_key = content_json.get("file_key", "")
+    file_name = content_json.get("file_name", "")
+    bot_reply_msg_id = None
+    download_success = True
+    downloaded_file_name = None
+    user_text = ""
+    
+    if file_key:
+        if not file_name:
+            if message_type == "audio":
+                file_name = f"audio_{file_key}.ogg"
+            elif message_type == "media":
+                file_name = f"video_{file_key}.mp4"
+            else:
+                file_name = f"file_{file_key}"
+        
+        if message_type == "media" and not file_name.lower().endswith(".mp4"):
+            file_name = file_key + ".mp4"
+        if message_type == "audio" and "." not in file_name:
+            file_name = file_key + ".ogg"
+        
+        # Purify file_name to prevent directory traversal
+        file_name = os.path.basename(file_name)
+        
+        os.makedirs("downloads", exist_ok=True)
+        output_filename = os.path.join("downloads", file_name)
+        dl_card = CardBuilder.build_download_indicator(file_name, message_type)
+        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
+
+        output_path = os.path.abspath(output_filename)
+        download_success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, file_key, "file", output_path))
+        
+        downloaded_file_name = file_name
+        download_success = success
+        
+        if message_type == "file":
+            user_text = f"请详细阅读这份文件（{file_name}），并做出响应。文件路径: {output_path}"
+        elif message_type == "audio":
+            user_text = f"请仔细听这段语音内容（语音文件路径: {output_path}），并做出响应。"
+        elif message_type == "media":
+            user_text = f"请仔细观看这段视频内容（视频文件路径: {output_path}），并做出响应。"
+            
+    return user_text, downloaded_file_name, download_success, bot_reply_msg_id
+
+async def _process_batch_media_message(loop, message_id, content_json):
+    items = content_json.get("items", [])
+    media_hints = []
+    download_success = True
+    
+    # 批量下发资源加载指示器
+    dl_card = CardBuilder.build_download_indicator(f"合并批处理 ({len(items)} 个文件)", "多媒体组")
+    bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
+    
+    os.makedirs("downloads", exist_ok=True)
+    
+    for idx, item in enumerate(items):
+        m_type = item["message_type"]
+        c_json = item["content_json"]
+        c_raw = item["content_raw"]
+        
+        file_key = ""
+        file_name = ""
+        if m_type == "image":
+            file_key = c_json.get("image_key", "")
+            if not file_key:
+                match = re.search(r'img_[a-zA-Z0-9_\-]+', c_raw)
+                if match:
+                    file_key = match.group(0)
+            file_name = f"batch_img_{idx}_{file_key}.jpg"
+        else:
+            file_key = c_json.get("file_key", "")
+            file_name = c_json.get("file_name", f"batch_file_{idx}_{file_key}")
+            file_name = os.path.basename(file_name)
+            
+        if file_key:
+            output_path = os.path.abspath(os.path.join("downloads", file_name))
+            success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(item["message_id"], file_key, "image" if m_type == "image" else "file", output_path))
+            if success:
+                media_hints.append(f"{idx+1}. 多模态 {m_type.upper()} 文件路径: `{output_path}`")
+            else:
+                download_success = False
+                media_hints.append(f"{idx+1}. 多模态 {m_type.upper()} 文件 `{file_name}` (下载失败)")
+                
+    user_text = f"请查看以下 {len(items)} 个关联多模态文件并做出综合关联回应：\n\n" + "\n".join(media_hints)
+    downloaded_file_name = f"合并批处理 ({len(items)} 个文件)"
+    return user_text, downloaded_file_name, download_success, bot_reply_msg_id
+
 async def _process_single_task(chat_id, task):
     message_id = task["message_id"]
     message_type = task["message_type"]
@@ -78,139 +229,15 @@ async def _process_single_task(chat_id, task):
     if message_type == "text":
         user_text = raw_text
     elif message_type == "image":
-        image_key = content_json.get("image_key", "")
-        if not image_key:
-            match = re.search(r'img_[a-zA-Z0-9_\-]+', content_raw)
-            if match:
-                image_key = match.group(0)
-
-        if not image_key and content_raw.startswith("[Image: ") and content_raw.endswith("]"):
-            image_key = content_raw[8:-1]
-        
-        if image_key:
-            os.makedirs("downloads", exist_ok=True)
-            output_filename = f"downloads/img_{image_key}.jpg"
-            
-            dl_card = CardBuilder.build_download_indicator(os.path.basename(output_filename), "图片")
-            bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
-            
-            output_path = os.path.abspath(output_filename)
-            success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
-            
-            downloaded_file_name = os.path.basename(output_filename)
-            download_success = success
-            user_text = f"请查看这张图片并做出回应。图片路径: {output_path}"
-        else:
-            user_text = "[未获取到图片]"
+        user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_image_message(loop, message_id, content_json, content_raw)
     elif message_type == "post":
-        texts = []
-        image_keys = []
-        for line in content_json.get("content", []):
-            for elem in line:
-                if elem.get("tag") == "text":
-                    texts.append(elem.get("text", ""))
-                elif elem.get("tag") == "img":
-                    image_keys.append(elem.get("image_key", ""))
-        
-        user_text = " ".join(texts)
-        if image_keys:
-            image_key = image_keys[0]
-            os.makedirs("downloads", exist_ok=True)
-            output_filename = f"downloads/img_{image_key}.jpg"
-            
-            dl_card = CardBuilder.build_download_indicator("图片内容")
-            bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
-            
-            output_path = os.path.abspath(output_filename)
-            success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
-            
-            downloaded_file_name = os.path.basename(output_filename)
-            download_success = success
-            user_text += f"\n[附加图片路径: {output_path}]"
+        user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_post_message(loop, message_id, content_json)
     elif message_type == "link":
-        if isinstance(content_json, dict):
-            user_text = content_json.get("url", content_json.get("href", ""))
-        else:
-            user_text = str(content_json)
+        user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_link_message(content_json)
     elif message_type in ["file", "audio", "media"]:
-        file_key = content_json.get("file_key", "")
-        file_name = content_json.get("file_name", "")
-        
-        if file_key:
-            if not file_name:
-                if message_type == "audio":
-                    file_name = f"audio_{file_key}.ogg"
-                elif message_type == "media":
-                    file_name = f"video_{file_key}.mp4"
-                else:
-                    file_name = f"file_{file_key}"
-            
-            if message_type == "media" and not file_name.lower().endswith(".mp4"):
-                file_name = file_key + ".mp4"
-            if message_type == "audio" and "." not in file_name:
-                file_name = file_key + ".ogg"
-            
-            # Purify file_name to prevent directory traversal
-            file_name = os.path.basename(file_name)
-            
-            os.makedirs("downloads", exist_ok=True)
-            output_filename = os.path.join("downloads", file_name)
-            dl_card = CardBuilder.build_download_indicator(file_name, message_type)
-            bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
-
-            output_path = os.path.abspath(output_filename)
-            success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, file_key, "file", output_path))
-            
-            downloaded_file_name = file_name
-            download_success = success
-            
-            if message_type == "file":
-                user_text = f"请详细阅读这份文件（{file_name}），并做出响应。文件路径: {output_path}"
-            elif message_type == "audio":
-                user_text = f"请仔细听这段语音内容（语音文件路径: {output_path}），并做出响应。"
-            elif message_type == "media":
-                user_text = f"请仔细观看这段视频内容（视频文件路径: {output_path}），并做出响应。"
+        user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_file_audio_media_message(loop, message_id, message_type, content_json)
     elif message_type == "batch_media":
-        items = content_json.get("items", [])
-        media_hints = []
-        download_success = True
-        
-        # 批量下发资源加载指示器
-        dl_card = CardBuilder.build_download_indicator(f"合并批处理 ({len(items)} 个文件)", "多媒体组")
-        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
-        
-        os.makedirs("downloads", exist_ok=True)
-        
-        for idx, item in enumerate(items):
-            m_type = item["message_type"]
-            c_json = item["content_json"]
-            c_raw = item["content_raw"]
-            
-            file_key = ""
-            file_name = ""
-            if m_type == "image":
-                file_key = c_json.get("image_key", "")
-                if not file_key:
-                    match = re.search(r'img_[a-zA-Z0-9_\-]+', c_raw)
-                    if match:
-                        file_key = match.group(0)
-                file_name = f"batch_img_{idx}_{file_key}.jpg"
-            else:
-                file_key = c_json.get("file_key", "")
-                file_name = c_json.get("file_name", f"batch_file_{idx}_{file_key}")
-                file_name = os.path.basename(file_name)
-                
-            if file_key:
-                output_path = os.path.abspath(os.path.join("downloads", file_name))
-                success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(item["message_id"], file_key, "image" if m_type == "image" else "file", output_path))
-                if success:
-                    media_hints.append(f"{idx+1}. 多模态 {m_type.upper()} 文件路径: `{output_path}`")
-                else:
-                    download_success = False
-                    media_hints.append(f"{idx+1}. 多模态 {m_type.upper()} 文件 `{file_name}` (下载失败)")
-                    
-        user_text = f"请查看以下 {len(items)} 个关联多模态文件并做出综合关联回应：\n\n" + "\n".join(media_hints)
-        downloaded_file_name = f"合并批处理 ({len(items)} 个文件)"
+        user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_batch_media_message(loop, message_id, content_json)
     else:
         user_text = f"[暂不支持的消息类型: {message_type}]"
 
@@ -437,7 +464,9 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             
         async def delay_dispatch():
             try:
-                await asyncio.sleep(1.5)
+                # Dynamic debounce: 1.5s + 0.1s per item, up to 3.0s max
+                delay = min(1.5 + len(batch["items"]) * 0.1, 3.0)
+                await asyncio.sleep(delay)
                 items = batch["items"]
                 chat_media_batches.pop(chat_id, None)
                 
@@ -464,6 +493,10 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
 
 
 def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
+    if not data or not data.event or not data.event.message:
+        log.warning("Received malformed message event")
+        return
+        
     # 最前端 Raw 物理日志打印，百分百捕捉 WebSocket 传入的一切数据包
     log.info(f"[RAW RECEIVE EVENT] message_id={data.event.message.message_id}, message_type={data.event.message.message_type}, content_raw={data.event.message.content}")
     
@@ -471,6 +504,10 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     chat_id = data.event.message.chat_id
     message_type = data.event.message.message_type
     content_raw = data.event.message.content
+    
+    if not isinstance(content_raw, str):
+        log.warning(f"Invalid content type received: {type(content_raw)}")
+        return
     
     # Check whitelist if configured
     is_allowed = True
@@ -551,84 +588,78 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     elif action_value.get("action") == "browse_dir":
         target_path = action_value.get("path")
         
-        session_data = get_session_sync(chat_id)
-        recent_projects = session_data.get("recent_projects", [])
-        ignored_projects = session_data.get("ignored_projects", [])
-        ws_root = session_data.get("workspace_root")
-        new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, workspace_root=ws_root, ignored_projects=ignored_projects)
-        
-        return P2CardActionTriggerResponse({
-            "card": {
-                "type": "raw",
-                "data": new_card
-            },
-            "toast": {"type": "success", "content": "正在载入目录..."}
-        })
+        if main_loop and main_loop.is_running():
+            async def do_browse_dir():
+                session_data = await get_session_async(chat_id)
+                recent_projects = session_data.get("recent_projects", [])
+                ignored_projects = session_data.get("ignored_projects", [])
+                ws_root = session_data.get("workspace_root")
+                new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, workspace_root=ws_root, ignored_projects=ignored_projects)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_browse_dir(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在载入目录..."}})
         
     elif action_value.get("action") == "select_project":
         target_path = action_value.get("path")
         
-        session_data = get_session_sync(chat_id)
-        session_data["project"] = target_path
-        
-        # 记录最近使用的项目
-        recent = session_data.get("recent_projects", [])
-        if target_path in recent:
-            recent.remove(target_path)
-        recent.insert(0, target_path)
-        session_data["recent_projects"] = recent[:5]
-        
-        save_session_sync(chat_id, session_data)
-        
-        success_text = f"📂 **工作区项目切换成功！**\n\n当前已将活跃目录设定为：\n`{target_path}`"
-        success_card = CardBuilder.build_ai_response(
-            success_text,
-            current_model=session_data.get('model', 'Default'),
-            current_role=session_data.get('role', '无'),
-            current_project=target_path
-        )
-        
-        return P2CardActionTriggerResponse({
-            "card": {
-                "type": "raw",
-                "data": success_card
-            },
-            "toast": {"type": "success", "content": "项目设定成功！"}
-        })
+        if main_loop and main_loop.is_running():
+            async def do_select_project():
+                session_data = await get_session_async(chat_id)
+                session_data["project"] = target_path
+                
+                # 记录最近使用的项目
+                recent = session_data.get("recent_projects", [])
+                if target_path in recent:
+                    recent.remove(target_path)
+                recent.insert(0, target_path)
+                session_data["recent_projects"] = recent[:5]
+                
+                await save_session_async(chat_id, session_data)
+                
+                success_text = f"📂 **工作区项目切换成功！**\n\n当前已将活跃目录设定为：\n`{target_path}`"
+                success_card = CardBuilder.build_ai_response(
+                    success_text,
+                    current_model=session_data.get('model', 'Default'),
+                    current_role=session_data.get('role', '无'),
+                    current_project=target_path
+                )
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, success_card))
+            asyncio.run_coroutine_threadsafe(do_select_project(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目设定成功！"}})
 
     elif action_value.get("action") == "remove_project_from_list":
         target_path = action_value.get("path")
         
-        session_data = get_session_sync(chat_id)
-        ignored = session_data.get("ignored_projects", [])
-        if target_path not in ignored:
-            ignored.append(target_path)
-        session_data["ignored_projects"] = ignored
-        
-        recent = session_data.get("recent_projects", [])
-        if target_path in recent:
-            recent.remove(target_path)
-        session_data["recent_projects"] = recent
-        
-        save_session_sync(chat_id, session_data)
-        
-        active_project = session_data.get("project", "默认")
-        ws_root = session_data.get("workspace_root")
-        new_card = CardBuilder.build_dir_browser_card(
-            active_project, 
-            recent, 
-            recent_page=1, 
-            workspace_root=ws_root, 
-            ignored_projects=ignored
-        )
-        
-        return P2CardActionTriggerResponse({
-            "card": {
-                "type": "raw",
-                "data": new_card
-            },
-            "toast": {"type": "success", "content": "项目已成功从列表中移出！"}
-        })
+        if main_loop and main_loop.is_running():
+            async def do_remove_project():
+                session_data = await get_session_async(chat_id)
+                ignored = session_data.get("ignored_projects", [])
+                if target_path not in ignored:
+                    ignored.append(target_path)
+                session_data["ignored_projects"] = ignored
+                
+                recent = session_data.get("recent_projects", [])
+                if target_path in recent:
+                    recent.remove(target_path)
+                session_data["recent_projects"] = recent
+                
+                await save_session_async(chat_id, session_data)
+                
+                active_project = session_data.get("project", "默认")
+                ws_root = session_data.get("workspace_root")
+                new_card = CardBuilder.build_dir_browser_card(
+                    active_project, 
+                    recent, 
+                    recent_page=1, 
+                    workspace_root=ws_root, 
+                    ignored_projects=ignored
+                )
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_remove_project(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目已成功从列表中移出！"}})
     elif action_value.get("action") == "view_note_detail":
         idx = int(action_value.get("index"))
         if main_loop and main_loop.is_running():
@@ -704,16 +735,16 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     elif action_value.get("action") == "create_project_prompt":
         parent_path = action_value.get("parent_path")
         
-        # 同步读取和保存会话，消除多线程协程写入延迟，确保挂起指令瞬时落库
-        session_data = get_session_sync(chat_id)
-        session_data["pending_command"] = "create_project"
-        session_data["create_project_parent"] = parent_path
-        save_session_sync(chat_id, session_data)
-        
-        prompt_msg = f"📂 **请输入新建项目的名称，或直接输入项目的 Git 仓库地址**：\n\n*(支持通过 Git URL 克隆；若输入项目名，将在公共根目录 `{parent_path}` 下新建并初始化)*"
-        
         if main_loop and main_loop.is_running():
-            main_loop.run_in_executor(None, lambda: send_reply_sdk(card_message_id, prompt_msg))
+            async def do_create_project_prompt():
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = "create_project"
+                session_data["create_project_parent"] = parent_path
+                await save_session_async(chat_id, session_data)
+                
+                prompt_msg = f"📂 **请输入新建项目的名称，或直接输入项目的 Git 仓库地址**：\n\n*(支持通过 Git URL 克隆；若输入项目名，将在公共根目录 `{parent_path}` 下新建并初始化)*"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, prompt_msg))
+            asyncio.run_coroutine_threadsafe(do_create_project_prompt(), main_loop)
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "请输入项目名或Git仓库地址！"}})
 
@@ -721,19 +752,17 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         target_path = action_value.get("current_path")
         target_page = action_value.get("page", 1)
         
-        session_data = get_session_sync(chat_id)
-        recent_projects = session_data.get("recent_projects", [])
-        ignored_projects = session_data.get("ignored_projects", [])
-        ws_root = session_data.get("workspace_root")
-        new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, target_page, workspace_root=ws_root, ignored_projects=ignored_projects)
-        
-        return P2CardActionTriggerResponse({
-            "card": {
-                "type": "raw",
-                "data": new_card
-            },
-            "toast": {"type": "success", "content": f"正在载入第 {target_page} 页项目..."}
-        })
+        if main_loop and main_loop.is_running():
+            async def do_browse_recent_page():
+                session_data = await get_session_async(chat_id)
+                recent_projects = session_data.get("recent_projects", [])
+                ignored_projects = session_data.get("ignored_projects", [])
+                ws_root = session_data.get("workspace_root")
+                new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, target_page, workspace_root=ws_root, ignored_projects=ignored_projects)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_browse_recent_page(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"正在载入第 {target_page} 页项目..."}})
     
     return P2CardActionTriggerResponse()
 
