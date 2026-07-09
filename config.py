@@ -1,13 +1,32 @@
 import os
 import sys
 import shutil
-from dotenv import load_dotenv
+from typing import Optional
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-APP_ID = os.getenv("FEISHU_APP_ID") or os.getenv("APP_ID", "")
-APP_SECRET = os.getenv("FEISHU_APP_SECRET") or os.getenv("APP_SECRET", "")
+class Settings(BaseSettings):
+    app_id: str = Field(default="", alias="APP_ID")
+    feishu_app_id: str = Field(default="", alias="FEISHU_APP_ID")
+    app_secret: str = Field(default="", alias="APP_SECRET")
+    feishu_app_secret: str = Field(default="", alias="FEISHU_APP_SECRET")
+    allowed_users: str = ""
+    allowed_chats: str = ""
+    dangerously_skip_permissions: bool = True
+    workspace_root: str = Field(default_factory=lambda: os.path.expanduser("~"))
+
+    model_config = SettingsConfigDict(
+        env_file=os.path.join(BASE_DIR, ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+settings = Settings()
+
+APP_ID = settings.feishu_app_id or settings.app_id
+APP_SECRET = settings.feishu_app_secret or settings.app_secret
 
 SESSION_FILE = os.path.join(BASE_DIR, "chat_sessions.json")
 PROFILE_FILE = os.path.join(BASE_DIR, "user_profiles.json")
@@ -45,18 +64,13 @@ def find_antigravity_bin():
 ANTIGRAVITY_BIN = find_antigravity_bin()
 
 # --- Versioning Configuration ---
-# To upgrade the major/minor version (e.g. to v1.1.x), change BASE_VERSION_PREFIX to "v1.1." 
-# and update VERSION_START_COMMIT to the current git commit count minus 1.
 BASE_VERSION_PREFIX = "v1.0."
 VERSION_START_COMMIT = 62  # Used to calculate patch number (commit_count - start_commit)
 
 # --- Whitelist & Permission Configuration ---
-ALLOWED_USERS = [uid.strip() for uid in os.getenv("ALLOWED_USERS", "").split(",") if uid.strip()]
-ALLOWED_CHATS = [cid.strip() for cid in os.getenv("ALLOWED_CHATS", "").split(",") if cid.strip()]
-DANGEROUSLY_SKIP_PERMISSIONS = os.getenv("DANGEROUSLY_SKIP_PERMISSIONS", "true").lower() == "true"
+ALLOWED_USERS = [uid.strip() for uid in settings.allowed_users.split(",") if uid.strip()]
+ALLOWED_CHATS = [cid.strip() for cid in settings.allowed_chats.split(",") if cid.strip()]
+DANGEROUSLY_SKIP_PERMISSIONS = settings.dangerously_skip_permissions
 
 # --- Workspace & Project Directory Configuration ---
-# Defaults to user's home directory (e.g. /home/username or /Users/username)
-WORKSPACE_ROOT = os.getenv("WORKSPACE_ROOT") or os.path.expanduser("~")
-
-
+WORKSPACE_ROOT = settings.workspace_root

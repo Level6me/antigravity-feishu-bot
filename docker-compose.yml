@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  antigravity-feishu-bot:
+    build: .
+    container_name: antigravity-feishu-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    # Depending on how the user prefers to run it inside docker. 
+    # Usually `python main.py` or through pm2 if it's installed in the Dockerfile.
+    command: python main.py

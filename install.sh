@@ -7,6 +7,13 @@
 set -e
 
 # --- 1. 欢迎与环境检测 ---
+if [ "$EUID" -eq 0 ]; then
+    echo "❌ 错误: 发现你正在使用 root 权限 (sudo) 运行此脚本！"
+    echo "为了避免权限错乱和安全风险，请【不要】使用 sudo 执行本脚本。"
+    echo "只需作为普通用户运行 (./install.sh)，脚本在最后配置开机自启时会自动向你索要临时授权。"
+    exit 1
+fi
+
 echo "=========================================="
 echo "    Antigravity Feishu Bot 一键部署脚本"
 echo "=========================================="
@@ -86,8 +93,16 @@ if [[ ! "$start_pm2" =~ ^[Nn]$ ]]; then
         echo "✅ 服务已启动。"
     fi
     
-    echo "💾 正在保存 PM2 进程列表以支持开机自启..."
+    echo "💾 正在保存 PM2 进程列表..."
     pm2 save
+    echo ""
+    echo "⚙️  正在自动配置系统开机自启..."
+    STARTUP_CMD=$(pm2 startup | grep 'sudo')
+    if [ -n "$STARTUP_CMD" ]; then
+        echo "⚠️  接下来将为您配置开机服务，可能会提示输入您的开机密码（输入时不会显示字符，按回车即可）："
+        eval "$STARTUP_CMD"
+        echo "✅ 开机自启配置完成！"
+    fi
     echo ""
     echo "🎉 部署完成！你的飞书机器人现在应该已经上线了。"
     echo "👉 你可以使用 'pm2 logs feishu-bot' 来查看实时运行日志。"
