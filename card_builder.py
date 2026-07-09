@@ -623,13 +623,7 @@ class CardBuilder:
                 "content": "📝 **您的记事本内容：**"
             })
             for i, note in enumerate(notes):
-                title = note
-                match = re.search(r'^\[(.*?)\]', note)
-                if match:
-                    title = match.group(1)
-                else:
-                    title = note[:15] + ("..." if len(note) > 15 else "")
-                
+                title = note.split(' ', 1)[0]
                 elements.append({
                     "tag": "column_set",
                     "flex_mode": "none",
