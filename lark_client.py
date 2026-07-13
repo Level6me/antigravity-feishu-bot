@@ -9,7 +9,7 @@ from config import APP_ID, APP_SECRET
 from logger import log
 from utils import with_retry
 
-api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
+api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).timeout(10.0).build()
 
 @with_retry()
 def set_emoji_sdk(message_id, emoji_type):

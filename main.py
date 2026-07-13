@@ -344,7 +344,8 @@ async def send_reply(message_id, reply_text):
         "--text", reply_text,
         "--as", "bot",
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
+        stdin=subprocess.DEVNULL
     )
     stdout, stderr = await reply_proc.communicate()
     if reply_proc.returncode != 0:
@@ -358,7 +359,8 @@ async def send_interactive_card(message_id, card_content):
         "--content", json.dumps(card_content),
         "--as", "bot",
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
+        stdin=subprocess.DEVNULL
     )
     await reply_proc.communicate()
 
