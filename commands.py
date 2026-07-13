@@ -72,17 +72,17 @@ from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, W
 
 def get_version_string(commit_ref="HEAD"):
     try:
-        count_str = subprocess.run(["git", "rev-list", "--count", commit_ref], capture_output=True, text=True).stdout.strip()
+        count_str = subprocess.run(["git", "rev-list", "--count", commit_ref], capture_output=True, text=True, timeout=5).stdout.strip()
         commit_count = int(count_str)
         patch = max(1, commit_count - VERSION_START_COMMIT)
-        hash_str = subprocess.run(["git", "rev-parse", "--short", commit_ref], capture_output=True, text=True).stdout.strip()
+        hash_str = subprocess.run(["git", "rev-parse", "--short", commit_ref], capture_output=True, text=True, timeout=5).stdout.strip()
         return f"{BASE_VERSION_PREFIX}{patch} (Build: {hash_str})"
     except Exception:
         return f"Unknown (Build: error)"
 
 def get_system_status_card_data():
     try:
-        out = subprocess.check_output(['pm2', 'jlist'], text=True)
+        out = subprocess.check_output(['pm2', 'jlist'], text=True, timeout=10)
         pm2_list = json.loads(out)
         
         bot_info = next((item for item in pm2_list if item['name'] == 'feishu-bot'), None)
@@ -108,7 +108,7 @@ def get_system_status_card_data():
         uptime_parts.append(f"{minutes}分钟")
         uptime_str = "".join(uptime_parts) if uptime_parts else "<1分钟"
         
-        err_out = subprocess.check_output(['pm2', 'logs', 'feishu-bot', '--err', '--lines', '5', '--nostream'], text=True)
+        err_out = subprocess.check_output(['pm2', 'logs', 'feishu-bot', '--err', '--lines', '5', '--nostream'], text=True, timeout=10)
         # Strip ANSI escape codes
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         err_out = ansi_escape.sub('', err_out)
@@ -123,12 +123,12 @@ def get_system_status_card_data():
         
         git_status = "未知"
         try:
-            branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
-            commit_info = subprocess.check_output(["git", "log", "-1", "--format=%h - %s (%cr)"], text=True).strip()
+            branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True, timeout=5).strip()
+            commit_info = subprocess.check_output(["git", "log", "-1", "--format=%h - %s (%cr)"], text=True, timeout=5).strip()
             
             # try to fetch silently
             subprocess.run(["git", "fetch"], timeout=3, capture_output=True)
-            status_out = subprocess.check_output(["git", "status", "-sb"], text=True).strip().split('\n')[0]
+            status_out = subprocess.check_output(["git", "status", "-sb"], text=True, timeout=5).strip().split('\n')[0]
             
             update_hint = ""
             if "behind" in status_out:
@@ -280,11 +280,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         
         try:
             # Fetch latest from origin
-            subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True, check=True)
+            subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True, check=True, timeout=15)
             
             # Get hashes for comparison
-            local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-            remote_hash = subprocess.run(["git", "rev-parse", "--short", "origin/main"], capture_output=True, text=True).stdout.strip()
+            local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5).stdout.strip()
+            remote_hash = subprocess.run(["git", "rev-parse", "--short", "origin/main"], capture_output=True, text=True, timeout=5).stdout.strip()
             
             local_version_str = get_version_string("HEAD")
             remote_version_str = get_version_string("origin/main")
@@ -295,7 +295,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             else:
                 # Get changelog
                 changelog_cmd = ["git", "log", f"{local_hash}..origin/main", "--pretty=format:- %s"]
-                changelog = subprocess.run(changelog_cmd, capture_output=True, text=True).stdout.strip()
+                changelog = subprocess.run(changelog_cmd, capture_output=True, text=True, timeout=10).stdout.strip()
                 if not changelog:
                     changelog = "- 未知更新"
                 
@@ -316,13 +316,13 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         
         try:
             # Safe update without losing local uncommitted changes
-            subprocess.run(["git", "stash"], capture_output=True, text=True, check=False)
-            subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True)
-            subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False)
+            subprocess.run(["git", "stash"], capture_output=True, text=True, check=False, timeout=15)
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True, timeout=30)
+            subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15)
             
             # Install new requirements if any
             pip_cmd = ["venv/bin/pip", "install", "-r", "requirements.txt"]
-            subprocess.run(pip_cmd, capture_output=True, text=True)
+            subprocess.run(pip_cmd, capture_output=True, text=True, timeout=60)
             
             reply_text = "🔄 系统升级就绪，正在触发自启进程，预计 3 秒后重新上线..."
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
@@ -333,8 +333,13 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             with open(pending_file, "w") as f:
                 json.dump({"chat_id": chat_id, "message_id": message_id}, f)
             
-            # Restart via pm2 in background without waiting
-            subprocess.Popen(["pm2", "restart", "feishu-bot"])
+            # Restart via pm2 in background without waiting, fully detached streams
+            subprocess.Popen(
+                ["pm2", "restart", "feishu-bot"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL
+            )
         except Exception as e:
             log.error(f"Failed to apply update: {e}")
             error_text = f"❌ 升级过程中出现错误: {e}"
