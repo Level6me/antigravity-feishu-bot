@@ -1,44 +1,22 @@
 
-async def _handle_create_project(user_text, message_id, chat_id, session_data):
-    from config import WORKSPACE_ROOT
-    import re, os, asyncio, subprocess, json, shutil
+async def _execute_project_creation(input_text, ideal_path, parent_path, is_git_url, message_id, chat_id, session_data):
+    import os, asyncio, subprocess
     from lark_client import send_reply_sdk
     
-    input_text = user_text.strip()
-    ws_root = session_data.get("workspace_root")
-    parent_path = ws_root if ws_root and os.path.exists(ws_root) else WORKSPACE_ROOT
+    dir_name = os.path.basename(ideal_path)
+    new_project_path = ideal_path
     
-    git_pattern = re.compile(r'^(https?://|git@|git://)[^\s]+$', re.IGNORECASE)
-    is_git_url = bool(git_pattern.match(input_text)) or input_text.endswith(".git")
-    
-    new_project_path = "默认"
     if is_git_url:
-        import hashlib
-        repo_hash = hashlib.md5(input_text.encode()).hexdigest()[:8]
-        repo_name = input_text.split("/")[-1].replace(".git", "")
-        if not repo_name:
-            repo_name = "repo"
-        clone_dir_name = f"{repo_name}_{repo_hash}"
-        clone_path = os.path.join(parent_path, clone_dir_name)
-        
         reply_text = f"🔄 正在为您克隆 Git 仓库 `{input_text}`，请稍候..."
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-        
         try:
-            subprocess.run(["git", "clone", input_text, clone_path], capture_output=True, text=True, check=True)
-            new_project_path = clone_path
-            reply_text = f"✅ Git 仓库克隆成功！\n📂 已将当前项目切换为：`{clone_dir_name}`"
+            subprocess.run(["git", "clone", input_text, new_project_path], capture_output=True, text=True, check=True)
+            reply_text = f"✅ Git 仓库克隆成功！\n📂 已将当前项目切换为：`{dir_name}`"
         except subprocess.CalledProcessError as e:
             reply_text = f"❌ 克隆失败：{e.stderr}"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-            return True, user_text
+            return True, input_text
     else:
-        import hashlib
-        proj_hash = hashlib.md5(input_text.encode()).hexdigest()[:6]
-        safe_name = re.sub(r'[^a-zA-Z0-9_一-龥]', '_', input_text)[:20]
-        dir_name = f"{safe_name}_{proj_hash}"
-        new_project_path = os.path.join(parent_path, dir_name)
-        
         try:
             os.makedirs(new_project_path, exist_ok=True)
             prompt_path = os.path.join(new_project_path, "prompt.txt")
@@ -48,14 +26,73 @@ async def _handle_create_project(user_text, message_id, chat_id, session_data):
         except Exception as e:
             reply_text = f"❌ 创建目录失败：{str(e)}"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-            return True, user_text
+            return True, input_text
 
     session_data["project"] = new_project_path
     session_data.pop("pending_command", None)
     from database import save_session_async
     await save_session_async(chat_id, session_data)
     await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-    return True, user_text
+    return True, input_text
+
+async def _handle_create_project(user_text, message_id, chat_id, session_data, resolution=None):
+    from config import WORKSPACE_ROOT
+    import re, os, asyncio, shutil
+    from lark_client import send_interactive_card_sdk
+    
+    input_text = user_text.strip()
+    ws_root = session_data.get("workspace_root")
+    parent_path = ws_root if ws_root and os.path.exists(ws_root) else WORKSPACE_ROOT
+    
+    git_pattern = re.compile(r'^(https?://|git@|git://)[^\s]+$', re.IGNORECASE)
+    is_git_url = bool(git_pattern.match(input_text)) or input_text.endswith(".git")
+    
+    if is_git_url:
+        repo_name = input_text.split("/")[-1].replace(".git", "")
+        if not repo_name:
+            repo_name = "repo"
+        clean_dir_name = repo_name
+    else:
+        clean_dir_name = re.sub(r'[^a-zA-Z0-9_一-龥]', '_', input_text)[:20]
+        if not clean_dir_name:
+            clean_dir_name = "project"
+            
+    ideal_path = os.path.join(parent_path, clean_dir_name)
+    
+    if os.path.exists(ideal_path) and resolution is None:
+        conflict_card = {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": "⚠️ 项目名称冲突"}, "template": "yellow"},
+            "elements": [
+                {"tag": "markdown", "content": f"目标路径下已存在同名项目：`{clean_dir_name}`\n请选择后续操作："},
+                {"tag": "action", "actions": [
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "1. 增加后缀保留新项目"}, "type": "primary", "value": {"action": "user_choice", "choice": f"/newproj_resolve keep {input_text}", "label": "保留并增加后缀"}},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "2. 覆盖原有项目"}, "type": "danger", "value": {"action": "user_choice", "choice": f"/newproj_resolve replace {input_text}", "label": "覆盖原项目"}},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "3. 取消并切换至旧项目"}, "type": "default", "value": {"action": "user_choice", "choice": f"/newproj_resolve cancel {input_text}", "label": "取消并切换"}}
+                ]}
+            ]
+        }
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, conflict_card))
+        return True, user_text
+
+    if resolution == "keep":
+        import hashlib
+        proj_hash = hashlib.md5(input_text.encode()).hexdigest()[:6]
+        ideal_path = os.path.join(parent_path, f"{clean_dir_name}_{proj_hash}")
+    elif resolution == "replace":
+        if os.path.exists(ideal_path):
+            shutil.rmtree(ideal_path, ignore_errors=True)
+    elif resolution == "cancel":
+        session_data["project"] = ideal_path
+        session_data.pop("pending_command", None)
+        from database import save_session_async
+        await save_session_async(chat_id, session_data)
+        reply_text = f"📂 已取消新建，直接为您切换至现有同名项目：`{clean_dir_name}`"
+        from lark_client import send_reply_sdk
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        return True, user_text
+
+    return await _execute_project_creation(input_text, ideal_path, parent_path, is_git_url, message_id, chat_id, session_data)
 
 import asyncio
 import subprocess
@@ -352,6 +389,14 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await save_profile_async(chat_id, [])
         reply_text = "🗑️ 您的所有长时记忆偏好已被彻底清空！"
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        return True, user_text
+
+    elif user_text.startswith("/newproj_resolve"):
+        parts = user_text.split(" ", 2)
+        if len(parts) >= 3:
+            resolution = parts[1].strip()
+            input_text = parts[2].strip()
+            return await _handle_create_project(input_text, message_id, chat_id, session_data, resolution=resolution)
         return True, user_text
 
     elif user_text.startswith("/note"):

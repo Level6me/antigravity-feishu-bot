@@ -626,7 +626,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     current_role=session_data.get('role', '无'),
                     current_project=target_path
                 )
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, success_card))
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(card_message_id, success_card))
             asyncio.run_coroutine_threadsafe(do_select_project(), main_loop)
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目设定成功！"}})
