@@ -29,7 +29,16 @@ if ! command -v pm2 &> /dev/null; then
     exit 1
 fi
 
-echo "✅ 环境检测通过 (python3, pm2 已安装)"
+if ! command -v agy &> /dev/null && ! command -v antigravity &> /dev/null && [ ! -f "$HOME/.local/bin/agy" ]; then
+    echo "⚠️ 警告: 未检测到 Antigravity (agy) 底层引擎！飞书机器人依赖该引擎执行核心任务。"
+    echo "请确保您已经正确安装了 Antigravity CLI，否则机器人将无法正常工作。"
+    read -p "是否强制继续部署？[y/N]: " force_deploy
+    if [[ ! "$force_deploy" =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
+echo "✅ 环境检测通过 (python3, pm2, agy)"
 echo ""
 
 # --- 2. 源码获取与更新 ---
