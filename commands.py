@@ -315,13 +315,18 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         reply_text = "🔍 正在从云端拉取最新版本信息，请稍候..."
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         
+        custom_env = os.environ.copy()
+        custom_env["GIT_TERMINAL_PROMPT"] = "0"
+        custom_env["DEBIAN_FRONTEND"] = "noninteractive"
+        custom_env["GIT_ASKPASS"] = "echo"
+        
         try:
             # Fetch latest from origin
-            subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True, check=True, timeout=15)
+            subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True, check=True, timeout=15, env=custom_env)
             
             # Get hashes for comparison
-            local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5).stdout.strip()
-            remote_hash = subprocess.run(["git", "rev-parse", "--short", "origin/main"], capture_output=True, text=True, timeout=5).stdout.strip()
+            local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5, env=custom_env).stdout.strip()
+            remote_hash = subprocess.run(["git", "rev-parse", "--short", "origin/main"], capture_output=True, text=True, timeout=5, env=custom_env).stdout.strip()
             
             local_version_str = get_version_string("HEAD")
             remote_version_str = get_version_string("origin/main")
@@ -340,6 +345,10 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 update_card = CardBuilder.build_update_card(local_version_str, remote_version_str, changelog)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, update_card))
                 
+        except subprocess.CalledProcessError as e:
+            log.error(f"Git fetch error: {e.stderr}")
+            error_text = f"❌ 拉取失败: \n`{e.stderr.strip()}`\n(请检查您的 git 远程凭证或鉴权设置)"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, error_text))
         except Exception as e:
             log.error(f"Failed to check for updates: {e}")
             error_text = f"❌ 检查更新失败: {e}"
@@ -351,11 +360,16 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         reply_text = "⬇️ 正在执行核心系统升级，请勿中断..."
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         
+        custom_env = os.environ.copy()
+        custom_env["GIT_TERMINAL_PROMPT"] = "0"
+        custom_env["DEBIAN_FRONTEND"] = "noninteractive"
+        custom_env["GIT_ASKPASS"] = "echo"
+        
         try:
             # Safe update without losing local uncommitted changes
-            subprocess.run(["git", "stash"], capture_output=True, text=True, check=False, timeout=15)
-            subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True, timeout=30)
-            subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15)
+            subprocess.run(["git", "stash"], capture_output=True, text=True, check=False, timeout=15, env=custom_env)
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env)
+            subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env)
             
             # Install new requirements if any
             pip_cmd = ["venv/bin/pip", "install", "-r", "requirements.txt"]
@@ -377,6 +391,10 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL
             )
+        except subprocess.CalledProcessError as e:
+            log.error(f"Update git error: {e.stderr}")
+            error_text = f"❌ 升级执行失败: \n`{e.stderr.strip()}`"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, error_text))
         except Exception as e:
             log.error(f"Failed to apply update: {e}")
             error_text = f"❌ 升级过程中出现错误: {e}"
