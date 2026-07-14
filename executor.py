@@ -106,13 +106,19 @@ async def execute_antigravity(
             target_transcript_path = path
             initial_transcript_size = os.path.getsize(path)
 
+    custom_env = os.environ.copy()
+    custom_env["GIT_TERMINAL_PROMPT"] = "0"
+    custom_env["DEBIAN_FRONTEND"] = "noninteractive"
+    custom_env["GIT_ASKPASS"] = "echo"
+
     process = await asyncio.create_subprocess_exec(
         *cmd_args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         stdin=subprocess.DEVNULL,
         preexec_fn=os.setsid,
-        cwd=cwd_dir
+        cwd=cwd_dir,
+        env=custom_env
     )
     running_processes[chat_id] = process
     
