@@ -32,7 +32,25 @@ fi
 echo "✅ 环境检测通过 (python3, pm2 已安装)"
 echo ""
 
-# --- 2. 交互式环境变量配置 ---
+# --- 2. 源码获取与更新 ---
+REPO_URL="https://github.com/Level6me/antigravity-feishu-bot.git"
+if [ ! -f "main.py" ]; then
+    echo "⚠️ 未在当前目录检测到核心文件 (main.py)，准备克隆或更新代码仓库..."
+    if [ ! -d "antigravity-feishu-bot" ]; then
+        echo "⬇️ 正在从 GitHub 克隆项目..."
+        git clone $REPO_URL
+    fi
+    cd antigravity-feishu-bot
+    echo "⬇️ 正在拉取最新代码..."
+    git pull origin main
+else
+    echo "✅ 当前目录已是项目源码根目录。"
+    echo "⬇️ 尝试拉取最新代码..."
+    git pull origin main || true
+fi
+echo ""
+
+# --- 3. 交互式环境变量配置 ---
 configure_env=true
 if [ -f .env ]; then
     read -p "⚠️ 检测到已存在 .env 配置文件，是否覆盖？[y/N]: " overwrite_env
@@ -59,7 +77,7 @@ if [ "$configure_env" = true ]; then
 fi
 echo ""
 
-# --- 3. 配置虚拟环境与依赖 ---
+# --- 4. 配置虚拟环境与依赖 ---
 echo "📦 开始配置 Python 虚拟环境并安装依赖..."
 if [ ! -d "venv" ]; then
     python3 -m venv venv
@@ -80,7 +98,7 @@ fi
 echo "✅ 依赖安装完成。"
 echo ""
 
-# --- 4. PM2 启动服务 ---
+# --- 5. PM2 启动服务 ---
 echo "🚀 准备启动机器人后台服务..."
 read -p "是否立即使用 PM2 启动/重启 feishu-bot 服务？[Y/n]: " start_pm2
 if [[ ! "$start_pm2" =~ ^[Nn]$ ]]; then
