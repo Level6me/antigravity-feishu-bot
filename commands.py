@@ -401,7 +401,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             
             # Save pending update state for post-reboot notification
-            from config import BASE_DIR
             pending_file = os.path.join(BASE_DIR, ".update_pending.json")
             with open(pending_file, "w") as f:
                 json.dump({"chat_id": chat_id, "message_id": message_id}, f)
