@@ -250,9 +250,15 @@ async def execute_antigravity(
                     process.kill()
                 except Exception:
                     pass
-        running_processes.pop(chat_id, None)
-        await stdout_task
-        await stderr_task
+            running_processes.pop(chat_id, None)
+        try:
+            await asyncio.wait_for(stdout_task, timeout=2.0)
+        except asyncio.TimeoutError:
+            log.warning("stdout_task timed out (possible pipe leak)")
+        try:
+            await asyncio.wait_for(stderr_task, timeout=2.0)
+        except asyncio.TimeoutError:
+            log.warning("stderr_task timed out (possible pipe leak)")
         
         # 优先从 transcript.jsonl 中提取干净的最终回复，过滤掉前面的中间思考过程与思维链
         transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
@@ -285,24 +291,24 @@ async def execute_antigravity(
             except Exception as e:
                 log.error(f"Failed to extract generated images from transcript: {e}")
         
-        active_project = session_data.get("project")
-        ws_root = session_data.get("workspace_root")
-        allowed_dirs = [active_project, ws_root]
-        
-        await loop.run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs))
-        
-        # 兜底：如果运行极快，提前读取了整个流程，在这里再次确保能够保存新生成的 conversation id
-        if os.path.exists(log_file_path):
-            with open(log_file_path, "r") as f:
-                log_content = f.read()
-            match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
-            if match:
-                new_conv_id = match.group(1)
-                if session_data.get("conversation") != new_conv_id:
-                    session_data["conversation"] = new_conv_id
-                    await save_session_async(chat_id, session_data)
-        
-        is_error = False
+            active_project = session_data.get("project")
+            ws_root = session_data.get("workspace_root")
+            allowed_dirs = [active_project, ws_root]
+            
+            await loop.run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs))
+            
+            # 兜底：如果运行极快，提前读取了整个流程，在这里再次确保能够保存新生成的 conversation id
+            if os.path.exists(log_file_path):
+                with open(log_file_path, "r") as f:
+                    log_content = f.read()
+                match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
+                if match:
+                    new_conv_id = match.group(1)
+                    if session_data.get("conversation") != new_conv_id:
+                        session_data["conversation"] = new_conv_id
+                        await save_session_async(chat_id, session_data)
+            
+            is_error = False
         if not reply_text:
             reply_text = stderr_text.strip() or "Sorry, I couldn't generate a response."
             is_error = True
@@ -322,7 +328,7 @@ async def execute_antigravity(
                     log.error(f"Failed to calculate transcript token usage: {e}")
                     
             stats.record_tokens(approx_tokens)
-
+    
         choice_card_data = None
         if not is_error:
             choice_pattern = re.compile(r'\[CHOICE_CARD\]\s*Q:\s*(.*?)\n(.*?)\s*\[/CHOICE_CARD\]', re.DOTALL | re.IGNORECASE)
@@ -336,10 +342,10 @@ async def execute_antigravity(
                     "question": question,
                     "options": options
                 }
-
+    
         if reply_text:
             log.info(f"[Agent text]: {reply_text[:100]}...")
-
+    
         final_card = CardBuilder.build_ai_response(
             reply_text, 
             choice_card_data=choice_card_data,
@@ -353,7 +359,7 @@ async def execute_antigravity(
             await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card))
             
         return is_error
-
+    
     finally:
         if os.path.exists(log_file_path):
             try:
