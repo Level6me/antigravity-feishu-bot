@@ -105,14 +105,14 @@ from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
 from card_builder import CardBuilder
-from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT
+from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT, BASE_DIR
 
 def get_version_string(commit_ref="HEAD"):
     try:
-        count_str = subprocess.run(["git", "rev-list", "--count", commit_ref], capture_output=True, text=True, timeout=5).stdout.strip()
+        count_str = subprocess.run(["git", "rev-list", "--count", commit_ref], capture_output=True, text=True, timeout=5, cwd=BASE_DIR).stdout.strip()
         commit_count = int(count_str)
         patch = max(1, commit_count - VERSION_START_COMMIT)
-        hash_str = subprocess.run(["git", "rev-parse", "--short", commit_ref], capture_output=True, text=True, timeout=5).stdout.strip()
+        hash_str = subprocess.run(["git", "rev-parse", "--short", commit_ref], capture_output=True, text=True, timeout=5, cwd=BASE_DIR).stdout.strip()
         return f"{BASE_VERSION_PREFIX}{patch} (Build: {hash_str})"
     except Exception:
         return f"Unknown (Build: error)"
@@ -322,11 +322,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         
         try:
             # Fetch latest from origin
-            subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True, check=True, timeout=15, env=custom_env)
+            subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True, check=True, timeout=15, env=custom_env, cwd=BASE_DIR)
             
             # Get hashes for comparison
-            local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5, env=custom_env).stdout.strip()
-            remote_hash = subprocess.run(["git", "rev-parse", "--short", "origin/main"], capture_output=True, text=True, timeout=5, env=custom_env).stdout.strip()
+            local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5, env=custom_env, cwd=BASE_DIR).stdout.strip()
+            remote_hash = subprocess.run(["git", "rev-parse", "--short", "origin/main"], capture_output=True, text=True, timeout=5, env=custom_env, cwd=BASE_DIR).stdout.strip()
             
             local_version_str = get_version_string("HEAD")
             remote_version_str = get_version_string("origin/main")
@@ -337,7 +337,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             else:
                 # Get changelog
                 changelog_cmd = ["git", "log", f"{local_hash}..origin/main", "--pretty=format:- %s"]
-                changelog = subprocess.run(changelog_cmd, capture_output=True, text=True, timeout=10).stdout.strip()
+                changelog = subprocess.run(changelog_cmd, capture_output=True, text=True, timeout=10, cwd=BASE_DIR).stdout.strip()
                 if not changelog:
                     changelog = "- 未知更新"
                 
@@ -345,6 +345,13 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 update_card = CardBuilder.build_update_card(local_version_str, remote_version_str, changelog)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, update_card))
                 
+        except subprocess.TimeoutExpired:
+            log.warning("Git fetch timed out")
+            error_text = "❌ 检查更新超时 (15s): 网络连接 GitHub/Gitee 不佳，请稍后重试或检查服务器外网连通性。"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, error_text))
+        except FileNotFoundError:
+            error_text = "❌ 检查更新失败: 服务器上未安装 `git` 命令，无法获取云端代码库版本。"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, error_text))
         except subprocess.CalledProcessError as e:
             log.error(f"Git fetch error: {e.stderr}")
             error_text = f"❌ 拉取失败: \n`{e.stderr.strip()}`\n(请检查您的 git 远程凭证或鉴权设置)"
@@ -367,13 +374,13 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         
         try:
             # Safe update without losing local uncommitted changes
-            subprocess.run(["git", "stash"], capture_output=True, text=True, check=False, timeout=15, env=custom_env)
-            subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env)
-            subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env)
+            subprocess.run(["git", "stash"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
+            subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
             
             # Install new requirements if any
             pip_cmd = ["venv/bin/pip", "install", "-r", "requirements.txt"]
-            subprocess.run(pip_cmd, capture_output=True, text=True, timeout=60)
+            subprocess.run(pip_cmd, capture_output=True, text=True, timeout=60, cwd=BASE_DIR)
             
             reply_text = "🔄 系统升级就绪，正在触发自启进程，预计 3 秒后重新上线..."
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
