@@ -159,20 +159,6 @@ async def execute_antigravity(
             path = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
             if os.path.exists(path):
                 return path
-        
-        base_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain/")
-        if not os.path.exists(base_dir):
-            return None
-        try:
-            dirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
-            if not dirs:
-                return None
-            newest_dir = max(dirs, key=os.path.getmtime)
-            path = os.path.join(newest_dir, ".system_generated/logs/transcript.jsonl")
-            if os.path.exists(path):
-                return path
-        except Exception:
-            pass
         return None
 
     stdout_task = asyncio.create_task(read_stdout())
