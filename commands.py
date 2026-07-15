@@ -321,22 +321,30 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         custom_env["GIT_ASKPASS"] = "echo"
         
         try:
-            # Fetch latest from origin
-            subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True, check=True, timeout=15, env=custom_env, cwd=BASE_DIR)
+            # Try origin first, fallback to gitee
+            try:
+                subprocess.run(["git", "fetch", "origin", "main"], capture_output=True, text=True, check=True, timeout=10, env=custom_env, cwd=BASE_DIR)
+                remote_ref = "origin/main"
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+                log.warning(f"Fetch from origin failed, trying Gitee: {e}")
+                # We use the full URL with the user's gitee token to ensure it works even if the remote isn't explicitly configured on the server
+                gitee_url = "REDACTED_MIRROR_URL"
+                subprocess.run(["git", "fetch", gitee_url, "main"], capture_output=True, text=True, check=True, timeout=15, env=custom_env, cwd=BASE_DIR)
+                remote_ref = "FETCH_HEAD"
             
             # Get hashes for comparison
             local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5, env=custom_env, cwd=BASE_DIR).stdout.strip()
-            remote_hash = subprocess.run(["git", "rev-parse", "--short", "origin/main"], capture_output=True, text=True, timeout=5, env=custom_env, cwd=BASE_DIR).stdout.strip()
+            remote_hash = subprocess.run(["git", "rev-parse", "--short", remote_ref], capture_output=True, text=True, timeout=5, env=custom_env, cwd=BASE_DIR).stdout.strip()
             
             local_version_str = get_version_string("HEAD")
-            remote_version_str = get_version_string("origin/main")
+            remote_version_str = get_version_string(remote_ref)
             
             if local_hash == remote_hash:
                 no_update_card = CardBuilder.build_no_update_card(local_version_str)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, no_update_card))
             else:
                 # Get changelog
-                changelog_cmd = ["git", "log", f"{local_hash}..origin/main", "--pretty=format:- %s"]
+                changelog_cmd = ["git", "log", f"{local_hash}..{remote_ref}", "--pretty=format:- %s"]
                 changelog = subprocess.run(changelog_cmd, capture_output=True, text=True, timeout=10, cwd=BASE_DIR).stdout.strip()
                 if not changelog:
                     changelog = "- 未知更新"
@@ -375,7 +383,14 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         try:
             # Safe update without losing local uncommitted changes
             subprocess.run(["git", "stash"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
-            subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
+            
+            try:
+                subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True, timeout=15, env=custom_env, cwd=BASE_DIR)
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+                log.warning(f"Pull from origin failed, trying Gitee: {e}")
+                gitee_url = "REDACTED_MIRROR_URL"
+                subprocess.run(["git", "pull", "--rebase", gitee_url, "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
+                
             subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
             
             # Install new requirements if any
