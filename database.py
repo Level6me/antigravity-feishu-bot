@@ -74,8 +74,11 @@ async def get_session_async(chat_id):
             async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    return json.loads(row['data'])
-                return {"conversation": "", "model": "Gemini 3.5 Flash", "role": "无", "project": "默认"}
+                    data = json.loads(row['data'])
+                    if data.get('model') == 'Gemini 3.5 Flash':
+                        data['model'] = 'Gemini 3.5 Flash (Medium)'
+                    return data
+                return {"conversation": "", "model": "Gemini 3.5 Flash (Medium)", "role": "无", "project": "默认"}
 
 async def save_session_async(chat_id, data):
     async with _get_session_lock(chat_id):
@@ -103,7 +106,13 @@ def load_sessions():
     cursor.execute('SELECT chat_id, data FROM chat_sessions')
     rows = cursor.fetchall()
     conn.close()
-    return {row['chat_id']: json.loads(row['data']) for row in rows}
+    sessions = {}
+    for row in rows:
+        data = json.loads(row['data'])
+        if data.get('model') == 'Gemini 3.5 Flash':
+            data['model'] = 'Gemini 3.5 Flash (Medium)'
+        sessions[row['chat_id']] = data
+    return sessions
 
 def save_sessions(sessions):
     conn = get_db()
@@ -120,8 +129,11 @@ def get_session_sync(chat_id):
     row = cursor.fetchone()
     conn.close()
     if row:
-        return json.loads(row['data'])
-    return {"conversation": "", "model": "Gemini 3.5 Flash", "role": "无", "project": "默认"}
+        data = json.loads(row['data'])
+        if data.get('model') == 'Gemini 3.5 Flash':
+            data['model'] = 'Gemini 3.5 Flash (Medium)'
+        return data
+    return {"conversation": "", "model": "Gemini 3.5 Flash (Medium)", "role": "无", "project": "默认"}
 
 def save_session_sync(chat_id, data):
     conn = get_db()
