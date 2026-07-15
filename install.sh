@@ -25,8 +25,28 @@ if ! command -v python3 &> /dev/null; then
 fi
 
 if ! command -v pm2 &> /dev/null; then
-    echo "❌ 错误: 未检测到 pm2，请先执行 npm install -g pm2"
-    exit 1
+    echo "⚠️ 未检测到 pm2，准备尝试自动安装 Node.js, npm 和 pm2..."
+    
+    if ! command -v npm &> /dev/null; then
+        echo "⚠️ 未检测到 npm，准备通过 apt-get 安装 nodejs 和 npm..."
+        if command -v apt-get &> /dev/null; then
+            echo "👉 需要 sudo 权限来安装依赖包："
+            sudo apt-get update
+            sudo apt-get install -y nodejs npm
+        else
+            echo "❌ 错误: 未找到 apt-get，无法自动安装 nodejs 和 npm。请手动安装后重试。"
+            exit 1
+        fi
+    fi
+    
+    echo "⬇️ 正在全局安装 pm2..."
+    sudo npm install -g pm2
+    
+    if ! command -v pm2 &> /dev/null; then
+        echo "❌ 错误: pm2 自动安装失败，请手动执行 npm install -g pm2"
+        exit 1
+    fi
+    echo "✅ pm2 自动安装成功。"
 fi
 
 if ! command -v agy &> /dev/null && ! command -v antigravity &> /dev/null && [ ! -f "$HOME/.local/bin/agy" ]; then
@@ -89,7 +109,22 @@ echo ""
 # --- 4. 配置虚拟环境与依赖 ---
 echo "📦 开始配置 Python 虚拟环境并安装依赖..."
 if [ ! -d "venv" ]; then
-    python3 -m venv venv
+    if ! python3 -m venv venv; then
+        echo "⚠️ 虚拟环境创建失败，可能是因为缺失 python3-venv。"
+        if command -v apt-get &> /dev/null; then
+            echo "👉 尝试通过 apt-get 自动安装 python3-venv (需要 sudo 权限)..."
+            sudo apt-get update
+            sudo apt-get install -y python3-venv python3.12-venv || true
+            
+            if ! python3 -m venv venv; then
+                echo "❌ 错误: 自动安装 python3-venv 后仍无法创建虚拟环境，请手动解决。"
+                exit 1
+            fi
+        else
+            echo "❌ 错误: 未找到 apt-get，无法自动安装 python3-venv。请手动解决。"
+            exit 1
+        fi
+    fi
     echo "✅ 虚拟环境 (venv) 创建成功。"
 else
     echo "✅ 虚拟环境 (venv) 已存在。"
