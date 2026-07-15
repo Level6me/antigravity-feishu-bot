@@ -357,6 +357,23 @@ async def execute_antigravity(
     finally:
         if os.path.exists(log_file_path):
             try:
-                os.remove(log_file_path)
-            except Exception:
-                pass
+                # [Last Resort Defense]: Try to extract the conversation ID one last time 
+                # in case the process was killed before the while loop could catch it (< 0.5s)
+                with open(log_file_path, "r") as f:
+                    log_content = f.read()
+                match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
+                if match:
+                    new_conv_id = match.group(1)
+                    if session_data.get("conversation") != new_conv_id:
+                        session_data["conversation"] = new_conv_id
+                        # Use create_task to schedule the DB save. 
+                        # We specifically DO NOT use 'await' here to prevent asyncio.CancelledError 
+                        # from aborting the execution of the subsequent os.remove cleanup.
+                        asyncio.create_task(save_session_async(chat_id, session_data))
+            except Exception as e:
+                log.error(f"Failed to read/save conversation id in finally block: {e}")
+            finally:
+                try:
+                    os.remove(log_file_path)
+                except Exception:
+                    pass
