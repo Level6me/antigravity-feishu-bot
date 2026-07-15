@@ -183,61 +183,74 @@ async def execute_antigravity(
     last_patch_time = time.time()
     process_start_time = time.time()
     
-    while process.returncode is None:
-        await asyncio.sleep(0.5)
-        
-        # 实时从 transcript.jsonl 中获取最新的工具执行动作以更新状态指示器
-        transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
-        action = ""
-        if transcript_path and os.path.exists(transcript_path):
-            try:
-                with open(transcript_path, 'r', encoding='utf-8') as f:
-                    if transcript_path == target_transcript_path:
-                        f.seek(initial_transcript_size)
-                    lines = f.readlines()
-                    if lines:
-                        for line in reversed(lines):
-                            data = json.loads(line)
-                            if data.get("type") == "USER_INPUT":
-                                break
-                            if "tool_calls" in data and len(data["tool_calls"]) > 0:
-                                action = data["tool_calls"][-1].get("args", {}).get("toolAction", "").replace('"', '').strip()
-                                break
-            except Exception:
-                pass
-        
-        think_seconds = int(time.time() - process_start_time)
-        if action:
-            last_tool_action = action
-            indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success, think_seconds)
-        else:
-            indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
-        
-        if time.time() - last_patch_time >= 1.0:
-            last_patch_time = time.time()
-            if bot_reply_msg_id:
-                await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
-                        
-        if stdout_task.done() and stderr_task.done():
-            break
-
     try:
-        await process.wait()
-    except Exception as e:
-        log.error(f"Process wait error: {e}")
-        import signal
+        while process.returncode is None:
+            await asyncio.sleep(0.5)
+            
+            # 尽早提取并保存新生成的会话 ID，防止因为执行过程中被 /stop 中断 (CancelledError) 导致新会话丢失
+            if not session_data.get("conversation") and os.path.exists(log_file_path):
+                try:
+                    with open(log_file_path, "r") as f:
+                        log_content = f.read()
+                    match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
+                    if match:
+                        session_data["conversation"] = match.group(1)
+                        await save_session_async(chat_id, session_data)
+                except Exception:
+                    pass
+            
+            # 实时从 transcript.jsonl 中获取最新的工具执行动作以更新状态指示器
+            transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
+            action = ""
+            if transcript_path and os.path.exists(transcript_path):
+                try:
+                    with open(transcript_path, 'r', encoding='utf-8') as f:
+                        if transcript_path == target_transcript_path:
+                            f.seek(initial_transcript_size)
+                        lines = f.readlines()
+                        if lines:
+                            for line in reversed(lines):
+                                data = json.loads(line)
+                                if data.get("type") == "USER_INPUT":
+                                    break
+                                if "tool_calls" in data and len(data["tool_calls"]) > 0:
+                                    action = data["tool_calls"][-1].get("args", {}).get("toolAction", "").replace('"', '').strip()
+                                    break
+                except Exception:
+                    pass
+            
+            think_seconds = int(time.time() - process_start_time)
+            if action:
+                last_tool_action = action
+                indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success, think_seconds)
+            else:
+                indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
+            
+            if time.time() - last_patch_time >= 1.0:
+                last_patch_time = time.time()
+                if bot_reply_msg_id:
+                    await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
+                            
+            if stdout_task.done() and stderr_task.done():
+                break
+
         try:
-            pgid = os.getpgid(process.pid)
-            os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            log.warning(f"Process {process.pid} already exited when trying to terminate.")
+            await process.wait()
         except Exception as e:
-            log.error(f"Failed to kill process group {process.pid}: {e}")
+            log.error(f"Process wait error: {e}")
+            import signal
             try:
-                process.kill()
-            except Exception:
-                pass
-    running_processes.pop(chat_id, None)
+                pgid = os.getpgid(process.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                log.warning(f"Process {process.pid} already exited when trying to terminate.")
+            except Exception as e:
+                log.error(f"Failed to kill process group {process.pid}: {e}")
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        running_processes.pop(chat_id, None)
     await stdout_task
     await stderr_task
     
@@ -272,24 +285,24 @@ async def execute_antigravity(
         except Exception as e:
             log.error(f"Failed to extract generated images from transcript: {e}")
     
-    active_project = session_data.get("project")
-    ws_root = session_data.get("workspace_root")
-    allowed_dirs = [active_project, ws_root]
-    
-    await loop.run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs))
-    
-    if os.path.exists(log_file_path):
-        with open(log_file_path, "r") as f:
-            log_content = f.read()
-        match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
-        if match:
-            new_conv_id = match.group(1)
-            if session_data.get("conversation") != new_conv_id:
-                session_data["conversation"] = new_conv_id
-                await save_session_async(chat_id, session_data)
-        os.remove(log_file_path)
-    
-    is_error = False
+        active_project = session_data.get("project")
+        ws_root = session_data.get("workspace_root")
+        allowed_dirs = [active_project, ws_root]
+        
+        await loop.run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs))
+        
+        # 兜底：如果运行极快，提前读取了整个流程，在这里再次确保能够保存新生成的 conversation id
+        if os.path.exists(log_file_path):
+            with open(log_file_path, "r") as f:
+                log_content = f.read()
+            match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
+            if match:
+                new_conv_id = match.group(1)
+                if session_data.get("conversation") != new_conv_id:
+                    session_data["conversation"] = new_conv_id
+                    await save_session_async(chat_id, session_data)
+        
+        is_error = False
     if not reply_text:
         reply_text = stderr_text.strip() or "Sorry, I couldn't generate a response."
         is_error = True
@@ -336,7 +349,14 @@ async def execute_antigravity(
         is_error=is_error,
         is_streaming=False
     )
-    if bot_reply_msg_id:
-        await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card))
-        
-    return is_error
+        if bot_reply_msg_id:
+            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card))
+            
+        return is_error
+
+    finally:
+        if os.path.exists(log_file_path):
+            try:
+                os.remove(log_file_path)
+            except Exception:
+                pass
