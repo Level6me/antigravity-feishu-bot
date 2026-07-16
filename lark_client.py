@@ -20,7 +20,7 @@ def set_emoji_sdk(message_id, emoji_type):
                 .reaction_type(Emoji.builder().emoji_type(emoji_type).build()) \
                 .build()) \
             .build()
-        resp = api_client.im.v1.message.reaction.create(req)
+        resp = api_client.im.v1.message_reaction.create(req)
         if resp.code == 0:
             return json.loads(resp.raw.content).get("data", {}).get("reaction_id")
         else:
@@ -39,7 +39,7 @@ def delete_emoji_sdk(message_id, reaction_id):
             .message_id(message_id) \
             .reaction_id(reaction_id) \
             .build()
-        resp = api_client.im.v1.message.reaction.delete(req)
+        resp = api_client.im.v1.message_reaction.delete(req)
         if resp.code != 0:
             log.error(f"[delete_emoji_sdk] Failed: {resp.msg}")
     except Exception as e:
