@@ -45,3 +45,4 @@ urllib3==2.7.0
 uvicorn==0.49.0
 websockets==15.0.1
 aiosqlite
+pexpect>=4.9.0

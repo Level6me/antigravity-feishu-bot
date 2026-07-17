@@ -494,6 +494,148 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, status_card))
         return True, user_text
 
+    elif user_text.strip() == "/quota":
+        import re
+        import urllib.request
+        import ssl
+        
+        lsp_port = None
+        quota_data = None
+        try:
+            # Method 1: Find agy process ports via /proc
+            candidate_ports = set()
+            for pid_dir in os.listdir("/proc"):
+                if not pid_dir.isdigit():
+                    continue
+                try:
+                    cmdline_path = f"/proc/{pid_dir}/cmdline"
+                    with open(cmdline_path, "rb") as f:
+                        cmdline = f.read().decode("utf-8", errors="ignore")
+                    if "agy" not in cmdline and "antigravity" not in cmdline:
+                        continue
+                    log.info(f"[/quota] Found agy process pid={pid_dir}")
+                    # Found agy process, read its listening sockets from /proc/net/tcp
+                    fd_dir = f"/proc/{pid_dir}/fd"
+                    if not os.path.isdir(fd_dir):
+                        log.info(f"[/quota] fd_dir {fd_dir} is not a dir")
+                        continue
+                    
+                    found_any_socket = False
+                    for fd in os.listdir(fd_dir):
+                        try:
+                            link = os.readlink(f"{fd_dir}/{fd}")
+                            if "socket:" in link:
+                                found_any_socket = True
+                                inode = link.split("[")[1].rstrip("]")
+                                # Search /proc/net/tcp for this inode
+                                with open("/proc/net/tcp", "r") as tcp_f:
+                                    for tcp_line in tcp_f:
+                                        parts = tcp_line.strip().split()
+                                        if len(parts) >= 10 and parts[9] == inode:
+                                            # state 0A = LISTEN
+                                            if parts[3] == "0A":
+                                                hex_port = parts[1].split(":")[1]
+                                                port = int(hex_port, 16)
+                                                candidate_ports.add(port)
+                                                log.info(f"[/quota] Found listen port {port} for pid {pid_dir}")
+                        except Exception as e:
+                            log.warning(f"[/quota] Error processing fd {fd} for pid {pid_dir}: {e}")
+                            
+                    if not found_any_socket:
+                        log.info(f"[/quota] No sockets found for pid {pid_dir}")
+                except Exception as e:
+                    log.warning(f"[/quota] Error processing pid {pid_dir}: {e}")
+            
+            # Method 2: Fallback - try ss with full path
+            if not candidate_ports:
+                try:
+                    out = subprocess.check_output("/usr/bin/ss -tlnp", shell=True, text=True, timeout=3)
+                    for line in out.split("\n"):
+                        if 'users:(("agy"' in line or 'users:(("antigravity"' in line:
+                            match = re.search(r"127\.0\.0\.1:(\d+)", line)
+                            if match:
+                                candidate_ports.add(int(match.group(1)))
+                except Exception as e:
+                    log.warning(f"[/quota] fallback ss failed: {e}")
+            
+            log.info(f"[/quota] Found candidate ports: {candidate_ports}")
+            # Probe each candidate port directly for quota summary
+            context = ssl._create_unverified_context()
+            metadata_payload = b'{"metadata": {"ideName": "antigravity", "extensionName": "antigravity"}}'
+            for port in sorted(candidate_ports):
+                url = f"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+                req = urllib.request.Request(url, data=metadata_payload, headers={"Content-Type": "application/json"}, method="POST")
+                try:
+                    with urllib.request.urlopen(req, context=context, timeout=1) as response:
+                        data = json.loads(response.read().decode())
+                        log.info(f"[/quota] Port {port} responded with keys: {list(data.keys())}")
+                        if "response" in data and "groups" in data["response"]:
+                            quota_data = data
+                            lsp_port = port
+                            log.info(f"[/quota] Selected port {port}")
+                            break
+                except Exception as e:
+                    log.warning(f"[/quota] Port {port} failed: {e}")
+        except Exception as e:
+            log.error(f"Error discovering LSP port: {e}")
+                
+        if not quota_data:
+            token_path = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
+            if os.path.exists(token_path):
+                try:
+                    with open(token_path, "r") as f:
+                        token_info = json.load(f)
+                    access_token = token_info["token"]["access_token"]
+                    url = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+                    req = urllib.request.Request(
+                        url,
+                        data=b"{}",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Content-Type": "application/json"
+                        },
+                        method="POST"
+                    )
+                    context = ssl._create_unverified_context()
+                    with urllib.request.urlopen(req, context=context) as response:
+                        buckets_data = json.loads(response.read().decode())
+                        gemini_pro_bucket = next((b for b in buckets_data.get("buckets", []) if b.get("modelId") == "gemini-2.5-pro"), {})
+                        gemini_flash_bucket = next((b for b in buckets_data.get("buckets", []) if b.get("modelId") == "gemini-2.5-flash"), {})
+                        quota_data = {
+                            "response": {
+                                "groups": [
+                                    {
+                                        "displayName": "Gemini Models",
+                                        "description": "Models within this group: Gemini Flash, Gemini Pro",
+                                        "buckets": [
+                                            {
+                                                "bucketId": "gemini-weekly",
+                                                "displayName": "Weekly Limit",
+                                                "description": "You have used some of your weekly limit.",
+                                                "window": "weekly",
+                                                "remainingFraction": gemini_pro_bucket.get("remainingFraction", 1.0),
+                                                "resetTime": gemini_pro_bucket.get("resetTime", "")
+                                            },
+                                            {
+                                                "bucketId": "gemini-5h",
+                                                "displayName": "Five Hour Limit",
+                                                "description": "You have used some of your 5-hour limit.",
+                                                "window": "5h",
+                                                "remainingFraction": gemini_flash_bucket.get("remainingFraction", 1.0),
+                                                "resetTime": gemini_flash_bucket.get("resetTime", "")
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                except Exception as e:
+                    log.error(f"Error fetching remote quota fallback: {e}")
+                    
+        quota_card = CardBuilder.build_quota_card(quota_data)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, quota_card))
+        return True, user_text
+
     elif user_text.strip() == "/brain":
         memories = []
         memory_file = os.path.expanduser("~/.gemini/antigravity-cli/global_memory.json")
@@ -506,6 +648,22 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             
         memory_card = CardBuilder.build_global_memory_card(memories)
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, memory_card))
+        return True, user_text
+
+    elif user_text.strip() == "/test_ss":
+        try:
+            out = subprocess.check_output("/usr/bin/ss -tlnp", shell=True, text=True, timeout=3)
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, {
+                "config": {"wide_screen_mode": True},
+                "header": {"template": "blue", "title": {"content": "SS Output", "tag": "plain_text"}},
+                "elements": [{"tag": "markdown", "content": f"```\n{out[:1000]}\n```"}]
+            }))
+        except Exception as e:
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, {
+                "config": {"wide_screen_mode": True},
+                "header": {"template": "red", "title": {"content": "SS Error", "tag": "plain_text"}},
+                "elements": [{"tag": "markdown", "content": f"```\n{e}\n```"}]
+            }))
         return True, user_text
 
     elif user_text.startswith("/role"):
@@ -577,6 +735,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 🔹 `/clear` : 清空当前对话的上下文记忆，重新开始
 🔹 `/stop` : 紧急刹车！强制中止正在后台生成的耗时任务
 🔹 `/update` : 检查并获取云端最新版本的机器人引擎核心
+🔹 `/quota` : 查询 Google AI Pro 套餐的官方剩余额度百分比看板
 🔹 `/help` : 显示此帮助菜单
 
 *✨ 隐藏黑科技提示：*
