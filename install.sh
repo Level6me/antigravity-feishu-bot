@@ -154,6 +154,15 @@ if [[ ! "$start_pm2" =~ ^[Nn]$ ]]; then
         pm2 start venv/bin/python3 --name "feishu-bot" -- main.py
         echo "✅ 服务已启动。"
     fi
+
+    echo "🚀 准备启动本地语言服务器守护进程 (LSP Daemon)..."
+    if pm2 status | grep -q "agy-daemon"; then
+        pm2 restart agy-daemon
+        echo "✅ LSP 守护进程已重启。"
+    else
+        pm2 start venv/bin/python3 --name "agy-daemon" -- agy_daemon.py
+        echo "✅ LSP 守护进程已启动。"
+    fi
     
     echo "💾 正在保存 PM2 进程列表..."
     pm2 save

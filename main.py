@@ -557,12 +557,15 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if main_loop and main_loop.is_running():
             async def do_switch():
                 session_data = await get_session_async(chat_id)
+                old_model = session_data.get("model", "Default")
                 session_data["model"] = new_model
                 await save_session_async(chat_id, session_data)
                 log.info(f"Switched model to {new_model} in chat {chat_id}")
+                result_card = CardBuilder.build_model_switch_result_card(new_model, old_model)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, result_card))
             asyncio.run_coroutine_threadsafe(do_switch(), main_loop)
 
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"模型已成功切换为 {new_model}！"}})
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"模型已切换为 {new_model}"}})
 
     elif action_value.get("action") == "user_choice":
         choice = action_value.get("choice")
@@ -716,6 +719,140 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_refresh_status(), main_loop)
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "状态已刷新！"}})
+
+    elif action_value.get("action") == "refresh_quota":
+        if main_loop and main_loop.is_running():
+            async def do_refresh_quota():
+                import re
+                import urllib.request
+                import ssl
+                
+                lsp_port = None
+                quota_data = None
+                try:
+                    candidate_ports = set()
+                    for pid_dir in os.listdir("/proc"):
+                        if not pid_dir.isdigit():
+                            continue
+                        try:
+                            with open(f"/proc/{pid_dir}/cmdline", "rb") as f:
+                                cmdline = f.read().decode("utf-8", errors="ignore")
+                            if "agy" not in cmdline and "antigravity" not in cmdline:
+                                continue
+                            log.info(f"[/refresh_quota] Found agy process pid={pid_dir}")
+                            fd_dir = f"/proc/{pid_dir}/fd"
+                            if not os.path.isdir(fd_dir):
+                                log.info(f"[/refresh_quota] fd_dir {fd_dir} is not a dir")
+                                continue
+                                
+                            found_any_socket = False
+                            for fd in os.listdir(fd_dir):
+                                try:
+                                    link = os.readlink(f"{fd_dir}/{fd}")
+                                    if "socket:" in link:
+                                        found_any_socket = True
+                                        inode = link.split("[")[1].rstrip("]")
+                                        with open("/proc/net/tcp", "r") as tcp_f:
+                                            for tcp_line in tcp_f:
+                                                parts = tcp_line.strip().split()
+                                                if len(parts) >= 10 and parts[9] == inode and parts[3] == "0A":
+                                                    hex_port = parts[1].split(":")[1]
+                                                    port = int(hex_port, 16)
+                                                    candidate_ports.add(port)
+                                                    log.info(f"[/refresh_quota] Found listen port {port} for pid {pid_dir}")
+                                except Exception as e:
+                                    log.warning(f"[/refresh_quota] Error processing fd {fd} for pid {pid_dir}: {e}")
+                        except Exception as e:
+                            log.warning(f"[/refresh_quota] Error processing pid {pid_dir}: {e}")
+                    
+                    if not candidate_ports:
+                        try:
+                            out = subprocess.check_output("/usr/bin/ss -tlnp", shell=True, text=True, timeout=3)
+                            for line in out.split("\n"):
+                                if 'users:(("agy"' in line or 'users:(("antigravity"' in line:
+                                    match = re.search(r"127\.0\.0\.1:(\d+)", line)
+                                    if match:
+                                        candidate_ports.add(int(match.group(1)))
+                        except Exception as e:
+                            log.warning(f"[/refresh_quota] fallback ss failed: {e}")
+                    
+                    log.info(f"[/refresh_quota] Found candidate ports: {candidate_ports}")
+                    context = ssl._create_unverified_context()
+                    metadata_payload = b'{"metadata": {"ideName": "antigravity", "extensionName": "antigravity"}}'
+                    for port in sorted(candidate_ports):
+                        url = f"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+                        req = urllib.request.Request(url, data=metadata_payload, headers={"Content-Type": "application/json"}, method="POST")
+                        try:
+                            with urllib.request.urlopen(req, context=context, timeout=1) as response:
+                                data = json.loads(response.read().decode())
+                                log.info(f"[/refresh_quota] Port {port} responded with keys: {list(data.keys())}")
+                                if "response" in data and "groups" in data["response"]:
+                                    quota_data = data
+                                    lsp_port = port
+                                    log.info(f"[/refresh_quota] Selected port {port}")
+                                    break
+                        except Exception as e:
+                            log.warning(f"[/refresh_quota] Port {port} failed: {e}")
+                except Exception as e:
+                    log.error(f"Error discovering LSP port in refresh: {e}")
+                        
+                if not quota_data:
+                    token_path = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
+                    if os.path.exists(token_path):
+                        try:
+                            with open(token_path, "r") as f:
+                                token_info = json.load(f)
+                            access_token = token_info["token"]["access_token"]
+                            url = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+                            req = urllib.request.Request(
+                                url,
+                                data=b"{}",
+                                headers={
+                                    "Authorization": f"Bearer {access_token}",
+                                    "Content-Type": "application/json"
+                                },
+                                method="POST"
+                            )
+                            context = ssl._create_unverified_context()
+                            with urllib.request.urlopen(req, context=context) as response:
+                                buckets_data = json.loads(response.read().decode())
+                                gemini_pro_bucket = next((b for b in buckets_data.get("buckets", []) if b.get("modelId") == "gemini-2.5-pro"), {})
+                                gemini_flash_bucket = next((b for b in buckets_data.get("buckets", []) if b.get("modelId") == "gemini-2.5-flash"), {})
+                                quota_data = {
+                                    "response": {
+                                        "groups": [
+                                            {
+                                                "displayName": "Gemini Models",
+                                                "description": "Models within this group: Gemini Flash, Gemini Pro",
+                                                "buckets": [
+                                                    {
+                                                        "bucketId": "gemini-weekly",
+                                                        "displayName": "Weekly Limit",
+                                                        "description": "You have used some of your weekly limit.",
+                                                        "window": "weekly",
+                                                        "remainingFraction": gemini_pro_bucket.get("remainingFraction", 1.0),
+                                                        "resetTime": gemini_pro_bucket.get("resetTime", "")
+                                                    },
+                                                    {
+                                                        "bucketId": "gemini-5h",
+                                                        "displayName": "Five Hour Limit",
+                                                        "description": "You have used some of your 5-hour limit.",
+                                                        "window": "5h",
+                                                        "remainingFraction": gemini_flash_bucket.get("remainingFraction", 1.0),
+                                                        "resetTime": gemini_flash_bucket.get("resetTime", "")
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                }
+                        except Exception as e:
+                            log.error(f"Error fetching remote quota fallback in refresh: {e}")
+                new_card = CardBuilder.build_quota_card(quota_data)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_refresh_quota(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "额度已刷新！"}})
 
     elif action_value.get("action") == "forget_single_memory":
         idx = int(action_value.get("index"))
