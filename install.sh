@@ -33,8 +33,14 @@ fi
 
 if [ "$1" == "uninstall" ]; then
     echo "=========================================="
-    echo "    Antigravity Feishu Bot 卸载脚本"
+    echo "    Antigravity Feishu Bot 彻底卸载脚本"
     echo "=========================================="
+    read -p "⚠️ 警告：此操作将彻底删除所有相关后台服务和项目源码文件。确定要继续卸载吗？[y/N]: " confirm_uninstall
+    if [[ ! "$confirm_uninstall" =~ ^[Yy]$ ]]; then
+        echo "✅ 已取消卸载操作。"
+        exit 0
+    fi
+
     echo "🛑 正在停止后台服务..."
     if command -v pm2 &> /dev/null; then
         pm2 delete feishu-bot || true
@@ -44,7 +50,22 @@ if [ "$1" == "uninstall" ]; then
         echo "⚠️ 未检测到 PM2，跳过服务清理。"
     fi
     echo "✅ 后台服务已停止并移除。"
-    echo "💡 提示: 如果您想彻底清除，请手动删除本目录 (rm -rf antigravity-feishu-bot) 以及 ~/.pm2 (如有需要)。"
+    
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+    if [[ "$(basename "$SCRIPT_DIR")" == "antigravity-feishu-bot" ]]; then
+        cd ..
+        echo "🗑️ 正在彻底删除项目源码目录: $SCRIPT_DIR ..."
+        rm -rf "$SCRIPT_DIR"
+    elif [ -d "$SCRIPT_DIR/antigravity-feishu-bot" ]; then
+        echo "🗑️ 正在彻底删除项目源码目录: $SCRIPT_DIR/antigravity-feishu-bot ..."
+        rm -rf "$SCRIPT_DIR/antigravity-feishu-bot"
+    fi
+    
+    if [ -f "install.sh" ]; then
+        rm -f install.sh
+    fi
+    
+    echo "✅ 彻底卸载完成！项目所有文件及后台服务已被完全清除。"
     exit 0
 fi
 # --- 1. 欢迎与环境检测 ---
@@ -59,6 +80,12 @@ echo "=========================================="
 echo "    Antigravity Feishu Bot 一键部署脚本"
 echo "=========================================="
 echo ""
+
+read -p "即将开始检测环境并自动部署飞书机器人，确定要继续吗？[Y/n]: " confirm_install
+if [[ "$confirm_install" =~ ^[Nn]$ ]]; then
+    echo "✅ 已取消部署操作。"
+    exit 0
+fi
 
 if ! command -v python3 &> /dev/null; then
     echo "❌ 错误: 未检测到 python3，请先安装 Python 3.10+"
