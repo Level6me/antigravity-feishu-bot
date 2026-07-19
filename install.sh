@@ -6,6 +6,47 @@
 
 set -e
 
+if [ "$1" == "update" ]; then
+    echo "=========================================="
+    echo "    Antigravity Feishu Bot 一键升级脚本"
+    echo "=========================================="
+    echo "⬇️ 正在拉取最新代码..."
+    git pull origin main || true
+    
+    if [ -d "venv" ]; then
+        echo "📦 更新依赖..."
+        source venv/bin/activate
+        pip install -r requirements.txt || true
+    fi
+    
+    echo "🚀 正在重启服务..."
+    if command -v pm2 &> /dev/null; then
+        pm2 restart feishu-bot || true
+        pm2 restart agy-daemon || true
+        pm2 save || true
+    else
+        echo "⚠️ 未检测到 PM2，可能需要您手动重启服务。"
+    fi
+    echo "✅ 升级并重启完成！"
+    exit 0
+fi
+
+if [ "$1" == "uninstall" ]; then
+    echo "=========================================="
+    echo "    Antigravity Feishu Bot 卸载脚本"
+    echo "=========================================="
+    echo "🛑 正在停止后台服务..."
+    if command -v pm2 &> /dev/null; then
+        pm2 delete feishu-bot || true
+        pm2 delete agy-daemon || true
+        pm2 save || true
+    else
+        echo "⚠️ 未检测到 PM2，跳过服务清理。"
+    fi
+    echo "✅ 后台服务已停止并移除。"
+    echo "💡 提示: 如果您想彻底清除，请手动删除本目录 (rm -rf antigravity-feishu-bot) 以及 ~/.pm2 (如有需要)。"
+    exit 0
+fi
 # --- 1. 欢迎与环境检测 ---
 if [ "$EUID" -eq 0 ]; then
     echo "❌ 错误: 发现你正在使用 root 权限 (sudo) 运行此脚本！"
