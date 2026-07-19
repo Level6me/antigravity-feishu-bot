@@ -65,6 +65,11 @@ if [ "$1" == "uninstall" ]; then
         rm -f install.sh
     fi
     
+    if [ -d "$HOME/.pm2" ]; then
+        echo "🗑️ 正在删除 ~/.pm2 配置及日志目录..."
+        rm -rf "$HOME/.pm2"
+    fi
+    
     echo "✅ 彻底卸载完成！项目所有文件及后台服务已被完全清除。"
     exit 0
 fi
