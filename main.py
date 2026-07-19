@@ -779,20 +779,31 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     log.info(f"[/refresh_quota] Found candidate ports: {candidate_ports}")
                     context = ssl._create_unverified_context()
                     metadata_payload = b'{"metadata": {"ideName": "antigravity", "extensionName": "antigravity"}}'
-                    for port in sorted(candidate_ports):
+                    
+                    def probe_port(port):
                         url = f"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
                         req = urllib.request.Request(url, data=metadata_payload, headers={"Content-Type": "application/json"}, method="POST")
                         try:
-                            with urllib.request.urlopen(req, context=context, timeout=1) as response:
+                            with urllib.request.urlopen(req, context=context, timeout=5) as response:
                                 data = json.loads(response.read().decode())
-                                log.info(f"[/refresh_quota] Port {port} responded with keys: {list(data.keys())}")
                                 if "response" in data and "groups" in data["response"]:
-                                    quota_data = data
-                                    lsp_port = port
-                                    log.info(f"[/refresh_quota] Selected port {port}")
-                                    break
+                                    return port, data
                         except Exception as e:
                             log.warning(f"[/refresh_quota] Port {port} failed: {e}")
+                        return port, None
+
+                    import concurrent.futures
+                    if candidate_ports:
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(candidate_ports))) as executor:
+                            futures = [executor.submit(probe_port, p) for p in candidate_ports]
+                            for future in concurrent.futures.as_completed(futures):
+                                p, data = future.result()
+                                if data:
+                                    log.info(f"[/refresh_quota] Port {p} responded successfully")
+                                    quota_data = data
+                                    lsp_port = p
+                                    log.info(f"[/refresh_quota] Selected port {p}")
+                                    break
                 except Exception as e:
                     log.error(f"Error discovering LSP port in refresh: {e}")
                         
