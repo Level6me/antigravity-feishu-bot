@@ -4,7 +4,9 @@ import time
 
 def main():
     print("Starting agy daemon...", flush=True)
-    child = pexpect.spawn("/home/ubuntu/.local/bin/agy", encoding='utf-8')
+    import os
+    agy_path = os.path.expanduser("~/.local/bin/agy")
+    child = pexpect.spawn(agy_path, encoding='utf-8')
     
     try:
         while True:
