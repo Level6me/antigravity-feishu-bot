@@ -815,20 +815,20 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                                 token_info = json.load(f)
                             access_token = token_info["token"]["access_token"]
                             url = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-                    req = urllib.request.Request(
-                        url,
-                        data=b'{"project":"high-battery-8d2jw"}',
-                        headers={
-                            "Authorization": f"Bearer {access_token}",
-                            "Content-Type": "application/json",
-                            "User-Agent": "antigravity/cli/1.1.3"
-                        },
-                        method="POST"
-                    )
-                    context = ssl._create_unverified_context()
-                    with urllib.request.urlopen(req, context=context) as response:
-                        api_data = json.loads(response.read().decode())
-                        quota_data = {"response": api_data}
+                            req = urllib.request.Request(
+                                url,
+                                data=b'{"project":"high-battery-8d2jw"}',
+                                headers={
+                                    "Authorization": f"Bearer {access_token}",
+                                    "Content-Type": "application/json",
+                                    "User-Agent": "antigravity/cli/1.1.3"
+                                },
+                                method="POST"
+                            )
+                            context = ssl._create_unverified_context()
+                            with urllib.request.urlopen(req, context=context) as response:
+                                api_data = json.loads(response.read().decode())
+                                quota_data = {"response": api_data}
                         except Exception as e:
                             log.error(f"Error fetching remote quota fallback in refresh: {e}")
                 new_card = CardBuilder.build_quota_card(quota_data)
