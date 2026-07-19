@@ -611,7 +611,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                                             {
                                                 "bucketId": "gemini-weekly",
                                                 "displayName": "Weekly Limit",
-                                                "description": "You have used some of your weekly limit.",
+                                                "description": "You have used some of your weekly limit." if gemini_pro_bucket.get("remainingFraction", 1.0) < 1.0 else "",
                                                 "window": "weekly",
                                                 "remainingFraction": gemini_pro_bucket.get("remainingFraction", 1.0),
                                                 "resetTime": gemini_pro_bucket.get("resetTime", "")
@@ -619,7 +619,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                                             {
                                                 "bucketId": "gemini-5h",
                                                 "displayName": "Five Hour Limit",
-                                                "description": "You have used some of your 5-hour limit.",
+                                                "description": "You have used some of your 5-hour limit." if gemini_flash_bucket.get("remainingFraction", 1.0) < 1.0 else "",
                                                 "window": "5h",
                                                 "remainingFraction": gemini_flash_bucket.get("remainingFraction", 1.0),
                                                 "resetTime": gemini_flash_bucket.get("resetTime", "")

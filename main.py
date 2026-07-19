@@ -828,7 +828,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                                                     {
                                                         "bucketId": "gemini-weekly",
                                                         "displayName": "Weekly Limit",
-                                                        "description": "You have used some of your weekly limit.",
+                                                        "description": "You have used some of your weekly limit." if gemini_pro_bucket.get("remainingFraction", 1.0) < 1.0 else "",
                                                         "window": "weekly",
                                                         "remainingFraction": gemini_pro_bucket.get("remainingFraction", 1.0),
                                                         "resetTime": gemini_pro_bucket.get("resetTime", "")
@@ -836,7 +836,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                                                     {
                                                         "bucketId": "gemini-5h",
                                                         "displayName": "Five Hour Limit",
-                                                        "description": "You have used some of your 5-hour limit.",
+                                                        "description": "You have used some of your 5-hour limit." if gemini_flash_bucket.get("remainingFraction", 1.0) < 1.0 else "",
                                                         "window": "5h",
                                                         "remainingFraction": gemini_flash_bucket.get("remainingFraction", 1.0),
                                                         "resetTime": gemini_flash_bucket.get("resetTime", "")
