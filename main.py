@@ -814,49 +814,21 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                             with open(token_path, "r") as f:
                                 token_info = json.load(f)
                             access_token = token_info["token"]["access_token"]
-                            url = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
-                            req = urllib.request.Request(
-                                url,
-                                data=b"{}",
-                                headers={
-                                    "Authorization": f"Bearer {access_token}",
-                                    "Content-Type": "application/json"
-                                },
-                                method="POST"
-                            )
-                            context = ssl._create_unverified_context()
-                            with urllib.request.urlopen(req, context=context) as response:
-                                buckets_data = json.loads(response.read().decode())
-                                gemini_pro_bucket = next((b for b in buckets_data.get("buckets", []) if b.get("modelId") == "gemini-2.5-pro"), {})
-                                gemini_flash_bucket = next((b for b in buckets_data.get("buckets", []) if b.get("modelId") == "gemini-2.5-flash"), {})
-                                quota_data = {
-                                    "response": {
-                                        "groups": [
-                                            {
-                                                "displayName": "Gemini Models",
-                                                "description": "Models within this group: Gemini Flash, Gemini Pro",
-                                                "buckets": [
-                                                    {
-                                                        "bucketId": "gemini-weekly",
-                                                        "displayName": "Weekly Limit",
-                                                        "description": "You have used some of your weekly limit." if gemini_pro_bucket.get("remainingFraction", 1.0) < 1.0 else "",
-                                                        "window": "weekly",
-                                                        "remainingFraction": gemini_pro_bucket.get("remainingFraction", 1.0),
-                                                        "resetTime": gemini_pro_bucket.get("resetTime", "")
-                                                    },
-                                                    {
-                                                        "bucketId": "gemini-5h",
-                                                        "displayName": "Five Hour Limit",
-                                                        "description": "You have used some of your 5-hour limit." if gemini_flash_bucket.get("remainingFraction", 1.0) < 1.0 else "",
-                                                        "window": "5h",
-                                                        "remainingFraction": gemini_flash_bucket.get("remainingFraction", 1.0),
-                                                        "resetTime": gemini_flash_bucket.get("resetTime", "")
-                                                    }
-                                                ]
-                                            }
-                                        ]
-                                    }
-                                }
+                            url = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+                    req = urllib.request.Request(
+                        url,
+                        data=b'{"project":"high-battery-8d2jw"}',
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Content-Type": "application/json",
+                            "User-Agent": "antigravity/cli/1.1.3"
+                        },
+                        method="POST"
+                    )
+                    context = ssl._create_unverified_context()
+                    with urllib.request.urlopen(req, context=context) as response:
+                        api_data = json.loads(response.read().decode())
+                        quota_data = {"response": api_data}
                         except Exception as e:
                             log.error(f"Error fetching remote quota fallback in refresh: {e}")
                 new_card = CardBuilder.build_quota_card(quota_data)
