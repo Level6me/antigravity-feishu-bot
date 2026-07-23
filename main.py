@@ -118,7 +118,7 @@ async def _process_link_message(content_json):
     return user_text, None, True, None
 
 async def _process_file_audio_media_message(loop, message_id, message_type, content_json):
-    file_key = content_json.get("file_key", "")
+    file_key = content_json.get("file_key", "") or content_json.get("media_key", "") or content_json.get("audio_key", "")
     file_name = content_json.get("file_name", "")
     bot_reply_msg_id = None
     download_success = True
@@ -134,10 +134,10 @@ async def _process_file_audio_media_message(loop, message_id, message_type, cont
             else:
                 file_name = f"file_{file_key}"
         
-        if message_type == "media" and not file_name.lower().endswith(".mp4"):
-            file_name = file_key + ".mp4"
+        if message_type == "media" and not any(file_name.lower().endswith(ext) for ext in [".mp4", ".mov", ".avi", ".mkv", ".flv", ".webm", ".m4v"]):
+            file_name = f"{file_name}.mp4"
         if message_type == "audio" and "." not in file_name:
-            file_name = file_key + ".ogg"
+            file_name = f"{file_name}.ogg"
         
         # Purify file_name to prevent directory traversal
         file_name = os.path.basename(file_name)
@@ -149,9 +149,7 @@ async def _process_file_audio_media_message(loop, message_id, message_type, cont
 
         output_path = os.path.abspath(output_filename)
         download_success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, file_key, "file", output_path))
-        
         downloaded_file_name = file_name
-        download_success = success
         
         if message_type == "file":
             user_text = f"请详细阅读这份文件（{file_name}），并做出响应。文件路径: {output_path}"
@@ -188,7 +186,7 @@ async def _process_batch_media_message(loop, message_id, content_json):
                     file_key = match.group(0)
             file_name = f"batch_img_{idx}_{file_key}.jpg"
         else:
-            file_key = c_json.get("file_key", "")
+            file_key = c_json.get("file_key", "") or c_json.get("media_key", "") or c_json.get("audio_key", "")
             file_name = c_json.get("file_name", f"batch_file_{idx}_{file_key}")
             file_name = os.path.basename(file_name)
             
