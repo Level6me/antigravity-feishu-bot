@@ -273,6 +273,14 @@ async def _process_single_task(chat_id, task):
     # 注入当前活跃项目环境参数
     system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n- All file reads, writes, and analysis commands you execute should target this active workspace directory.\n\n"
     
+    # 注入系统级防死锁与防护策略 (System Protection Guardrails)
+    system_instruction += (
+        "[System Execution & Safety Guardrails]\n"
+        "1. 【全指令强制超时保护】：使用 `run_command` 工具执行任何 Shell 命令行（如 find, grep, pip, git, npm, python 等）时，必须在前缀显式包裹 `timeout <秒数>` 超时保护（例如：`timeout 30s find . -name '*.py'` 或 `timeout 60s pip install ...`），严禁执行任何未加 `timeout` 限制的命令。\n"
+        "2. 【禁用二进制图片直读】：严禁对二进制图像文件（如 `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, `.bmp`, `.ico`）调用 `view_file` 工具，防止底层多模态视觉渲染引擎发生阻塞或死锁。如需处理图像，请直接使用图像文件路径文本或通过辅助工具处理，切勿直接读取图像二进制内容。\n"
+        "3. 【受限递归与大目录避让】：严禁在系统全盘（`/`）、根目录、用户主目录（`~`）或依赖目录（`venv`, `.venv`, `node_modules`, `.git`）中执行无限制的大范围递归搜索。搜索文件时必须使用精确路径、限定搜索深度（如 `find . -maxdepth 3`）并排除第三方依赖包目录。\n\n"
+    )
+    
     # 注入该项目专属 Prompt
     project_prompts = session_data.get("project_prompts", {})
     if current_proj in project_prompts and project_prompts[current_proj]:
