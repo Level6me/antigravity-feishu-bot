@@ -10,7 +10,7 @@ async def _execute_project_creation(input_text, ideal_path, parent_path, is_git_
         reply_text = f"🔄 正在为您克隆 Git 仓库 `{input_text}`，请稍候..."
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         try:
-            subprocess.run(["git", "clone", input_text, new_project_path], capture_output=True, text=True, check=True)
+            subprocess.run(["git", "clone", input_text, new_project_path], capture_output=True, text=True, check=True, timeout=120)
             reply_text = f"✅ Git 仓库克隆成功！\n📂 已将当前项目切换为：`{dir_name}`"
         except subprocess.CalledProcessError as e:
             reply_text = f"❌ 克隆失败：{e.stderr}"
