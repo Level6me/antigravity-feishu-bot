@@ -223,12 +223,15 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             
         elif pending_command == PendingCommand.PROJECT:
             new_project = user_text.strip()
+            session_data["conversation"] = ""  # 彻底清空上个项目的 LLM 会话上下文
             if new_project.lower() in ["clear", "default", "默认", "reset"]:
                 session_data["project"] = "默认"
-                reply_text = "📂 已将项目重置为默认工作空间！"
+                reply_text = "📂 已将项目重置为默认工作空间！上个项目的会话记忆已安全清空。"
             else:
                 session_data["project"] = new_project
-                reply_text = f"📂 已成功将当前项目切换为：`{new_project}`"
+                from project_tracker import ensure_and_read_project_tracker
+                ensure_and_read_project_tracker(new_project)
+                reply_text = f"📂 已成功将当前项目切换为：`{new_project}`\n\n✨ 上个项目的会话记忆已清空，已成功载入该项目的隐秘追踪档案 (`.project_track.secret.md`)，防泄露防护已开启！"
             session_data.pop("pending_command", None)
             await save_session_async(chat_id, session_data)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
