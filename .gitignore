@@ -46,3 +46,7 @@ github_deploy_key*
 
 # Whitelist docs images
 !docs/images/*.jpg
+
+# Confidential project tracker
+.project_track.secret.md
+*.secret.md
