@@ -206,6 +206,18 @@ async def execute_antigravity(
                     pass
             
             think_seconds = int(time.time() - process_start_time)
+            # 全局超时强杀防护 (30分钟超长无响应防挂死)
+            if think_seconds > 1800:
+                log.error(f"[Executor] Process timeout reached (1800s) for chat {chat_id}, killing process group...")
+                import signal
+                try:
+                    pgid = os.getpgid(process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except Exception as ex:
+                    log.error(f"Failed to kill timed out process: {ex}")
+                stderr_text = "⚠️ 执行超时 (30分钟)：后台任务运行时间过长，已被系统超时机制自动强行中断。"
+                break
+
             if action:
                 last_tool_action = action
                 indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success, think_seconds)
