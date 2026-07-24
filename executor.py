@@ -353,7 +353,8 @@ async def execute_antigravity(
             current_role=session_data.get('role', '无'),
             current_project=session_data.get('project', '默认'),
             is_error=is_error,
-            is_streaming=False
+            is_streaming=False,
+            session_data=session_data
         )
         if bot_reply_msg_id:
             await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card))
