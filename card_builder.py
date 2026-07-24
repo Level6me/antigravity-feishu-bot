@@ -316,11 +316,19 @@ class CardBuilder:
                     return f"{num / 1000:.1f}K"
                 return str(num)
 
-            free_pct = round(stats.get("free_pct", 100.0), 1)
+            raw_free_pct = stats.get("free_pct", 100.0)
+            total_tokens = stats.get("total_tokens", 0)
             free_tokens = stats.get("free_tokens", 1000000)
             max_tokens = stats.get("max_tokens", 1000000)
 
-            context_str = f"🧠 上下文剩余: {free_pct}% ({format_k(free_tokens)}/{format_k(max_tokens)})"
+            if total_tokens == 0 or raw_free_pct >= 100.0:
+                free_pct_str = "100.0"
+            elif raw_free_pct >= 99.9:
+                free_pct_str = f"{raw_free_pct:.2f}" if raw_free_pct < 99.99 else "99.99"
+            else:
+                free_pct_str = f"{raw_free_pct:.1f}"
+
+            context_str = f"🧠 上下文剩余: {free_pct_str}% ({format_k(free_tokens)}/{format_k(max_tokens)})"
 
             elements.append({
                 "tag": "markdown",

@@ -176,9 +176,9 @@ async def execute_antigravity(
             # 尽早提取并保存新生成的会话 ID，防止因为执行过程中被 /stop 中断 (CancelledError) 导致新会话丢失
             if not session_data.get("conversation") and os.path.exists(log_file_path):
                 try:
-                    with open(log_file_path, "r") as f:
+                    with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
                         log_content = f.read()
-                    match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
+                    match = re.search(r'(?:Created|found|Resuming|Loaded|Streaming) conversation ([0-9a-fA-F-]+)', log_content)
                     if match:
                         session_data["conversation"] = match.group(1)
                         await save_session_async(chat_id, session_data)
@@ -299,9 +299,9 @@ async def execute_antigravity(
             
             # 兜底：如果运行极快，提前读取了整个流程，在这里再次确保能够保存新生成的 conversation id
             if os.path.exists(log_file_path):
-                with open(log_file_path, "r") as f:
+                with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
                     log_content = f.read()
-                match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
+                match = re.search(r'(?:Created|found|Resuming|Loaded|Streaming) conversation ([0-9a-fA-F-]+)', log_content)
                 if match:
                     new_conv_id = match.group(1)
                     if session_data.get("conversation") != new_conv_id:
@@ -345,6 +345,18 @@ async def execute_antigravity(
     
         if reply_text:
             log.info(f"[Agent text]: {reply_text[:100]}...")
+            
+        # 再次确保生成卡片前更新 conversation，防止新会话概率性遗漏导致的 100% 显示
+        if not session_data.get("conversation") and os.path.exists(log_file_path):
+            try:
+                with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    log_content = f.read()
+                match = re.search(r'(?:Created|found|Resuming|Loaded|Streaming) conversation ([0-9a-fA-F-]+)', log_content)
+                if match:
+                    session_data["conversation"] = match.group(1)
+                    await save_session_async(chat_id, session_data)
+            except Exception as e:
+                log.error(f"Failed to extract conversation id before build_ai_response: {e}")
     
         final_card = CardBuilder.build_ai_response(
             reply_text, 
@@ -366,9 +378,9 @@ async def execute_antigravity(
             try:
                 # [Last Resort Defense]: Try to extract the conversation ID one last time 
                 # in case the process was killed before the while loop could catch it (< 0.5s)
-                with open(log_file_path, "r") as f:
+                with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
                     log_content = f.read()
-                match = re.search(r'(?:Created|found) conversation ([0-9a-fA-F-]+)', log_content)
+                match = re.search(r'(?:Created|found|Resuming|Loaded|Streaming) conversation ([0-9a-fA-F-]+)', log_content)
                 if match:
                     new_conv_id = match.group(1)
                     if session_data.get("conversation") != new_conv_id:
