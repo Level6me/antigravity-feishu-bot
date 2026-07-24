@@ -226,7 +226,7 @@ class CardBuilder:
         }
 
     @staticmethod
-    def build_ai_response(reply_text, choice_card_data=None, current_model="Default", current_role="无", current_project="默认", is_error=False, is_streaming=False):
+    def build_ai_response(reply_text, choice_card_data=None, current_model="Default", current_role="无", current_project="默认", is_error=False, is_streaming=False, session_data=None):
         elements = []
         
         # 1. Main Text
@@ -306,9 +306,25 @@ class CardBuilder:
             else:
                 project_name_only = current_project or "默认"
                 
+            from utils import get_context_usage_stats
+            stats = get_context_usage_stats(session_data)
+            
+            def format_k(num):
+                if num >= 1000000:
+                    return f"{num / 1000000:.1f}M"
+                elif num >= 1000:
+                    return f"{num / 1000:.1f}K"
+                return str(num)
+
+            free_pct = round(stats.get("free_pct", 100.0), 1)
+            free_tokens = stats.get("free_tokens", 1000000)
+            max_tokens = stats.get("max_tokens", 1000000)
+
+            context_str = f"🧠 上下文剩余: {free_pct}% ({format_k(free_tokens)}/{format_k(max_tokens)})"
+
             elements.append({
                 "tag": "markdown",
-                "content": f"<font color='grey'>🤖 模型: {current_model} | 🎭 角色: {current_role} | 📂 项目: {project_name_only} | 💡 键入 /help 查看指令</font>"
+                "content": f"<font color='grey'>🤖 模型: {current_model} | 🎭 角色: {current_role} | 📂 项目: {project_name_only} | {context_str}</font>"
             })
 
         # 4. Standard Footer
@@ -994,4 +1010,149 @@ class CardBuilder:
             },
             "elements": elements
         }
+
+    @staticmethod
+    def build_context_card(stats):
+        """
+        构建飞书卡片消息：上下文使用率看板 (Context Usage Card)
+        """
+        model = stats.get("model", "Gemini 3.6 Flash (High)")
+        total_tokens = stats.get("total_tokens", 0)
+        max_tokens = stats.get("max_tokens", 1000000)
+        total_pct = stats.get("total_pct", 0.0)
+        
+        user_tokens = stats.get("user_tokens", 0)
+        user_pct = stats.get("user_pct", 0.0)
+        agent_tokens = stats.get("agent_tokens", 0)
+        agent_pct = stats.get("agent_pct", 0.0)
+        tool_tokens = stats.get("tool_tokens", 0)
+        tool_pct = stats.get("tool_pct", 0.0)
+        free_tokens = stats.get("free_tokens", max_tokens)
+        free_pct = stats.get("free_pct", 100.0)
+        conv_id = stats.get("conv_id", "N/A")
+        steps_count = stats.get("steps_count", 0)
+
+        def format_k(num):
+            if num >= 1000000:
+                return f"{num / 1000000:.1f}M"
+            elif num >= 1000:
+                return f"{num / 1000:.1f}K"
+            return str(num)
+
+        def make_progress_bar(pct, length=12):
+            filled = int(round((pct / 100.0) * length))
+            filled = max(0, min(length, filled))
+            return "🟩" * filled + "⬜" * (length - filled)
+
+        bar_str = make_progress_bar(total_pct)
+
+        header_template = "blue"
+        if total_pct > 80:
+            header_template = "red"
+        elif total_pct > 50:
+            header_template = "orange"
+
+        elements = [
+            {
+                "tag": "markdown",
+                "content": f"🤖 **当前模型**：`{model}`\n💬 **会话 ID**：`{conv_id}` (`{steps_count}` 步历史步骤)"
+            },
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": f"⚡ **总体上下文用量 (Total Usage)**\n`{format_k(total_tokens)} / {format_k(max_tokens)} tokens` (**{total_pct}%**)\n{bar_str}"
+            },
+            {"tag": "hr"},
+            {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "columns": [
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": f"👤 **User Messages**\n`{format_k(user_tokens)}` tokens (**{user_pct}%**)"
+                            }
+                        ]
+                    },
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": f"🤖 **Agent Responses**\n`{format_k(agent_tokens)}` tokens (**{agent_pct}%**)"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "columns": [
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": f"🛠️ **Tool Calls**\n`{format_k(tool_tokens)}` tokens (**{tool_pct}%**)"
+                            }
+                        ]
+                    },
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": f"🟩 **Free Space**\n`{format_k(free_tokens)}` tokens (**{free_pct}%**)"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🔄 刷新数据"},
+                        "type": "primary",
+                        "value": {"action": "user_choice", "choice": "/context", "label": "刷新数据"}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🧹 清空上下文"},
+                        "type": "danger",
+                        "value": {"action": "user_choice", "choice": "/clear", "label": "清空上下文"}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🎛️ 切换模型"},
+                        "type": "default",
+                        "value": {"action": "user_choice", "choice": "/model", "label": "切换模型"}
+                    }
+                ]
+            },
+            CardBuilder._create_footer()
+        ]
+
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": header_template,
+                "title": {"content": "🧠 上下文容量看板 (Context Usage)", "tag": "plain_text"}
+            },
+            "elements": elements
+        }
+
 

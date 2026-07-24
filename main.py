@@ -651,21 +651,19 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 success_text = (
                     f"📂 **工作区项目切换成功！**\n\n"
                     f"当前已将活跃目录设定为：\n`{target_path}`\n\n"
-                    f"✨ **状态与防护提示**：\n"
-                    f"- 🔄 上个项目的会话记忆已安全清空，开启全新的上下文会话。\n"
-                    f"- 📖 已自动载入本项目的隐秘追踪档案 (`.project_track.secret.md`)。\n"
-                    f"- 🛡️ 敏感凭据防护已启动，档案文件已自动写入 `.gitignore` 排除列表。"
+                    f"✨ **已成功清空当前上下文信息。**"
                 )
                 success_card = CardBuilder.build_ai_response(
                     success_text,
                     current_model=session_data.get('model', 'Default'),
                     current_role=session_data.get('role', '无'),
-                    current_project=target_path
+                    current_project=target_path,
+                    session_data=session_data
                 )
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(card_message_id, success_card))
             asyncio.run_coroutine_threadsafe(do_select_project(), main_loop)
             
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目切换成功，档案已载入！"}})
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目切换成功，已清空上下文信息，档案已载入！"}})
 
     elif action_value.get("action") == "remove_project_from_list":
         target_path = action_value.get("path")
