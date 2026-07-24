@@ -11,7 +11,7 @@ async def _execute_project_creation(input_text, ideal_path, parent_path, is_git_
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         try:
             subprocess.run(["git", "clone", input_text, new_project_path], capture_output=True, text=True, check=True, timeout=120)
-            reply_text = f"✅ Git 仓库克隆成功！\n📂 已将当前项目切换为：`{dir_name}`"
+            reply_text = f"✅ Git 仓库克隆成功！\n📂 已将当前项目切换为：`{dir_name}`\n\n✨ 已成功清空当前上下文信息。"
         except subprocess.CalledProcessError as e:
             reply_text = f"❌ 克隆失败：{e.stderr}"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
@@ -22,13 +22,14 @@ async def _execute_project_creation(input_text, ideal_path, parent_path, is_git_
             prompt_path = os.path.join(new_project_path, "prompt.txt")
             with open(prompt_path, "w") as f:
                 f.write(f"项目目标：{input_text}\n请在此基础上进行开发。")
-            reply_text = f"✅ 新项目创建成功！\n📂 已将当前项目切换为：`{dir_name}`"
+            reply_text = f"✅ 新项目创建成功！\n📂 已将当前项目切换为：`{dir_name}`\n\n✨ 已成功清空当前上下文信息。"
         except Exception as e:
             reply_text = f"❌ 创建目录失败：{str(e)}"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, input_text
 
     session_data["project"] = new_project_path
+    session_data["conversation"] = ""  # 彻底清空上个项目的 LLM 会话上下文
     session_data.pop("pending_command", None)
     from database import save_session_async
     await save_session_async(chat_id, session_data)
@@ -84,10 +85,11 @@ async def _handle_create_project(user_text, message_id, chat_id, session_data, r
             shutil.rmtree(ideal_path, ignore_errors=True)
     elif resolution == "cancel":
         session_data["project"] = ideal_path
+        session_data["conversation"] = ""  # 彻底清空上个项目的 LLM 会话上下文
         session_data.pop("pending_command", None)
         from database import save_session_async
         await save_session_async(chat_id, session_data)
-        reply_text = f"📂 已取消新建，直接为您切换至现有同名项目：`{clean_dir_name}`"
+        reply_text = f"📂 已取消新建，直接为您切换至现有同名项目：`{clean_dir_name}`\n\n✨ 已成功清空当前上下文信息。"
         from lark_client import send_reply_sdk
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
@@ -226,12 +228,12 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             session_data["conversation"] = ""  # 彻底清空上个项目的 LLM 会话上下文
             if new_project.lower() in ["clear", "default", "默认", "reset"]:
                 session_data["project"] = "默认"
-                reply_text = "📂 已将项目重置为默认工作空间！上个项目的会话记忆已安全清空。"
+                reply_text = "📂 已将项目重置为默认工作空间！\n\n✨ 已成功清空当前上下文信息。"
             else:
                 session_data["project"] = new_project
                 from project_tracker import ensure_and_read_project_tracker
                 ensure_and_read_project_tracker(new_project)
-                reply_text = f"📂 已成功将当前项目切换为：`{new_project}`\n\n✨ 上个项目的会话记忆已清空，已成功载入该项目的隐秘追踪档案 (`.project_track.secret.md`)，防泄露防护已开启！"
+                reply_text = f"📂 已成功将当前项目切换为：`{new_project}`\n\n✨ 已成功清空当前上下文信息，已成功载入该项目的隐秘追踪档案 (`.project_track.secret.md`)，防泄露防护已开启！"
             session_data.pop("pending_command", None)
             await save_session_async(chat_id, session_data)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
@@ -497,6 +499,13 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, status_card))
         return True, user_text
 
+    elif user_text.strip() == "/context":
+        from utils import get_context_usage_stats
+        stats = get_context_usage_stats(session_data)
+        context_card = CardBuilder.build_context_card(stats)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, context_card))
+        return True, user_text
+
     elif user_text.strip() == "/quota":
         import re
         import urllib.request
@@ -712,6 +721,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         reply_text = """💡 **Antigravity 机器人高级操作指南**
 
 🔹 `/model` : 弹出交互式控制面板，自由切换大模型
+🔹 `/context` : 查询当前对话上下文容量看板与 Token 统计
 🔹 `/role <设定>` : 让机器人扮演特定角色 (例如: `/role 资深Python工程师`)
 🔹 `/project [路径]` : 管理及切换工作区项目 (不带参发送可视化项目管理器，支持翻页选择与新建；带参直接精准切换至指定路径)
 🔹 `/remember <设定>` : 让机器人永久记住你的偏好 (例如: `/remember 我写代码只用 Python`)
