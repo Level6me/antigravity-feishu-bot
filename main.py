@@ -909,6 +909,45 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "请输入项目名或Git仓库地址！"}})
 
+    elif action_value.get("action") == "prompt_custom_project_path":
+        if main_loop and main_loop.is_running():
+            async def do_prompt_custom():
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = "custom_project_path"
+                await save_session_async(chat_id, session_data)
+                
+                msg = "⚙️ **设置开发工作区**\n\n请直接回复您想要设定的开发工作区绝对路径（例如：`/home/jiang/github/my-app`）：\n\n*(系统收到后将自动校验路径合法性并为您切换工作区且清空上下文)*"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+            asyncio.run_coroutine_threadsafe(do_prompt_custom(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复开发工作区绝对路径！"}})
+
+    elif action_value.get("action") == "prompt_add_note":
+        if main_loop and main_loop.is_running():
+            async def do_prompt_note():
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = "note_add"
+                await save_session_async(chat_id, session_data)
+                
+                msg = "📝 **添加笔记**\n\n请直接在此回复您要添加的笔记内容：\n\n*(提示：随时也可发送 `/note add <内容>` 进行快速添加)*"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+            asyncio.run_coroutine_threadsafe(do_prompt_note(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复您要添加的笔记内容！"}})
+
+    elif action_value.get("action") == "prompt_add_memory":
+        if main_loop and main_loop.is_running():
+            async def do_prompt_memory():
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = "memory_add"
+                await save_session_async(chat_id, session_data)
+                
+                msg = "🧠 **新增个人偏好**\n\n请直接在此回复您希望 AI 记住的偏好或习惯设定（例如：`写代码只用 Python` 或 `用中文回答`）：\n\n*(系统收到后将永久保存至您的个人偏好记忆库)*"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+            asyncio.run_coroutine_threadsafe(do_prompt_memory(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复您的个人偏好设定！"}})
+
     elif action_value.get("action") == "browse_recent_page":
         target_path = action_value.get("current_path")
         target_page = action_value.get("page", 1)
