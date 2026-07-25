@@ -1,0 +1,35 @@
+"""Feishu interactive card builders (split modules)."""
+from cards import common, models, indicators, response, projects, system, memory, stats_cards
+
+
+class CardBuilder:
+    """Facade preserving the historical CardBuilder.* API."""
+
+    _create_footer = staticmethod(common.create_footer)
+
+    build_model_panel = staticmethod(models.build_model_panel)
+    build_model_switch_result_card = staticmethod(models.build_model_switch_result_card)
+
+    _guess_intent = staticmethod(indicators._guess_intent)
+    _get_dynamic_think_text = staticmethod(indicators._get_dynamic_think_text)
+    build_typing_indicator = staticmethod(indicators.build_typing_indicator)
+    build_tool_indicator = staticmethod(indicators.build_tool_indicator)
+    build_download_indicator = staticmethod(indicators.build_download_indicator)
+
+    build_ai_response = staticmethod(response.build_ai_response)
+
+    build_dir_browser_card = staticmethod(projects.build_dir_browser_card)
+
+    build_no_update_card = staticmethod(system.build_no_update_card)
+    build_update_card = staticmethod(system.build_update_card)
+    build_welcome_card = staticmethod(system.build_welcome_card)
+    build_security_warning = staticmethod(system.build_security_warning)
+    build_help_card = staticmethod(system.build_help_card)
+    build_status_card = staticmethod(system.build_status_card)
+
+    build_memory_card = staticmethod(memory.build_memory_card)
+    build_note_list_card = staticmethod(memory.build_note_list_card)
+    build_global_memory_card = staticmethod(memory.build_global_memory_card)
+
+    build_quota_card = staticmethod(stats_cards.build_quota_card)
+    build_context_card = staticmethod(stats_cards.build_context_card)
