@@ -1,6 +1,7 @@
 import time
 from functools import wraps
 from logger import log
+from config import get_brain_dir, get_transcript_path
 
 def with_retry(max_retries=3, initial_delay=1.0, backoff_factor=2.0):
     """
@@ -65,7 +66,7 @@ def get_context_usage_stats(session_data=None):
         if conv_id:
             # 【修复】有明确 conv_id 时，直接使用对应 transcript，
             # 绝不进行"扫描最新文件"的兜底，防止误选 subagent transcript 导致数值大幅跳变
-            p = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
+            p = get_transcript_path(conv_id)
             if os.path.exists(p):
                 transcript_path = p
             # conv_id 已存在但 transcript 文件尚不存在（极罕见情况）：
@@ -73,7 +74,7 @@ def get_context_usage_stats(session_data=None):
         else:
             # 仅在 conv_id 完全缺失时（新会话刚发起）才走一次兜底扫描
             # 并且只选择"顶层会话"（非 subagent 产生的子会话）
-            brain_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain")
+            brain_dir = get_brain_dir()
             if os.path.exists(brain_dir):
                 now = time.time()
                 newest_file = None
@@ -96,7 +97,7 @@ def get_context_usage_stats(session_data=None):
                     transcript_path = newest_file
                     # 不再回写 session_data["conversation"]，避免绑定到错误的 subagent 会话
     else:
-        brain_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain")
+        brain_dir = get_brain_dir()
         if os.path.exists(brain_dir):
             newest_file = None
             newest_mtime = 0
