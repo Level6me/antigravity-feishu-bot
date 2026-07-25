@@ -1,6 +1,6 @@
 # Antigravity Feishu Bot
 
-这是一个基于飞书原生 WebSocket 接口和本地 `antigravity` AI 引擎深度结合的智能助手项目。该项目旨在将大语言模型的代码辅助和系统操作能力接入到飞书聊天窗口中，提供全天候的远程开发辅助与自动化支持。
+基于飞书原生 WebSocket 与本地 `antigravity`（`agy`）引擎的智能助手：在飞书里远程驱动本机做代码读写、终端执行、多模态解析与项目管理。
 
 ---
 
@@ -16,108 +16,188 @@
 
 ---
 
-## 🌟 核心功能清单
+## 🌟 核心功能
 
-本项目通过纯 Python 原生架构实现了与飞书和底层操作系统的深度交互，主要功能包括：
+### 交互体验
+- 飞书 Interactive Card 状态流转（资源加载 / 工具执行 / 思考中 / 最终回复）
+- 卡片原生按钮：切模型、选项目、确认升级、笔记与偏好管理
+- 按 `chat_id` 异步排队，忙时入队而不是直接拒绝
 
-### 一、 交互与基础体验
-1. **流式交互与状态卡片**：基于飞书 Interactive Card 实现。采用 Token 防抖队列（1.0s 刷新间隔）实现平滑的流式打字机效果。在处理耗时任务时（如大文件下载、执行代码），会自动流转卡片状态（如 `📥 资源加载中...`、`🛠️ 当前动作：执行命令`、`✨ AI 思考中...`）。
-2. **多模态文件解析**：
-   * **文档读取**：支持直接在飞书中发送 Word / PDF / TXT / Markdown 文件，程序会自动在本地下载并提取文本供模型分析。
-   * **图片视觉识别**：支持发送图片和截图，模型可直接理解画面内容或识别图片中的代码。
-   * **音视频处理**：支持发送 `.mp4` / `.mov` / `.ogg` 等音视频文件，程序会自动调用底层接口提取内容特征和摘要信息。
-3. **原生互动按钮**：当模型需要向用户确认选项时，会自动在飞书卡片底部渲染原生按钮，用户点击即可完成选择。
+### 本地执行引擎
+- 读写宿主机文件、执行 Shell（由本机 `agy` 驱动）
+- 工作区绑定：`/project` 设定活跃目录
+- 生成物自动回传（图片 / 附件，路径白名单校验）
 
-### 二、 深入操作系统的本地执行引擎
-由于本服务直接部署在用户的物理机或服务器上，它拥有直接操作宿主机的能力：
-1. **本地文件读写**：模型可以通过飞书对话直接读取、修改或创建宿主机上的代码文件和配置文件。
-2. **终端指令执行**：支持大模型在宿主机上自主运行 Shell 命令（如 `npm run build`, `git clone`, `pm2 restart` 等），并将执行日志和报错结果实时返回给飞书进行分析。
-3. **生成物自动回传**：模型在本地生成的数据文件或图表，会被底层的拦截器捕获并作为飞书附件自动发送至聊天窗口。
+### 多模态
+- 支持图片、Word / PDF / 文本、音视频等下行解析
+- 上行自动捕获 transcript 中的本地产物并回传到飞书
 
-### 三、 核心控制台指令 (Slash Commands)
-在聊天框中输入以下指令，可快速调用系统级功能：
-* `/model`：弹出飞书卡片，用于一键切换后台大语言模型（如 Gemini、Claude 等）。
-* `/role <身份>`：为当前对话设定专属的系统提示词（如 `/role 前端开发专家`）。
-* `/remember <喜好>`：永久记录用户的偏好设置（如 `/remember 默认使用 TypeScript`），数据保存在本地 SQLite 数据库中，跨越所有会话全局生效。
-* `/memory` / `/forget`：查看当前保存的所有长时偏好，或清空偏好记录。
-* `/update`：探测并对比云端 (GitHub) 最新版本，一键触发机器人的自动化热更新与重启。
-* `/clear`：清除当前对话的上下文记忆，开启一个全新的干净会话。
-* `/stop`：强制中断。当后台正在执行耗时命令或代码生成时，发送此指令可立即终止任务，并一并清空当前在队列中积压的所有排队请求。
-
-### 四、 并发队列与升级管理
-1. **异步消息排队机制**：全面升级了并发处理机制。当后台任务正在深度执行时，如果连续收到新消息或高频点击事件，系统不再粗暴拒绝请求，而是将其无缝推入每个用户的独立异步队列 (`asyncio.Queue`) 中排队。当前任务结束后将自动执行下一条。
-2. **OTA 自我热升级 (Self-Updating)**：支持在飞书内直接输入 `/update` 自动探测云端的新版本。一键确认后，机器人将在后台自动拉取代码 (`git reset --hard`)、更新依赖 (`pip install`) 并通过 PM2 原地重启满血复活，实现维护成本归零。
-3. **SQLite 数据持久化**：所有的长时偏好记忆和对话上下文均存储在原生的 SQLite 数据库中，保证了高并发读写的数据安全性。
+### 运维
+- `install.sh` 一键安装 / 升级 / 卸载（PM2）
+- `/update` OTA 热升级
+- SQLite 持久化会话与用户偏好
+- Docker / Compose 可选部署
 
 ---
 
-## 🚀 安装部署指南
+## ⌨️ Slash 指令（与代码一致）
 
-本项目采用无 Node.js 依赖的纯 Python 原生架构，支持通过 PM2 进行守护进程部署。
+| 指令 | 说明 |
+|------|------|
+| `/help` | 交互式帮助与快捷按钮 |
+| `/model` | 弹出模型切换面板 |
+| `/project` | 项目管理器（切换 / 新建 / 设置根目录） |
+| `/note` | 记事本（`/note add`、`/note del`、`/notes`） |
+| `/memory` | 个人偏好记忆管理（卡片内新增 / 删除） |
+| `/brain` | Antigravity 全局跨会话记忆看板 |
+| `/context` | 上下文 Token 容量看板 |
+| `/quota` | Google AI Pro 额度查询 |
+| `/status` | 进程 CPU / 内存 / Uptime / 日志摘要 |
+| `/clear` | 清空当前会话上下文 |
+| `/stop` | 强制中断当前任务并清空排队 |
+| `/update` | 检查更新；`/update confirm` 执行热升级 |
 
-### 1. 系统要求与环境准备
-* **Python 3.10+**
-* **Node.js 和 npm** (仅用于安装 PM2：`npm install -g pm2`)
-* **Antigravity CLI**：确保底层 AI 引擎 `antigravity` 已正确安装在系统中。
+> 已移除：`/role`、`/remember`、`/forget`（偏好统一走 `/memory` 卡片交互）。
 
-### 2. 单链接远程一键部署 (最推荐)
-本项目提供了一个高度自动化的安装脚本，支持在任意机器（甚至不需要提前 Clone 代码）直接通过一行命令完成项目克隆、环境变量配置、虚拟环境创建、依赖安装，并直接启动 PM2 守护进程。
+---
 
-只需在终端中运行以下命令：
+## 🚀 安装部署
+
+### 系统要求
+- Python 3.10+
+- Node.js / npm（仅用于安装 PM2：`npm install -g pm2`）
+- 本机已安装并可用的 Antigravity CLI（`agy` 或 `antigravity`）
+
+### 1) 一键脚本（推荐）
+
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/Level6me/antigravity-feishu-bot/main/install.sh)
 ```
-执行后，脚本会全自动拉取源码，您只需根据屏幕上的提示输入 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，即可一键完成上线与开机自启配置！
 
-### 3. 本地交互式部署
-如果您已经提前克隆了项目代码到本地，可以直接在项目根目录下运行：
+按提示填入 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 即可。
+
+本地已 clone 时：
+
 ```bash
 chmod +x install.sh
 ./install.sh
+# 升级: ./install.sh update
+# 卸载: ./install.sh uninstall
 ```
-执行后，只需根据提示输入凭证即可全自动完成部署。
 
-### 4. 手动部署 (可选)
-如果你希望手动控制部署流程，请按照以下步骤：
+### 2) 手动部署
 
-**1) 下载与依赖配置**
-建议使用 Python 虚拟环境（venv）进行隔离部署：
 ```bash
-# 进入项目目录并创建虚拟环境
 python3 -m venv venv
-
-# 激活虚拟环境 (Mac/Linux)
 source venv/bin/activate
-
-# 安装核心依赖包
 pip install -r requirements.txt
-```
-
-**2) 环境变量配置**
-```bash
 cp .env.example .env
-```
-编辑 `.env` 文件填入飞书开发者后台的真实凭证。
-> **注意**：请确保飞书应用已开启“WebSocket 建立长连接”权限，并开通了所有必需的事件与消息权限（如 `im:message`）。
+# 编辑 .env 填入凭证与可选路径配置
 
-**3) 启动后台服务**
-使用 PM2 启动机器人即可让其在后台稳定运行：
-```bash
-# 启动进程（请指定虚拟环境中的 python3 执行）
 pm2 start venv/bin/python3 --name "feishu-bot" -- main.py
-
-# 保存 PM2 进程列表以支持开机自启
+# 可选：保持 agy 热进程
+pm2 start venv/bin/python3 --name "agy-daemon" -- agy_daemon.py
 pm2 save
 ```
 
-**常用运维指令：**
-* 查看实时日志：`pm2 logs feishu-bot`
-* 重启服务：`pm2 restart feishu-bot`
-* 停止服务：`pm2 stop feishu-bot`
+飞书应用需开启 **WebSocket 长连接**，并开通消息相关权限（如 `im:message`）。
+
+### 3) Docker Compose
+
+```bash
+cp .env.example .env
+# 填入 FEISHU_APP_ID / FEISHU_APP_SECRET
+# 如需挂载宿主机 agy 数据与工作区，可设置 HOST_ANTIGRAVITY_HOME / HOST_WORKSPACE
+
+docker compose up -d --build
+# 可选 agy 守护进程：
+docker compose --profile daemon up -d
+```
+
+> Docker 镜像只包含 Bot 运行时。`agy` 二进制与登录态需安装在宿主机并通过 volume 挂载，或在容器内自行安装。
 
 ---
 
-## 👨‍💻 架构简介
-* **网络层**：使用 `lark_oapi.ws.Client` 与飞书网关建立稳定的全双工长连接，抛弃了传统的 Webhook 轮询，极大降低了延迟并穿透了内网限制。
-* **业务解耦**：项目划分为主轴（`main.py`）、指令路由（`commands.py`）、飞书接口封装（`lark_client.py`）、存储与配置层（`database.py` / `config.py`）以及多模态解析层（`multimodal.py`）。
-* **进程安全**：通过捕获 `SIGINT/SIGTERM` 信号，在 PM2 重启或停止服务时执行 Graceful Shutdown，自动清理正在运行的大模型子进程。绝对路径与 `sys.executable` 寻址机制保障了服务在各类复杂部署环境（如开机自启）下的稳定性。
+## ⚙️ 环境变量
+
+详见 [`.env.example`](.env.example)。常用项：
+
+| 变量 | 说明 |
+|------|------|
+| `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 飞书应用凭证 |
+| `ALLOWED_USERS` / `ALLOWED_CHATS` | 可选白名单（open_id / chat_id，逗号分隔） |
+| `ANTIGRAVITY_BIN` | `agy` 绝对路径；空则自动探测 |
+| `ANTIGRAVITY_HOME` | antigravity-cli 数据根目录，默认 `~/.gemini/antigravity-cli` |
+| `WORKSPACE_ROOT` | 项目管理器默认根目录，默认 `~` |
+| `DANGEROUSLY_SKIP_PERMISSIONS` | 是否向 agy 传跳过权限确认（默认 true，风险高） |
+
+---
+
+## 🏗 架构
+
+```
+飞书客户端
+    │  WebSocket (lark_oapi.ws)
+    ▼
+main.py                 进程入口 / 优雅退出
+    │
+    ├─ handlers/        事件与消息管线
+    │   ├─ events.py        IM 收消息
+    │   ├─ card_actions.py  卡片按钮回调
+    │   ├─ messages.py      指令路由 / 媒体防抖入队
+    │   ├─ pipeline.py      单会话队列与任务执行
+    │   └─ media.py         图 / 文件 / 音视频下载
+    ├─ cards/           交互卡片构建（按场景拆分）
+    ├─ commands.py      Slash 指令实现
+    ├─ executor.py      拉起 agy 子进程、读 transcript
+    ├─ multimodal.py    生成物回传
+    ├─ lark_client.py   飞书 API 封装
+    ├─ database.py      SQLite 会话 / 偏好
+    ├─ config.py        配置与路径解析（可移植）
+    └─ agy_daemon.py    可选 agy 保活守护进程
+```
+
+路径不再写死：`transcript` / OAuth / global memory 均通过 `config.get_*` 解析，可用 `ANTIGRAVITY_HOME` 覆盖。
+
+---
+
+## 🔒 安全提示
+
+本 Bot 运行在宿主机上，具备近 shell 级能力。上线前建议：
+
+1. 配置 `ALLOWED_USERS` / `ALLOWED_CHATS` 白名单  
+2. 评估是否关闭 `DANGEROUSLY_SKIP_PERMISSIONS`  
+3. 仅在可信网络 / 私聊中使用，勿对公开群无限制开放  
+
+---
+
+## 🛠 运维常用命令
+
+```bash
+pm2 logs feishu-bot
+pm2 restart feishu-bot
+pm2 stop feishu-bot
+pm2 logs agy-daemon
+```
+
+---
+
+## 📁 仓库结构（精简）
+
+```
+main.py              # 入口
+app_state.py         # 进程内共享状态
+handlers/            # 事件 / 消息 / 队列
+cards/               # 卡片 UI 模块
+card_builder.py      # 兼容旧 import: from card_builder import CardBuilder
+commands.py
+executor.py
+config.py
+database.py
+agy_daemon.py
+Dockerfile
+docker-compose.yml
+install.sh
+requirements.txt
+.env.example
+```

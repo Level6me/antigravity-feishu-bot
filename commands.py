@@ -36,7 +36,7 @@ async def _execute_project_creation(input_text, ideal_path, parent_path, is_git_
     return True, input_text
 
 async def _handle_create_project(user_text, message_id, chat_id, session_data, resolution=None):
-    from config import WORKSPACE_ROOT
+    from config import WORKSPACE_ROOT, get_global_memory_path, get_oauth_token_path
     import re, os, asyncio, shutil
     from lark_client import send_interactive_card_sdk
     
@@ -604,7 +604,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             log.error(f"Error discovering LSP port: {e}")
                 
         if not quota_data:
-            token_path = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
+            token_path = get_oauth_token_path()
             if os.path.exists(token_path):
                 try:
                     with open(token_path, "r") as f:
@@ -634,7 +634,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 
     elif user_text.strip() == "/brain":
         memories = []
-        memory_file = os.path.expanduser("~/.gemini/antigravity-cli/global_memory.json")
+        memory_file = get_global_memory_path()
         try:
             if os.path.exists(memory_file):
                 with open(memory_file, "r", encoding="utf-8") as f:

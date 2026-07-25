@@ -5,7 +5,7 @@ import json
 import uuid
 import re
 import subprocess
-from config import ANTIGRAVITY_BIN, DANGEROUSLY_SKIP_PERMISSIONS
+from config import ANTIGRAVITY_BIN, DANGEROUSLY_SKIP_PERMISSIONS, get_brain_dir, get_transcript_path
 from logger import log
 from card_builder import CardBuilder
 from lark_client import patch_interactive_card_sdk, send_interactive_card_sdk, api_client
@@ -119,7 +119,7 @@ async def execute_antigravity(
     initial_transcript_size = 0
     if not is_new_conversation:
         conv_id = session_data["conversation"]
-        path = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
+        path = get_transcript_path(conv_id)
         if os.path.exists(path):
             target_transcript_path = path
             initial_transcript_size = os.path.getsize(path)
@@ -174,11 +174,11 @@ async def execute_antigravity(
     def get_latest_transcript_file():
         if session_data.get("conversation"):
             conv_id = session_data["conversation"]
-            path = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
+            path = get_transcript_path(conv_id)
             if os.path.exists(path):
                 return path
         # 动态查找最新活动的 transcript.jsonl
-        brain_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain")
+        brain_dir = get_brain_dir()
         if os.path.exists(brain_dir):
             now = time.time()
             newest_file = None

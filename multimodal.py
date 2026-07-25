@@ -3,6 +3,7 @@ import os
 import json
 import lark_oapi as lark
 from logger import log
+from config import get_brain_dir
 
 def extract_and_upload_resources(text, message_id, api_client, additional_safe_dirs=None):
     images = [img for img in re.findall(r'!\[.*?\]\((?:file://)?([^)]+)\)', text) if not img.startswith(('http://', 'https://'))]
@@ -12,7 +13,7 @@ def extract_and_upload_resources(text, message_id, api_client, additional_safe_d
     safe_prefixes = [
         os.path.join(workspace_dir, "downloads"),
         os.path.join(workspace_dir, "scratch"),
-        os.path.expanduser("~/.gemini/antigravity-cli/brain")
+        get_brain_dir()
     ]
     
     if additional_safe_dirs:

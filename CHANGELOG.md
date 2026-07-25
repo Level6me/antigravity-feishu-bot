@@ -1,5 +1,15 @@
 # 开发记录与进度追踪 (Development Log)
 
+## [v1.2.0] - 2026-07-26
+
+### 工程成熟度
+- **Docker 完整交付**：新增 `Dockerfile`、`.dockerignore`，重写 `docker-compose.yml`（含可选 `agy-daemon` profile）。
+- **路径可移植**：`ANTIGRAVITY_HOME` / `ANTIGRAVITY_BIN` / `WORKSPACE_ROOT` 可配置；`transcript`、OAuth、global memory 统一走 `config.get_*`。
+- **模块拆分**：`main.py` 拆为 `handlers/*` + `app_state.py`；`card_builder` 拆为 `cards/*` 包（保留 `card_builder.CardBuilder` 兼容导入）。
+- **agy_daemon 工程化**：使用 config 解析二进制路径，指数退避重启、信号处理、结构化日志。
+- **仓库卫生**：移除 `archive_debug/`、`parse_log.py` 等调试残留；更新 `.gitignore`。
+- **文档同步**：README / `.env.example` / 帮助卡片与当前 Slash 指令对齐（移除已废弃的 `/role` `/remember`，补充 `/brain` 等）。
+
 ## [v1.1.0] - 2026-06-21
 
 ### 🚀 新增功能 (Features)

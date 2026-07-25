@@ -13,6 +13,9 @@ chat_sessions.json
 user_profiles.json
 agy_log_*.txt
 *.log
+logs/
+downloads/
+scratch/
 
 # Test and scratch files
 test_*.py
@@ -21,6 +24,8 @@ do_patch*.py
 fix_*.py
 dummy.txt
 hello.py
+parse_log.py
+archive_debug/
 
 # Media generated/downloaded
 *.mov
@@ -37,6 +42,7 @@ hello.py
 
 # Database and backups
 *.db
+*.db-journal
 *.bak
 GiteeClient/
 *.err
@@ -50,3 +56,9 @@ github_deploy_key*
 # Confidential project tracker
 .project_track.secret.md
 *.secret.md
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

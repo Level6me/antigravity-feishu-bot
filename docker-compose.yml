@@ -1,14 +1,56 @@
-version: '3.8'
-
 services:
   antigravity-feishu-bot:
     build: .
+    image: antigravity-feishu-bot:latest
     container_name: antigravity-feishu-bot
-    restart: always
+    restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Override host paths inside the container as needed
+      ANTIGRAVITY_HOME: ${ANTIGRAVITY_HOME:-/home/bot/.gemini/antigravity-cli}
+      ANTIGRAVITY_BIN: ${ANTIGRAVITY_BIN:-}
+      WORKSPACE_ROOT: ${WORKSPACE_ROOT:-/workspace}
     volumes:
-      - .:/app
-    # Depending on how the user prefers to run it inside docker. 
-    # Usually `python main.py` or through pm2 if it's installed in the Dockerfile.
-    command: python main.py
+      # Persist bot state (sqlite, logs, downloads)
+      - bot-data:/app
+      # Mount host antigravity CLI data (transcripts, oauth, global memory)
+      - ${HOST_ANTIGRAVITY_HOME:-${HOME}/.gemini/antigravity-cli}:/home/bot/.gemini/antigravity-cli
+      # Optional: mount a host workspace the agent is allowed to operate on
+      - ${HOST_WORKSPACE:-${HOME}}:/workspace
+      # Optional: mount host agy binary if not installed in the image
+      # - ${HOME}/.local/bin/agy:/usr/local/bin/agy:ro
+    # Network: WebSocket client outbound only; host network can simplify
+    # access to a host-side agy LSP if needed:
+    # network_mode: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional warm-up / keep-alive process for the local antigravity CLI.
+  # Disabled by default — enable with: docker compose --profile daemon up -d
+  agy-daemon:
+    profiles: ["daemon"]
+    build: .
+    image: antigravity-feishu-bot:latest
+    container_name: antigravity-agy-daemon
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ANTIGRAVITY_BIN: ${ANTIGRAVITY_BIN:-}
+      ANTIGRAVITY_HOME: ${ANTIGRAVITY_HOME:-/home/bot/.gemini/antigravity-cli}
+    volumes:
+      - ${HOST_ANTIGRAVITY_HOME:-${HOME}/.gemini/antigravity-cli}:/home/bot/.gemini/antigravity-cli
+      # - ${HOME}/.local/bin/agy:/usr/local/bin/agy:ro
+    command: ["python", "agy_daemon.py"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  bot-data:
