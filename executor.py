@@ -247,14 +247,20 @@ async def execute_antigravity(
         while process.returncode is None:
             await asyncio.sleep(0.5)
             
-            # 尽早提取并锁定主会话 ID (仅在未设置 conversation 时提取首个匹配项，防止被子 Agent 覆盖)
-            if not session_data.get("conversation") and os.path.exists(log_file_path):
+            # 尽早提取并同步主会话 ID (处理新创建会话、失效会话重建与 ID 变化)
+            if os.path.exists(log_file_path):
                 try:
                     with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
                         log_content = f.read()
+                    conv_not_found = "not found" in log_content and "conversation" in log_content
                     match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
                     if match:
-                        session_data["conversation"] = match.group(1)
+                        new_conv_id = match.group(1)
+                        if session_data.get("conversation") != new_conv_id:
+                            session_data["conversation"] = new_conv_id
+                            await save_session_async(chat_id, session_data)
+                    elif conv_not_found:
+                        session_data["conversation"] = ""
                         await save_session_async(chat_id, session_data)
                 except Exception:
                     pass
@@ -359,15 +365,23 @@ async def execute_antigravity(
             
             await loop.run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs))
             
-            # 兜底：如果运行极快且尚无 conversation，仅在未绑定时保存主会话 id
-            if not session_data.get("conversation") and os.path.exists(log_file_path):
-                with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    log_content = f.read()
-                match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
-                if match:
-                    new_conv_id = match.group(1)
-                    session_data["conversation"] = new_conv_id
-                    await save_session_async(chat_id, session_data)
+            # 兜底：确保最新 conversation ID 正确写入 session_data
+            if os.path.exists(log_file_path):
+                try:
+                    with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        log_content = f.read()
+                    conv_not_found = "not found" in log_content and "conversation" in log_content
+                    match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
+                    if match:
+                        new_conv_id = match.group(1)
+                        if session_data.get("conversation") != new_conv_id:
+                            session_data["conversation"] = new_conv_id
+                            await save_session_async(chat_id, session_data)
+                    elif conv_not_found:
+                        session_data["conversation"] = ""
+                        await save_session_async(chat_id, session_data)
+                except Exception:
+                    pass
             
             is_error = False
         if not reply_text:
@@ -407,14 +421,20 @@ async def execute_antigravity(
         if reply_text:
             log.info(f"[Agent text]: {reply_text[:100]}...")
             
-        # 再次确保生成卡片前仅在未绑定会话 ID 时更新
-        if not session_data.get("conversation") and os.path.exists(log_file_path):
+        # 再次确保生成卡片前更新 session_data
+        if os.path.exists(log_file_path):
             try:
                 with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
                     log_content = f.read()
+                conv_not_found = "not found" in log_content and "conversation" in log_content
                 match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
                 if match:
-                    session_data["conversation"] = match.group(1)
+                    new_conv_id = match.group(1)
+                    if session_data.get("conversation") != new_conv_id:
+                        session_data["conversation"] = new_conv_id
+                        await save_session_async(chat_id, session_data)
+                elif conv_not_found:
+                    session_data["conversation"] = ""
                     await save_session_async(chat_id, session_data)
             except Exception as e:
                 log.error(f"Failed to extract conversation id before build_ai_response: {e}")
@@ -436,15 +456,19 @@ async def execute_antigravity(
     finally:
         if os.path.exists(log_file_path):
             try:
-                # [Last Resort Defense]: 仅在尚未设置 conversation 时尝试提取首个主会话 ID
-                if not session_data.get("conversation"):
-                    with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                        log_content = f.read()
-                    match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
-                    if match:
-                        new_conv_id = match.group(1)
+                # [Last Resort Defense]: 彻底确认主会话 ID 或清除已失效 ID 并同步落盘
+                with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    log_content = f.read()
+                conv_not_found = "not found" in log_content and "conversation" in log_content
+                match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
+                if match:
+                    new_conv_id = match.group(1)
+                    if session_data.get("conversation") != new_conv_id:
                         session_data["conversation"] = new_conv_id
-                        asyncio.create_task(save_session_async(chat_id, session_data))
+                        await save_session_async(chat_id, session_data)
+                elif conv_not_found:
+                    session_data["conversation"] = ""
+                    await save_session_async(chat_id, session_data)
             except Exception as e:
                 log.error(f"Failed to read/save conversation id in finally block: {e}")
             finally:
