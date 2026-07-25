@@ -354,10 +354,36 @@ class CardBuilder:
     def build_dir_browser_card(active_project_path, recent_projects=None, recent_page=1, workspace_root=None, ignored_projects=None):
         elements = []
         
-        # 1. 顶部当前活跃项目展示
+        # 1. 顶部当前活跃项目展示与设置按钮
         elements.append({
-            "tag": "markdown",
-            "content": f"📂 **当前活跃开发工作区**：\n`{active_project_path}`"
+            "tag": "column_set",
+            "flex_mode": "none",
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": f"📂 **当前活跃开发工作区**：\n`{active_project_path}`"
+                        }
+                    ]
+                },
+                {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "bottom",
+                    "elements": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "⚙️ 设置工作区"},
+                            "type": "primary",
+                            "value": {"action": "prompt_custom_project_path"}
+                        }
+                    ]
+                }
+            ]
         })
         
         # 确定公共根目录
@@ -630,15 +656,28 @@ class CardBuilder:
     @staticmethod
     def build_memory_card(memories):
         elements = []
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "➕ 新增偏好"},
+                    "type": "primary",
+                    "value": {"action": "prompt_add_memory"}
+                }
+            ]
+        })
+        elements.append({"tag": "hr"})
+
         if not memories:
             elements.append({
                 "tag": "markdown",
-                "content": "📭 **当前没有记录您的任何长时偏好。**\n\n您可以通过发送 `/remember <偏好>` 来快速添加（例如：`/remember 我开发只用 Python`）。"
+                "content": "📭 **当前没有记录您的任何个人偏好。**\n\n点击上方「➕ 新增偏好」按钮即可快速记录您的个人习惯与偏好！"
             })
         else:
             elements.append({
                 "tag": "markdown",
-                "content": "🧠 **您的长时偏好与设定记录**：\n*(点击右侧「忘记」可立即在机器人记忆中擦除对应条目)*"
+                "content": "🧠 **您的长时偏好与设定记录**：\n*(点击右侧「忘记」可立即擦除对应偏好)*"
             })
             elements.append({"tag": "hr"})
             
@@ -705,10 +744,23 @@ class CardBuilder:
     @staticmethod
     def build_note_list_card(notes):
         elements = []
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "➕ 添加笔记"},
+                    "type": "primary",
+                    "value": {"action": "prompt_add_note"}
+                }
+            ]
+        })
+        elements.append({"tag": "hr"})
+
         if not notes:
             elements.append({
                 "tag": "markdown",
-                "content": "📝 **您的记事本目前是空的。**"
+                "content": "📝 **您的记事本目前是空的。**\n\n点击上方「➕ 添加笔记」按钮，或发送 `/note add <内容>` 即可快速记录。"
             })
         else:
             elements.append({
@@ -791,6 +843,115 @@ class CardBuilder:
             "header": {
                 "template": "orange",
                 "title": {"content": "📔 机器人记事本", "tag": "plain_text"}
+            },
+            "elements": elements
+        }
+
+    @staticmethod
+    def build_help_card():
+        elements = [
+            {
+                "tag": "markdown",
+                "content": "🤖 **欢迎使用 Antigravity 智能助理控制台！**\n包含系统的所有指令与交互菜单，点击下方按钮或发送斜杠指令即可快速调起操作："
+            },
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": (
+                    "🎛️ **模型与记忆控制：**\n"
+                    "• `/model` : 弹出大模型选择面板，自由热切换模型\n"
+                    "• `/context` : 查看对话上下文 Token 占用统计与容量看板\n"
+                    "• `/memory` : 查看与管理您的个人偏好设定（支持交互式新增与删除）\n"
+                    "• `/role <设定>` : 设定 AI 的角色身份（例如：`/role 资深Python工程师`）\n"
+                    "• `/clear` : 彻底清空当前会话的上下文记忆，重新开始"
+                )
+            },
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": (
+                    "📁 **项目与记事本工程：**\n"
+                    "• `/project` : 弹出项目管理器（支持切换工作区、新建项目、设置路径与翻页）\n"
+                    "• `/note` : 记事本管理看板（支持添加、查看详情、删除与清空）\n"
+                    "• `/quota` : 查询 Google AI Pro 套餐官方剩余额度看板\n"
+                    "• `/status` : 查看机器人的运行状态、CPU/内存/Uptime 与日志"
+                )
+            },
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": (
+                    "⚡ **系统管理与防护：**\n"
+                    "• `/stop` : 紧急刹车！强行中止后台正在运行的大模型耗时任务\n"
+                    "• `/update` : 检查并热升级云端最新版本的机器人引擎核心\n"
+                    "• `/help` : 显示此交互式帮助卡片"
+                )
+            },
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": "🎯 **快捷交互控制** (点击一键调起)："
+            },
+            {
+                "tag": "action",
+                "layout": "flow",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "📁 项目管理"},
+                        "type": "primary",
+                        "value": {"action": "user_choice", "choice": "/project", "label": "项目管理"}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🤖 切换模型"},
+                        "type": "default",
+                        "value": {"action": "user_choice", "choice": "/model", "label": "切换模型"}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🧠 偏好记忆"},
+                        "type": "default",
+                        "value": {"action": "user_choice", "choice": "/memory", "label": "偏好记忆"}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "📝 记事本"},
+                        "type": "default",
+                        "value": {"action": "user_choice", "choice": "/note", "label": "记事本"}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "📊 容量看板"},
+                        "type": "default",
+                        "value": {"action": "user_choice", "choice": "/context", "label": "容量看板"}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🧹 清空上下文"},
+                        "type": "default",
+                        "value": {"action": "user_choice", "choice": "/clear", "label": "清空上下文"}
+                    }
+                ]
+            },
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": (
+                    "✨ **黑科技功能特性：**\n"
+                    "• **多模态强力解析**：支持发送 PDF / Word / 语音 / 视频 / 图片\n"
+                    "• **底层终端执行**：支持受限终端指令与物理项目读写\n"
+                    "• **跨网网页检索**：发送网页 URL 可实时提炼摘要"
+                )
+            },
+            CardBuilder._create_footer()
+        ]
+
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "blue",
+                "title": {"content": "💡 Antigravity 帮助与控制大厅", "tag": "plain_text"}
             },
             "elements": elements
         }
