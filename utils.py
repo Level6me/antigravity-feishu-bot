@@ -25,6 +25,8 @@ def with_retry(max_retries=3, initial_delay=1.0, backoff_factor=2.0):
     return decorator
 
 
+_SESSION_TOKEN_CACHE = {}
+
 def get_context_usage_stats(session_data=None):
     """
     获取或估算当前对话会话的上下文 Token 使用统计信息
@@ -180,6 +182,15 @@ def get_context_usage_stats(session_data=None):
         log.error(f"Error reading transcript for context stats: {e}")
 
     total_tokens = user_tokens + agent_tokens + tool_tokens
+
+    # 单会话单调递增防护：防止在同一会话中因中间截断或解析变动导致 Token 计数向下回跳
+    if conv_id and conv_id != "新会话":
+        cached_tokens = _SESSION_TOKEN_CACHE.get(conv_id, 0)
+        if total_tokens < cached_tokens:
+            total_tokens = cached_tokens
+        else:
+            _SESSION_TOKEN_CACHE[conv_id] = total_tokens
+
     free_tokens = max(0, max_tokens - total_tokens)
 
     user_pct = round((user_tokens / max_tokens) * 100, 2)
@@ -211,4 +222,5 @@ def get_context_usage_stats(session_data=None):
         "free_pct": free_pct,
         "steps_count": steps_count
     }
+
 
