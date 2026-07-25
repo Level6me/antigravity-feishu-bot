@@ -292,19 +292,7 @@ async def _process_single_task(chat_id, task):
         proj_prompt_text = project_prompts[current_proj]
         system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
 
-    # 自动注入项目隐秘追踪与凭据档案 (.project_track.secret.md)
-    if current_proj and current_proj not in ["默认", "Default"]:
-        from project_tracker import ensure_and_read_project_tracker
-        tracker_text = ensure_and_read_project_tracker(current_proj)
-        if tracker_text:
-            system_instruction += (
-                f"[Project Track & Confidential Credentials Archive / 本项目隐秘追踪与凭据档案]\n"
-                f"{tracker_text}\n\n"
-                f"【项目防护与防泄露安全准则】：\n"
-                f"1. 上述凭据（服务器 IP、密码、Token、AppID、密钥等）与项目记录仅限在当前项目中隐秘使用，绝不可跨项目泄露。\n"
-                f"2. 当你在项目中完成改动或解决问题时，可以主动维护更新当前项目的 `.project_track.secret.md` 文件（更新 TodoList、改动履历、废弃/保留的方案）。\n"
-                f"3. 严禁使用 git 将 `.project_track.secret.md` 推送到远程 GitHub！该文件已被自动写入 .gitignore 防护。\n\n"
-            )
+
 
     # 注入用户备忘录 Notes
     notes = session_data.get("notes", [])
@@ -656,15 +644,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
         if main_loop and main_loop.is_running():
             async def do_select_project():
-                from project_tracker import ensure_and_read_project_tracker
                 session_data = await get_session_async(chat_id)
                 session_data["project"] = target_path
-                
-                # 1. 彻底清空上个项目的 LLM 会话内存上下文，实现跨项目记忆隔离
-                session_data["conversation"] = ""
-                
-                # 2. 确保目标项目的 .gitignore 及隐秘追踪档案 (.project_track.secret.md) 初始化就绪
-                ensure_and_read_project_tracker(target_path)
                 
                 # 记录最近使用的项目
                 recent = session_data.get("recent_projects", [])
@@ -677,8 +658,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 
                 success_text = (
                     f"📂 **工作区项目切换成功！**\n\n"
-                    f"当前已将活跃目录设定为：\n`{target_path}`\n\n"
-                    f"✨ **已成功清空当前上下文信息。**"
+                    f"当前已将活跃目录设定为：\n`{target_path}`"
                 )
                 success_card = CardBuilder.build_ai_response(
                     success_text,
