@@ -332,7 +332,7 @@ class CardBuilder:
 
             elements.append({
                 "tag": "markdown",
-                "content": f"<font color='grey'>🤖 模型: {current_model} | 📂 项目: {project_name_only} | {context_str}</font>"
+                "content": f"<font color='grey'>🤖 模型: {current_model} | 🗂️ 项目: {project_name_only} | {context_str}</font>"
             })
 
         # 4. Standard Footer
