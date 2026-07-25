@@ -447,6 +447,272 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         return True, user_text
 
         
+    elif user_text.startswith("/newproj_resolve"):
+        parts = user_text.split(" ", 2)
+        if len(parts) >= 3:
+            resolution = parts[1].strip()
+            input_text = parts[2].strip()
+            return await _handle_create_project(input_text, message_id, chat_id, session_data, resolution=resolution)
+        return True, user_text
+
+    elif user_text.startswith("/note"):
+        parts = user_text.split(" ", 1)
+        subcommand = parts[1].strip() if len(parts) > 1 else ""
+        notes = session_data.get("notes", [])
+        
+        if not subcommand or subcommand == "list" or user_text.strip() == "/notes":
+            note_card = CardBuilder.build_note_list_card(notes)
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, note_card))
+            return True, user_text
+            
+        elif subcommand.startswith("add "):
+            note_content = subcommand[4:].strip()
+            notes.append(note_content)
+            session_data["notes"] = notes
+            await save_session_async(chat_id, session_data)
+            reply_text = f"✅ 已保存笔记：\n{note_content}"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+            
+        elif subcommand.startswith("del "):
+            try:
+                idx = int(subcommand[4:].strip()) - 1
+                if 0 <= idx < len(notes):
+                    deleted = notes.pop(idx)
+                    session_data["notes"] = notes
+                    await save_session_async(chat_id, session_data)
+                    reply_text = f"🗑️ 已删除笔记：\n{deleted}"
+                else:
+                    reply_text = "❌ 找不到指定编号的笔记，请使用 `/note list` 查看编号。"
+            except ValueError:
+                reply_text = "❌ 格式错误，正确用法：`/note del <编号>`"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+            
+        elif subcommand == "clear":
+            session_data["notes"] = []
+            await save_session_async(chat_id, session_data)
+            reply_text = "🧹 您的记事本已清空！"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+            
+        else:
+            # 默认直接作为添加
+            notes.append(subcommand)
+            session_data["notes"] = notes
+            await save_session_async(chat_id, session_data)
+            reply_text = f"✅ 已保存笔记：\n{subcommand}"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+
+    elif user_text.strip() == "/status":
+        cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats = get_system_status_card_data()
+        status_card = CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, status_card))
+        return True, user_text
+
+    elif user_text.strip() == "/context":
+        from utils import get_context_usage_stats
+        stats = get_context_usage_stats(session_data)
+        context_card = CardBuilder.build_context_card(stats)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, context_card))
+        return True, user_text
+
+    elif user_text.strip() == "/quota":
+        import re
+        import urllib.request
+        import ssl
+        
+        lsp_port = None
+        quota_data = None
+        try:
+            candidate_ports = set()
+            for pid_dir in os.listdir("/proc"):
+                if not pid_dir.isdigit():
+                    continue
+                try:
+                    cmdline_path = f"/proc/{pid_dir}/cmdline"
+                    with open(cmdline_path, "rb") as f:
+                        cmdline = f.read().decode("utf-8", errors="ignore")
+                    if "agy" not in cmdline and "antigravity" not in cmdline:
+                        continue
+                    log.info(f"[/quota] Found agy process pid={pid_dir}")
+                    fd_dir = f"/proc/{pid_dir}/fd"
+                    if not os.path.isdir(fd_dir):
+                        continue
+                    
+                    found_any_socket = False
+                    for fd in os.listdir(fd_dir):
+                        try:
+                            link = os.readlink(f"{fd_dir}/{fd}")
+                            if "socket:" in link:
+                                found_any_socket = True
+                                inode = link.split("[")[1].rstrip("]")
+                                with open("/proc/net/tcp", "r") as tcp_f:
+                                    for tcp_line in tcp_f:
+                                        parts = tcp_line.strip().split()
+                                        if len(parts) >= 10 and parts[9] == inode:
+                                            if parts[3] == "0A":
+                                                hex_port = parts[1].split(":")[1]
+                                                port = int(hex_port, 16)
+                                                candidate_ports.add(port)
+                        except Exception as e:
+                            log.warning(f"[/quota] Error processing fd {fd} for pid {pid_dir}: {e}")
+                except Exception as e:
+                    log.warning(f"[/quota] Error processing pid {pid_dir}: {e}")
+            
+            if not candidate_ports:
+                try:
+                    out = subprocess.check_output("/usr/bin/ss -tlnp", shell=True, text=True, timeout=3)
+                    for line in out.split("\n"):
+                        if 'users:(("agy"' in line or 'users:(("antigravity"' in line:
+                            match = re.search(r"127\.0\.0\.1:(\d+)", line)
+                            if match:
+                                candidate_ports.add(int(match.group(1)))
+                except Exception as e:
+                    log.warning(f"[/quota] fallback ss failed: {e}")
+            
+            context = ssl._create_unverified_context()
+            metadata_payload = b'{"metadata": {"ideName": "antigravity", "extensionName": "antigravity"}}'
+            
+            def probe_port(port):
+                url = f"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+                req = urllib.request.Request(url, data=metadata_payload, headers={"Content-Type": "application/json"}, method="POST")
+                try:
+                    with urllib.request.urlopen(req, context=context, timeout=5) as response:
+                        data = json.loads(response.read().decode())
+                        if "response" in data and "groups" in data["response"]:
+                            return port, data
+                except Exception as e:
+                    log.warning(f"[/quota] Port {port} failed: {e}")
+                return port, None
+
+            import concurrent.futures
+            if candidate_ports:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(candidate_ports))) as executor:
+                    futures = [executor.submit(probe_port, p) for p in candidate_ports]
+                    for future in concurrent.futures.as_completed(futures):
+                        p, data = future.result()
+                        if data:
+                            quota_data = data
+                            lsp_port = p
+                            break
+        except Exception as e:
+            log.error(f"Error discovering LSP port: {e}")
+                
+        if not quota_data:
+            token_path = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
+            if os.path.exists(token_path):
+                try:
+                    with open(token_path, "r") as f:
+                        token_info = json.load(f)
+                    access_token = token_info["token"]["access_token"]
+                    url = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+                    req = urllib.request.Request(
+                        url,
+                        data=b'{"project":"high-battery-8d2jw"}',
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Content-Type": "application/json",
+                            "User-Agent": "antigravity/cli/1.1.3"
+                        },
+                        method="POST"
+                    )
+                    context = ssl._create_unverified_context()
+                    with urllib.request.urlopen(req, context=context) as response:
+                        api_data = json.loads(response.read().decode())
+                        quota_data = {"response": api_data}
+                except Exception as e:
+                    log.error(f"Error fetching remote quota fallback: {e}")
+                    
+        quota_card = CardBuilder.build_quota_card(quota_data)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, quota_card))
+        return True, user_text
+
+    elif user_text.strip() == "/brain":
+        memories = []
+        memory_file = os.path.expanduser("~/.gemini/antigravity-cli/global_memory.json")
+        try:
+            if os.path.exists(memory_file):
+                with open(memory_file, "r", encoding="utf-8") as f:
+                    memories = json.load(f)
+        except Exception as e:
+            log.error(f"Error reading memory file: {e}")
+            
+        memory_card = CardBuilder.build_global_memory_card(memories)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, memory_card))
+        return True, user_text
+
+    elif user_text.strip() == "/test_ss":
+        try:
+            out = subprocess.check_output("/usr/bin/ss -tlnp", shell=True, text=True, timeout=3)
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, {
+                "config": {"wide_screen_mode": True},
+                "header": {"template": "blue", "title": {"content": "SS Output", "tag": "plain_text"}},
+                "elements": [{"tag": "markdown", "content": f"```\n{out[:1000]}\n```"}]
+            }))
+        except Exception as e:
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, {
+                "config": {"wide_screen_mode": True},
+                "header": {"template": "red", "title": {"content": "SS Error", "tag": "plain_text"}},
+                "elements": [{"tag": "markdown", "content": f"```\n{e}\n```"}]
+            }))
+        return True, user_text
+
+    elif user_text.startswith("/role"):
+        parts = user_text.split(" ", 1)
+        if len(parts) > 1 and parts[1].strip():
+            new_role = parts[1].strip()
+            session_data["role"] = new_role
+            await save_session_async(chat_id, session_data)
+            user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
+            return False, user_text
+        else:
+            session_data["pending_command"] = PendingCommand.ROLE
+            await save_session_async(chat_id, session_data)
+            reply_text = "🎭 请直接输入您希望我扮演的角色（例如：资深Python工程师）："
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+            
+    elif user_text.startswith("/project"):
+        args = user_text[len("/project"):].strip()
+        if args:
+            target_path = args
+            if target_path.startswith("~"):
+                target_path = os.path.expanduser(target_path)
+            target_path = os.path.abspath(target_path)
+            
+            if not os.path.exists(target_path):
+                reply_text = f"❌ **路径设定失败！**\n\n您输入的物理路径在系统上不存在，请核对拼写：\n`{target_path}`"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+                return True, user_text
+                
+            if not os.path.isdir(target_path):
+                reply_text = f"❌ **路径设定失败！**\n\n您输入的路径不是一个合法的目录/文件夹：\n`{target_path}`"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+                return True, user_text
+            
+            session_data["workspace_root"] = target_path
+            await save_session_async(chat_id, session_data)
+            
+            reply_text = f"⚙️ **公共项目根目录设定成功！**\n\n- 当前公共项目根目录已设定为：`{target_path}`\n- 后续所有新建项目都将**默认创建在此目录下**，列表面板也将绑定至此。\n*(当前活跃开发工作区保持不变)*"
+                
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+        else:
+            start_path = session_data.get("project", "默认")
+            ws_root = session_data.get("workspace_root")
+            proj_root = ws_root if ws_root and os.path.exists(ws_root) else WORKSPACE_ROOT
+            
+            if start_path in ["默认", "Default"] or not os.path.exists(start_path):
+                start_path = proj_root
+            
+            recent_projects = session_data.get("recent_projects", [])
+            ignored_projects = session_data.get("ignored_projects", [])
+            browser_card = CardBuilder.build_dir_browser_card(start_path, recent_projects, workspace_root=proj_root, ignored_projects=ignored_projects)
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, browser_card))
+            return True, user_text
+
     elif user_text.startswith("/help"):
         help_card = CardBuilder.build_help_card()
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, help_card))

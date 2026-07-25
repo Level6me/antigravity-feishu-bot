@@ -442,8 +442,15 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     log.info(f"Message received: chat_id={chat_id}, message_type={message_type}, raw_text='{raw_text}', pending_command='{session_data.get('pending_command')}'")
 
     # Handle slash commands first (this allows /stop to bypass the lock)
-    if session_data.get("pending_command") or (raw_text.startswith("/") and message_type in ["text", "post", "link"]):
-        handled, override_text = await handle_slash_command(raw_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
+    import re
+    cleaned_text = raw_text
+    if isinstance(cleaned_text, str):
+        cleaned_text = re.sub(r'^<at\s+user_id="[^"]*">[^<]*</at>\s*', '', cleaned_text).strip()
+        cleaned_text = re.sub(r'^@\S+\s*', '', cleaned_text).strip()
+        cleaned_text = cleaned_text.lstrip('\ufeff\u200b\u200c\u200d\u00a0').strip()
+
+    if session_data.get("pending_command") or (cleaned_text.startswith("/") and message_type in ["text", "post", "link"]):
+        handled, override_text = await handle_slash_command(cleaned_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
         if handled:
             stats.record_success()
             return
