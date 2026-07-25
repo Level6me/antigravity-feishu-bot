@@ -354,7 +354,10 @@ class CardBuilder:
     def build_dir_browser_card(active_project_path, recent_projects=None, recent_page=1, workspace_root=None, ignored_projects=None):
         elements = []
         
-        # 1. 顶部当前活跃项目展示与设置按钮
+        # 确定公共根目录
+        proj_root = workspace_root if workspace_root else WORKSPACE_ROOT
+        
+        # 1. 顶部公共项目根目录展示与设置按钮 (位于开发工作区上方)
         elements.append({
             "tag": "column_set",
             "flex_mode": "none",
@@ -366,7 +369,7 @@ class CardBuilder:
                     "elements": [
                         {
                             "tag": "markdown",
-                            "content": f"📂 **当前活跃开发工作区**：\n`{active_project_path}`"
+                            "content": f"⚙️ **当前公共项目根目录**：\n`{proj_root}`"
                         }
                     ]
                 },
@@ -377,21 +380,19 @@ class CardBuilder:
                     "elements": [
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": "⚙️ 设置工作区"},
+                            "text": {"tag": "plain_text", "content": "⚙️ 设置根目录"},
                             "type": "primary",
-                            "value": {"action": "prompt_custom_project_path"}
+                            "value": {"action": "prompt_custom_workspace_root"}
                         }
                     ]
                 }
             ]
         })
         
-        # 确定公共根目录
-        proj_root = workspace_root if workspace_root else WORKSPACE_ROOT
-        
+        # 2. 当前活跃开发工作区展示
         elements.append({
             "tag": "markdown",
-            "content": f"⚙️ **当前公共项目根目录**：\n`{proj_root}`"
+            "content": f"📂 **当前活跃开发工作区**：\n`{active_project_path}`"
         })
         
         # 2. 新建项目动作行

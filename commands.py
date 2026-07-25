@@ -187,6 +187,7 @@ class PendingCommand(str, Enum):
     PROJECT = "project"
     CREATE_PROJECT = "create_project"
     CUSTOM_PROJECT_PATH = "custom_project_path"
+    CUSTOM_WORKSPACE_ROOT = "custom_workspace_root"
     NOTE_ADD = "note_add"
     MEMORY_ADD = "memory_add"
 
@@ -206,7 +207,26 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         pending_command = None
         
     if not user_text.startswith("/") and pending_command:
-        if pending_command in [PendingCommand.CUSTOM_PROJECT_PATH, "custom_project_path"]:
+        if pending_command in [PendingCommand.CUSTOM_WORKSPACE_ROOT, "custom_workspace_root"]:
+            target_path = user_text.strip()
+            if target_path.startswith("~"):
+                target_path = os.path.expanduser(target_path)
+            target_path = os.path.abspath(target_path)
+            
+            if not os.path.exists(target_path):
+                reply_text = f"❌ **路径设定失败！**\n\n您输入的物理路径在系统上不存在，请核对拼写：\n`{target_path}`"
+            elif not os.path.isdir(target_path):
+                reply_text = f"❌ **路径设定失败！**\n\n您输入的路径不是一个合法的目录/文件夹：\n`{target_path}`"
+            else:
+                session_data["workspace_root"] = target_path
+                reply_text = f"⚙️ **公共项目根目录设定成功！**\n\n- 当前公共项目根目录已设定为：`{target_path}`\n- 后续所有新建项目都将**默认创建在此目录下**，列表面板也将绑定至此。\n*(当前活跃开发工作区保持不变)*"
+                
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+
+        elif pending_command in [PendingCommand.CUSTOM_PROJECT_PATH, "custom_project_path"]:
             target_path = user_text.strip()
             if target_path.startswith("~"):
                 target_path = os.path.expanduser(target_path)
