@@ -17,7 +17,7 @@ def extract_final_response_from_transcript(transcript_path):
     if not transcript_path or not os.path.exists(transcript_path):
         return None
     try:
-        with open(transcript_path, 'r', encoding='utf-8') as f:
+        with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
         if not lines:
             return None
@@ -25,9 +25,13 @@ def extract_final_response_from_transcript(transcript_path):
         responses = []
         # 从最后一行开始反向查找，收集所有的纯文字回复，直到遇到上一个用户的输入
         for line in reversed(lines):
-            if not line.strip():
+            line_str = line.strip()
+            if not line_str:
                 continue
-            data = json.loads(line)
+            try:
+                data = json.loads(line_str)
+            except Exception:
+                continue
             
             # 如果遇到用户输入，说明属于当前对话回合的日志结束了
             if data.get("type") == "USER_INPUT":
@@ -37,7 +41,7 @@ def extract_final_response_from_transcript(transcript_path):
                 # 如果没有 tool_calls (为 None 或空列表)，说明是主模型的纯文字回复
                 if not data.get("tool_calls"):
                     content = data.get("content", "")
-                    if content.strip():
+                    if content and content.strip():
                         responses.append(content.strip())
                         
         if responses:
@@ -53,17 +57,31 @@ def extract_final_chinese_response(text):
     if not text:
         return ""
     
-    # 移除常见的英文申明前缀
+    # 1. 移除被 XML 标签包裹的思考过程与思维链，如 <thought>...</thought>, <thinking>...</thinking>
+    text = re.sub(r'<(?:thought|thinking)>.*?</(?:thought|thinking)>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    
+    # 2. 移除开头的常见英文规划与描述前缀 (例如 "I will...", "Sure, I will...", "Let me...", "Here is...", "I need to...")
     text = re.sub(
-        r'^(?:I\s+will|Sure,?\s+I\s+will|Let\s+me)\s+(?:report|summarize|explain|respond|write|reply|communicate|answer)\b.+?in\s+(?:Simplified\s+)?Chinese\.?\s*',
+        r'^(?:I\s+will|Sure,?\s+I\s+will|Let\s+me|Here\s+is|I\s+need\s+to|Based\s+on)\s+.*?\n\n',
         '',
         text,
         flags=re.IGNORECASE | re.DOTALL
     ).strip()
-    
-    # 移除被 XML 标签包裹的思考过程，如 <thought>...</thought> (防呆)
-    text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    
+
+    # 3. 移除单行英文申明 (例如 "I will respond in Simplified Chinese.", "Sure, I will analyze the codebase in Chinese.")
+    text = re.sub(
+        r'^(?:I\s+will|Sure,?\s+I\s+will|Let\s+me)\s+(?:report|summarize|explain|respond|write|reply|communicate|answer|check|analyze)\b.+?(?:in\s+(?:Simplified\s+)?Chinese|below)\.?\s*',
+        '',
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    ).strip()
+
+    # 4. 移除包含 Thinking Process, Thought:, Plan: 等英文小标题的说明段落
+    text = re.sub(r'\*\*(?:Thinking Process|Thought|Plan|Reasoning)\*\*.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    # 5. 清理残留的动态思考占位符
+    text = re.sub(r'\*\(\s*(?:🧠|🔍|⚙️|💡|🚀)?\s*正在.*?\)\*', '', text).strip()
+
     return text
 
 async def execute_antigravity(
@@ -159,7 +177,63 @@ async def execute_antigravity(
             path = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
             if os.path.exists(path):
                 return path
+        # 动态查找最新活动的 transcript.jsonl
+        brain_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain")
+        if os.path.exists(brain_dir):
+            now = time.time()
+            newest_file = None
+            newest_mtime = 0
+            try:
+                for entry in os.listdir(brain_dir):
+                    entry_path = os.path.join(brain_dir, entry)
+                    if os.path.isdir(entry_path):
+                        fp = os.path.join(entry_path, ".system_generated", "logs", "transcript.jsonl")
+                        if os.path.exists(fp):
+                            mtime = os.path.getmtime(fp)
+                            if mtime > newest_mtime and (now - mtime < 120):
+                                newest_mtime = mtime
+                                newest_file = fp
+            except Exception:
+                pass
+            if newest_file:
+                return newest_file
         return None
+
+    def fetch_current_action():
+        t_path = target_transcript_path or get_latest_transcript_file()
+        if not t_path or not os.path.exists(t_path):
+            return ""
+        try:
+            with open(t_path, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            if not lines:
+                return ""
+            for line in reversed(lines[-50:]):
+                line_str = line.strip()
+                if not line_str:
+                    continue
+                try:
+                    data = json.loads(line_str)
+                    if data.get("type") == "USER_INPUT":
+                        break
+                    t_calls = data.get("tool_calls")
+                    if t_calls and isinstance(t_calls, list) and len(t_calls) > 0:
+                        last_call = t_calls[-1]
+                        if isinstance(last_call, dict):
+                            args = last_call.get("args", {})
+                            name = last_call.get("name", "")
+                            act = args.get("toolAction", "") or args.get("toolSummary", "")
+                            if not act and name:
+                                act = f"正在执行 {name}"
+                            if isinstance(act, str) and act.strip():
+                                clean_act = act.replace('"', '').strip()
+                                if clean_act:
+                                    return clean_act
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return ""
 
     stdout_task = asyncio.create_task(read_stdout())
     stderr_task = asyncio.create_task(read_stderr())
@@ -173,37 +247,22 @@ async def execute_antigravity(
         while process.returncode is None:
             await asyncio.sleep(0.5)
             
-            # 尽早提取并保存新生成的会话 ID，防止因为执行过程中被 /stop 中断 (CancelledError) 导致新会话丢失
+            # 尽早提取并锁定主会话 ID (仅在未设置 conversation 时提取首个匹配项，防止被子 Agent 覆盖)
             if not session_data.get("conversation") and os.path.exists(log_file_path):
                 try:
                     with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
                         log_content = f.read()
-                    match = re.search(r'(?:Created|found|Resuming|Loaded|Streaming) conversation ([0-9a-fA-F-]+)', log_content)
+                    match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
                     if match:
                         session_data["conversation"] = match.group(1)
                         await save_session_async(chat_id, session_data)
                 except Exception:
                     pass
             
-            # 实时从 transcript.jsonl 中获取最新的工具执行动作以更新状态指示器
-            transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
-            action = ""
-            if transcript_path and os.path.exists(transcript_path):
-                try:
-                    with open(transcript_path, 'r', encoding='utf-8') as f:
-                        if transcript_path == target_transcript_path:
-                            f.seek(initial_transcript_size)
-                        lines = f.readlines()
-                        if lines:
-                            for line in reversed(lines):
-                                data = json.loads(line)
-                                if data.get("type") == "USER_INPUT":
-                                    break
-                                if "tool_calls" in data and len(data["tool_calls"]) > 0:
-                                    action = data["tool_calls"][-1].get("args", {}).get("toolAction", "").replace('"', '').strip()
-                                    break
-                except Exception:
-                    pass
+            # 实时从 transcript.jsonl 中获取最新的工具执行动作以更新状态指示卡片
+            action = await loop.run_in_executor(None, fetch_current_action)
+            if action:
+                last_tool_action = action
             
             think_seconds = int(time.time() - process_start_time)
             # 全局超时强杀防护 (30分钟超长无响应防挂死)
@@ -218,9 +277,9 @@ async def execute_antigravity(
                 stderr_text = "⚠️ 执行超时 (30分钟)：后台任务运行时间过长，已被系统超时机制自动强行中断。"
                 break
 
-            if action:
-                last_tool_action = action
-                indicator_card = CardBuilder.build_tool_indicator(action, user_text, downloaded_file_name, download_success, think_seconds)
+            display_action = action or last_tool_action
+            if display_action:
+                indicator_card = CardBuilder.build_tool_indicator(display_action, user_text, downloaded_file_name, download_success, think_seconds)
             else:
                 indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
             
@@ -281,13 +340,16 @@ async def execute_antigravity(
                 with open(transcript_path, 'r', encoding='utf-8') as f:
                     f.seek(initial_transcript_size)
                     for line in f.readlines():
-                        data = json.loads(line)
-                        if data.get("type") == "GENERATE_IMAGE" or "generate_image" in line:
-                            match = re.search(r'Generated image is saved at (.*?\.(?:jpg|png|jpeg))', data.get("content", ""))
-                            if match:
-                                img_path = match.group(1)
-                                if img_path not in reply_text:
-                                    reply_text += f"\n\n![Generated Image]({img_path})"
+                        try:
+                            data = json.loads(line)
+                            if data.get("type") == "GENERATE_IMAGE" or "generate_image" in line:
+                                match = re.search(r'Generated image is saved at (.*?\.(?:jpg|png|jpeg))', data.get("content", ""))
+                                if match:
+                                    img_path = match.group(1)
+                                    if img_path not in reply_text:
+                                        reply_text += f"\n\n![Generated Image]({img_path})"
+                        except Exception:
+                            pass
             except Exception as e:
                 log.error(f"Failed to extract generated images from transcript: {e}")
         
@@ -297,16 +359,15 @@ async def execute_antigravity(
             
             await loop.run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs))
             
-            # 兜底：如果运行极快，提前读取了整个流程，在这里再次确保能够保存新生成的 conversation id
-            if os.path.exists(log_file_path):
+            # 兜底：如果运行极快且尚无 conversation，仅在未绑定时保存主会话 id
+            if not session_data.get("conversation") and os.path.exists(log_file_path):
                 with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
                     log_content = f.read()
-                match = re.search(r'(?:Created|found|Resuming|Loaded|Streaming) conversation ([0-9a-fA-F-]+)', log_content)
+                match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
                 if match:
                     new_conv_id = match.group(1)
-                    if session_data.get("conversation") != new_conv_id:
-                        session_data["conversation"] = new_conv_id
-                        await save_session_async(chat_id, session_data)
+                    session_data["conversation"] = new_conv_id
+                    await save_session_async(chat_id, session_data)
             
             is_error = False
         if not reply_text:
@@ -346,12 +407,12 @@ async def execute_antigravity(
         if reply_text:
             log.info(f"[Agent text]: {reply_text[:100]}...")
             
-        # 再次确保生成卡片前更新 conversation，防止新会话概率性遗漏导致的 100% 显示
+        # 再次确保生成卡片前仅在未绑定会话 ID 时更新
         if not session_data.get("conversation") and os.path.exists(log_file_path):
             try:
                 with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
                     log_content = f.read()
-                match = re.search(r'(?:Created|found|Resuming|Loaded|Streaming) conversation ([0-9a-fA-F-]+)', log_content)
+                match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
                 if match:
                     session_data["conversation"] = match.group(1)
                     await save_session_async(chat_id, session_data)
@@ -376,18 +437,14 @@ async def execute_antigravity(
     finally:
         if os.path.exists(log_file_path):
             try:
-                # [Last Resort Defense]: Try to extract the conversation ID one last time 
-                # in case the process was killed before the while loop could catch it (< 0.5s)
-                with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    log_content = f.read()
-                match = re.search(r'(?:Created|found|Resuming|Loaded|Streaming) conversation ([0-9a-fA-F-]+)', log_content)
-                if match:
-                    new_conv_id = match.group(1)
-                    if session_data.get("conversation") != new_conv_id:
+                # [Last Resort Defense]: 仅在尚未设置 conversation 时尝试提取首个主会话 ID
+                if not session_data.get("conversation"):
+                    with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        log_content = f.read()
+                    match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
+                    if match:
+                        new_conv_id = match.group(1)
                         session_data["conversation"] = new_conv_id
-                        # Use create_task to schedule the DB save. 
-                        # We specifically DO NOT use 'await' here to prevent asyncio.CancelledError 
-                        # from aborting the execution of the subsequent os.remove cleanup.
                         asyncio.create_task(save_session_async(chat_id, session_data))
             except Exception as e:
                 log.error(f"Failed to read/save conversation id in finally block: {e}")
@@ -396,3 +453,4 @@ async def execute_antigravity(
                     os.remove(log_file_path)
                 except Exception:
                     pass
+
