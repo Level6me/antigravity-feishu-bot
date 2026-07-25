@@ -669,7 +669,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(card_message_id, success_card))
             asyncio.run_coroutine_threadsafe(do_select_project(), main_loop)
             
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目切换成功，已清空上下文信息，档案已载入！"}})
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目切换成功！"}})
 
     elif action_value.get("action") == "remove_project_from_list":
         target_path = action_value.get("path")
@@ -927,7 +927,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 session_data["pending_command"] = "custom_project_path"
                 await save_session_async(chat_id, session_data)
                 
-                msg = "⚙️ **设置开发工作区**\n\n请直接回复您想要设定的开发工作区绝对路径（例如：`/home/jiang/github/my-app`）：\n\n*(系统收到后将自动校验路径合法性并为您切换工作区且清空上下文)*"
+                msg = "⚙️ **设置开发工作区**\n\n请直接回复您想要设定的开发工作区绝对路径（例如：`/home/jiang/github/my-app`）：\n\n*(系统收到后将自动校验路径合法性并为您切换工作区)*"
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
             asyncio.run_coroutine_threadsafe(do_prompt_custom(), main_loop)
             
