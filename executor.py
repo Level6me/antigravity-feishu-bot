@@ -423,7 +423,6 @@ async def execute_antigravity(
             reply_text, 
             choice_card_data=choice_card_data,
             current_model=session_data.get('model', 'Default'),
-            current_role=session_data.get('role', '无'),
             current_project=session_data.get('project', '默认'),
             is_error=is_error,
             is_streaming=False,
