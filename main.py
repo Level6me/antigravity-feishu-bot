@@ -588,6 +588,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     if action_value.get("action") == "switch_model":
         new_model = action_value.get("model")
         
+        result_card = None
         if main_loop and main_loop.is_running():
             async def do_switch():
                 session_data = await get_session_async(chat_id)
@@ -595,16 +596,21 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 session_data["model"] = new_model
                 await save_session_async(chat_id, session_data)
                 log.info(f"Switched model to {new_model} in chat {chat_id}")
-                result_card = CardBuilder.build_model_switch_result_card(new_model, old_model)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, result_card))
-            # 【修复】同步阻塞等待 do_switch() 执行完毕（含 patch 卡片），
-            # 确保第一次点击就能立即看到切换结果卡片，而非 fire-and-forget 导致首次无响应
+                res_card = CardBuilder.build_model_switch_result_card(new_model, old_model)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, res_card))
+                return res_card
+
             future = asyncio.run_coroutine_threadsafe(do_switch(), main_loop)
             try:
-                future.result(timeout=8)
+                result_card = future.result(timeout=8)
             except Exception as e:
                 log.error(f"[switch_model] do_switch failed or timed out: {e}")
 
+        if result_card:
+            return P2CardActionTriggerResponse({
+                "card": {"type": "raw", "data": result_card},
+                "toast": {"type": "success", "content": f"模型已切换为 {new_model}"}
+            })
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"模型已切换为 {new_model}"}})
 
     elif action_value.get("action") == "user_choice":
