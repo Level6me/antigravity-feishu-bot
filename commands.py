@@ -22,14 +22,13 @@ async def _execute_project_creation(input_text, ideal_path, parent_path, is_git_
             prompt_path = os.path.join(new_project_path, "prompt.txt")
             with open(prompt_path, "w") as f:
                 f.write(f"项目目标：{input_text}\n请在此基础上进行开发。")
-            reply_text = f"✅ 新项目创建成功！\n📂 已将当前项目切换为：`{dir_name}`\n\n✨ 已成功清空当前上下文信息。"
+            reply_text = f"✅ 新项目创建成功！\n📂 已将当前项目切换为：`{dir_name}`"
         except Exception as e:
             reply_text = f"❌ 创建目录失败：{str(e)}"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, input_text
 
     session_data["project"] = new_project_path
-    session_data["conversation"] = ""  # 彻底清空上个项目的 LLM 会话上下文
     session_data.pop("pending_command", None)
     from database import save_session_async
     await save_session_async(chat_id, session_data)
@@ -85,11 +84,10 @@ async def _handle_create_project(user_text, message_id, chat_id, session_data, r
             shutil.rmtree(ideal_path, ignore_errors=True)
     elif resolution == "cancel":
         session_data["project"] = ideal_path
-        session_data["conversation"] = ""  # 彻底清空上个项目的 LLM 会话上下文
         session_data.pop("pending_command", None)
         from database import save_session_async
         await save_session_async(chat_id, session_data)
-        reply_text = f"📂 已取消新建，直接为您切换至现有同名项目：`{clean_dir_name}`\n\n✨ 已成功清空当前上下文信息。"
+        reply_text = f"📂 已取消新建，直接为您切换至现有同名项目：`{clean_dir_name}`"
         from lark_client import send_reply_sdk
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
@@ -237,10 +235,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 reply_text = f"❌ **路径设置失败！**\n\n您输入的路径不是有效目录：\n`{target_path}`"
             else:
                 session_data["project"] = target_path
-                session_data["conversation"] = ""
-                from project_tracker import ensure_and_read_project_tracker
-                ensure_and_read_project_tracker(target_path)
-                reply_text = f"📂 **开发工作区设置成功！**\n\n- 当前活跃工作区：`{target_path}`\n\n✨ **已成功清空当前上下文信息，项目隐秘档案防护已开启！**"
+                reply_text = f"📂 **开发工作区设置成功！**\n\n- 当前活跃工作区：`{target_path}`"
                 
             session_data.pop("pending_command", None)
             await save_session_async(chat_id, session_data)
@@ -271,15 +266,12 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             
         elif pending_command == PendingCommand.PROJECT:
             new_project = user_text.strip()
-            session_data["conversation"] = ""  # 彻底清空上个项目的 LLM 会话上下文
             if new_project.lower() in ["clear", "default", "默认", "reset"]:
                 session_data["project"] = "默认"
-                reply_text = "📂 已将项目重置为默认工作空间！\n\n✨ 已成功清空当前上下文信息。"
+                reply_text = "📂 已将项目重置为默认工作空间！"
             else:
                 session_data["project"] = new_project
-                from project_tracker import ensure_and_read_project_tracker
-                ensure_and_read_project_tracker(new_project)
-                reply_text = f"📂 已成功将当前项目切换为：`{new_project}`\n\n✨ 已成功清空当前上下文信息，已成功载入该项目的隐秘追踪档案 (`.project_track.secret.md`)，防泄露防护已开启！"
+                reply_text = f"📂 已成功将当前项目切换为：`{new_project}`"
             session_data.pop("pending_command", None)
             await save_session_async(chat_id, session_data)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
