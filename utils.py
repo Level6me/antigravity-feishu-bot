@@ -26,6 +26,8 @@ def with_retry(max_retries=3, initial_delay=1.0, backoff_factor=2.0):
 
 
 _SESSION_TOKEN_CACHE = {}
+# 格式：{ conv_id: {"tokens": int, "mtime": float} }
+# mtime 是上次读取 transcript 文件时的文件修改时间戳，防止文件缩小后还使用过期高缓存
 
 def get_context_usage_stats(session_data=None):
     """
@@ -61,13 +63,16 @@ def get_context_usage_stats(session_data=None):
     if session_data is not None:
         conv_id = session_data.get("conversation")
         if conv_id:
+            # 【修复】有明确 conv_id 时，直接使用对应 transcript，
+            # 绝不进行"扫描最新文件"的兜底，防止误选 subagent transcript 导致数值大幅跳变
             p = os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conv_id}/.system_generated/logs/transcript.jsonl")
             if os.path.exists(p):
                 transcript_path = p
-
-        # 如果 session_data 中暂未写入 conv_id（如新会话刚发起），
-        # 兜底寻找 120 秒以内最新创建/修改的 transcript.jsonl，避免直接返回 0 导致 100% 误显示
-        if not transcript_path:
+            # conv_id 已存在但 transcript 文件尚不存在（极罕见情况）：
+            # 直接返回 0，不走兜底扫描，保持数值稳定
+        else:
+            # 仅在 conv_id 完全缺失时（新会话刚发起）才走一次兜底扫描
+            # 并且只选择"顶层会话"（非 subagent 产生的子会话）
             brain_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain")
             if os.path.exists(brain_dir):
                 now = time.time()
@@ -89,7 +94,7 @@ def get_context_usage_stats(session_data=None):
                     pass
                 if newest_file:
                     transcript_path = newest_file
-                    session_data["conversation"] = conv_id
+                    # 不再回写 session_data["conversation"]，避免绑定到错误的 subagent 会话
     else:
         brain_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain")
         if os.path.exists(brain_dir):
@@ -183,13 +188,25 @@ def get_context_usage_stats(session_data=None):
 
     total_tokens = user_tokens + agent_tokens + tool_tokens
 
-    # 单会话单调递增防护：防止在同一会话中因中间截断或解析变动导致 Token 计数向下回跳
+    # 【修复】单会话单调递增防护（带 mtime 时间戳）：
+    # 仅当 transcript 文件的 mtime 没有回退（文件没有缩小/被截断）时才应用缓存下界，
+    # 防止因 subagent 产生的新旧交替 transcript 导致计数忽高忽低
     if conv_id and conv_id != "新会话":
-        cached_tokens = _SESSION_TOKEN_CACHE.get(conv_id, 0)
-        if total_tokens < cached_tokens:
+        try:
+            current_mtime = os.path.getmtime(transcript_path)
+        except Exception:
+            current_mtime = 0
+
+        cached = _SESSION_TOKEN_CACHE.get(conv_id, {})
+        cached_tokens = cached.get("tokens", 0)
+        cached_mtime = cached.get("mtime", 0)
+
+        if total_tokens < cached_tokens and current_mtime >= cached_mtime:
+            # 文件未回退，使用缓存下界（单调递增保护）
             total_tokens = cached_tokens
         else:
-            _SESSION_TOKEN_CACHE[conv_id] = total_tokens
+            # 文件更新了（或计数增加了），刷新缓存
+            _SESSION_TOKEN_CACHE[conv_id] = {"tokens": total_tokens, "mtime": current_mtime}
 
     free_tokens = max(0, max_tokens - total_tokens)
 
@@ -222,5 +239,6 @@ def get_context_usage_stats(session_data=None):
         "free_pct": free_pct,
         "steps_count": steps_count
     }
+
 
 
