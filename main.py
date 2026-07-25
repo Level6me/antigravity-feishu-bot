@@ -264,10 +264,18 @@ async def _process_single_task(chat_id, task):
         await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, warn_card))
         return
 
-    # Sessions ar    # Inject protocol into prompt
+    # Inject protocol into prompt
     current_proj = session_data.get("project", "默认")
-    system_instruction = f"[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). Any English text in the response must be limited to code syntax or technical names only. If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. NEVER ask normal text multi-choice questions. ONLY output plain text choices, avoid complex formatting inside choices.]\n\n"
-    
+    system_instruction = (
+        "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
+        "Any English text in the response must be limited to code syntax or technical names only. "
+        "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles (such as 'I will...', 'Let me...'). "
+        "Output ONLY your final answer directly in Simplified Chinese. "
+        "If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. "
+        "NEVER ask normal text multi-choice questions. ONLY output plain text choices, avoid complex formatting inside choices.]\n\n"
+    )
+
+
     # 注入当前活跃项目环境参数
     system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n- All file reads, writes, and analysis commands you execute should target this active workspace directory.\n\n"
     
