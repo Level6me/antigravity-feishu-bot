@@ -671,7 +671,6 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 success_card = CardBuilder.build_ai_response(
                     success_text,
                     current_model=session_data.get('model', 'Default'),
-                    current_role=session_data.get('role', '无'),
                     current_project=target_path,
                     session_data=session_data
                 )
