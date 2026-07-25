@@ -183,7 +183,6 @@ def get_system_status_card_data():
 from enum import Enum
 
 class PendingCommand(str, Enum):
-    ROLE = "role"
     PROJECT = "project"
     CREATE_PROJECT = "create_project"
     CUSTOM_PROJECT_PATH = "custom_project_path"
@@ -269,14 +268,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             reply_text = f"🧠 **已为您保存个人偏好：**\n- {memory_text}"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
-            
-        elif pending_command == PendingCommand.ROLE:
-            new_role = user_text.strip()
-            session_data["role"] = new_role
-            session_data.pop("pending_command", None)
-            await save_session_async(chat_id, session_data)
-            user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
-            return False, user_text
             
         elif pending_command == PendingCommand.PROJECT:
             new_project = user_text.strip()
@@ -679,21 +670,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             }))
         return True, user_text
 
-    elif user_text.startswith("/role"):
-        parts = user_text.split(" ", 1)
-        if len(parts) > 1 and parts[1].strip():
-            new_role = parts[1].strip()
-            session_data["role"] = new_role
-            await save_session_async(chat_id, session_data)
-            user_text = f"请记住以下设定，并在接下来的对话中始终扮演这个角色：{new_role}。收到请回复：'好的，角色设定已生效！'"
-            return False, user_text
-        else:
-            session_data["pending_command"] = PendingCommand.ROLE
-            await save_session_async(chat_id, session_data)
-            reply_text = "🎭 请直接输入您希望我扮演的角色（例如：资深Python工程师）："
-            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-            return True, user_text
-            
     elif user_text.startswith("/project"):
         args = user_text[len("/project"):].strip()
         if args:
