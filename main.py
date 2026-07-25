@@ -916,6 +916,19 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "请输入项目名或Git仓库地址！"}})
 
+    elif action_value.get("action") == "prompt_custom_workspace_root":
+        if main_loop and main_loop.is_running():
+            async def do_prompt_ws_root():
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = "custom_workspace_root"
+                await save_session_async(chat_id, session_data)
+                
+                msg = "⚙️ **设置公共项目根目录**\n\n请直接在此回复您想要设定的公共项目根目录绝对路径（例如：`/home/jiang/github`）：\n\n*(系统收到后将自动校验路径合法性，并将后续所有新建项目与列表面板绑定至该根目录，当前活跃工作区保持不变)*"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+            asyncio.run_coroutine_threadsafe(do_prompt_ws_root(), main_loop)
+            
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复公共项目根目录绝对路径！"}})
+
     elif action_value.get("action") == "prompt_custom_project_path":
         if main_loop and main_loop.is_running():
             async def do_prompt_custom():
