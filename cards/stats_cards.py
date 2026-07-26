@@ -10,7 +10,7 @@ def build_quota_card(quota_data):
     elements = [
         {
             "tag": "markdown",
-            "content": "⚡ **Google AI Pro 套餐额度大盘**\n实时同步自宿主机本地 Antigravity 语言服务器（LSP）的官方配额。"
+            "content": "⚡ **Google AI Pro 额度大盘** (实时同步自本地 LSP)"
         },
         {
             "tag": "hr"
@@ -26,63 +26,40 @@ def build_quota_card(quota_data):
         groups = quota_data["response"]["groups"]
         for g_idx, group in enumerate(groups):
             group_name = group.get("displayName", "未知模型组")
-            group_desc = group.get("description", "")
-            
-            elements.append({
-                "tag": "markdown",
-                "content": f"📁 **{group_name}**\n*{group_desc}*"
-            })
+            group_content = f"📁 **{group_name}**\n"
             
             buckets = group.get("buckets", [])
-            for b_idx, bucket in enumerate(buckets):
+            for bucket in buckets:
                 bucket_name = bucket.get("displayName", "未知配额项")
-                desc = bucket.get("description", "")
                 remaining = bucket.get("remainingFraction", 0.0)
                 reset_time = bucket.get("resetTime", "")
                 
                 percentage = round(remaining * 100, 1)
                 progress_emoji = "🟢" if percentage > 50 else ("🟡" if percentage > 20 else "🔴")
                 
-                filled_blocks = int(percentage / 5)
-                bar_str = "█" * filled_blocks + "░" * (20 - filled_blocks)
+                filled_blocks = int(percentage / 10)
+                bar_str = "■" * filled_blocks + "□" * (10 - filled_blocks)
                 
-                content = f"🔹 **{bucket_name}**\n`[{bar_str}]` **{percentage}%** 剩余 ({progress_emoji})\n"
-                if desc:
-                    content += f"💡 *{desc}*\n"
+                percentage_str = f"{percentage:.1f}%"
+                group_content += f"• **{bucket_name}**:\n`[{bar_str}] {percentage_str:>6}` {progress_emoji}\n"
                 if reset_time:
                     try:
-                        from datetime import datetime
                         time_part = reset_time.replace("Z", "")
                         dt = datetime.fromisoformat(time_part.split(".")[0])
-                        friendly_time = dt.strftime("%Y-%m-%d %H:%M:%S")
-                        content += f"🕒 重置时间: `{friendly_time}`"
+                        friendly_reset = dt.strftime('%m-%d %H:%M')
+                        group_content += f"(🕒 {friendly_reset})\n"
                     except Exception:
-                        content += f"🕒 重置时间: `{reset_time}`"
-                        
-                elements.append({
-                    "tag": "markdown",
-                    "content": content
-                })
+                        group_content += f"(🕒 {reset_time})\n"
                 
+            elements.append({
+                "tag": "markdown",
+                "content": group_content.strip()
+            })
+            
             if g_idx < len(groups) - 1:
                 elements.append({
                     "tag": "hr"
                 })
-                
-        desc_text = quota_data["response"].get("description", "")
-        if desc_text:
-            elements.append({
-                "tag": "hr"
-            })
-            elements.append({
-                "tag": "note",
-                "elements": [
-                    {
-                        "tag": "plain_text",
-                        "content": desc_text
-                    }
-                ]
-            })
             
     elements.append({
         "tag": "hr"
