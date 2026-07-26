@@ -13,17 +13,22 @@ from multimodal import extract_and_upload_resources
 from database import save_session_async
 import stats
 
-def extract_final_response_from_transcript(transcript_path):
+def extract_final_response_from_transcript(transcript_path, initial_size=0):
     if not transcript_path or not os.path.exists(transcript_path):
         return None
     try:
         with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
+            if initial_size > 0:
+                try:
+                    f.seek(initial_size)
+                except Exception:
+                    pass
             lines = f.readlines()
         if not lines:
             return None
             
         responses = []
-        # 从最后一行开始反向查找，收集所有的纯文字回复，直到遇到上一个用户的输入
+        # 从本轮新增的行中反向查找，收集纯文字回复，直到遇到本轮用户的输入
         for line in reversed(lines):
             line_str = line.strip()
             if not line_str:
@@ -327,7 +332,7 @@ async def execute_antigravity(
 
         # 优先从 transcript.jsonl 中提取干净的最终回复，过滤掉前面的中间思考过程与思维链
         transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
-        final_reply = extract_final_response_from_transcript(transcript_path)
+        final_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
         
         if final_reply:
             reply_text = final_reply
