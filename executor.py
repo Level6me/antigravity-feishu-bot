@@ -182,26 +182,6 @@ async def execute_antigravity(
             path = get_transcript_path(conv_id)
             if os.path.exists(path):
                 return path
-        # 动态查找最新活动的 transcript.jsonl
-        brain_dir = get_brain_dir()
-        if os.path.exists(brain_dir):
-            now = time.time()
-            newest_file = None
-            newest_mtime = 0
-            try:
-                for entry in os.listdir(brain_dir):
-                    entry_path = os.path.join(brain_dir, entry)
-                    if os.path.isdir(entry_path):
-                        fp = os.path.join(entry_path, ".system_generated", "logs", "transcript.jsonl")
-                        if os.path.exists(fp):
-                            mtime = os.path.getmtime(fp)
-                            if mtime > newest_mtime and (now - mtime < 120):
-                                newest_mtime = mtime
-                                newest_file = fp
-            except Exception:
-                pass
-            if newest_file:
-                return newest_file
         return None
 
     def fetch_current_action():
