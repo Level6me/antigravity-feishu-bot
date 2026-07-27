@@ -1,8 +1,6 @@
 """Message intake, slash-command routing, and media batch debounce."""
 import asyncio
-import json
 import re
-import subprocess
 
 from commands import handle_slash_command
 from database import get_session_async
@@ -16,35 +14,6 @@ running_processes = app_state.running_processes
 chat_queues = app_state.chat_queues
 chat_workers = app_state.chat_workers
 chat_media_batches = app_state.chat_media_batches
-
-
-async def send_reply(message_id, reply_text):
-    reply_proc = await asyncio.create_subprocess_exec(
-        "lark-cli", "im", "+messages-reply", 
-        "--message-id", message_id,
-        "--text", reply_text,
-        "--as", "bot",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=subprocess.DEVNULL
-    )
-    stdout, stderr = await reply_proc.communicate()
-    if reply_proc.returncode != 0:
-        print(f"[Error send_reply] {stderr.decode()}", flush=True)
-
-
-async def send_interactive_card(message_id, card_content):
-    reply_proc = await asyncio.create_subprocess_exec(
-        "lark-cli", "im", "+messages-reply", 
-        "--message-id", message_id,
-        "--msg-type", "interactive",
-        "--content", json.dumps(card_content),
-        "--as", "bot",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=subprocess.DEVNULL
-    )
-    await reply_proc.communicate()
 
 
 async def handle_message_async(message_id, chat_id, message_type, content_raw):
