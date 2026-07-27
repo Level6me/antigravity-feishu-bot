@@ -1,5 +1,6 @@
 """Feishu WebSocket IM event entrypoints."""
 import asyncio
+from collections import OrderedDict
 
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
@@ -7,6 +8,22 @@ from config import ALLOWED_USERS, ALLOWED_CHATS
 from logger import log
 import app_state
 from handlers.messages import handle_message_async
+
+# 有界 LRU 集合：防止飞书 WebSocket 重连重发导致同一条消息被处理两次
+# 1000 条足够覆盖网络抖动窗口内的消息量，内存占用可忽略
+_SEEN_MESSAGE_IDS = OrderedDict()
+_SEEN_MESSAGE_IDS_MAX = 1000
+
+
+def _mark_seen(message_id: str) -> bool:
+    """如果 message_id 已见返回 False；否则记录并返回 True。"""
+    if message_id in _SEEN_MESSAGE_IDS:
+        _SEEN_MESSAGE_IDS.move_to_end(message_id)
+        return False
+    _SEEN_MESSAGE_IDS[message_id] = None
+    if len(_SEEN_MESSAGE_IDS) > _SEEN_MESSAGE_IDS_MAX:
+        _SEEN_MESSAGE_IDS.popitem(last=False)
+    return True
 
 
 def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
@@ -21,6 +38,10 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     chat_id = data.event.message.chat_id
     message_type = data.event.message.message_type
     content_raw = data.event.message.content
+    
+    if not _mark_seen(message_id):
+        log.warning(f"[DEDUP] Ignoring duplicate message_id={message_id} chat_id={chat_id}")
+        return
     
     if not isinstance(content_raw, str):
         log.warning(f"Invalid content type received: {type(content_raw)}")

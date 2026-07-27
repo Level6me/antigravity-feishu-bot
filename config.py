@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     feishu_app_secret: str = Field(default="", alias="FEISHU_APP_SECRET")
     allowed_users: str = Field(default="", alias="ALLOWED_USERS")
     allowed_chats: str = Field(default="", alias="ALLOWED_CHATS")
-    dangerously_skip_permissions: bool = Field(default=True, alias="DANGEROUSLY_SKIP_PERMISSIONS")
+    dangerously_skip_permissions: bool = Field(default=False, alias="DANGEROUSLY_SKIP_PERMISSIONS")
     workspace_root: str = Field(
         default_factory=lambda: os.path.expanduser("~"),
         alias="WORKSPACE_ROOT",
