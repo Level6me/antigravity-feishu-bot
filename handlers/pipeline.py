@@ -42,6 +42,11 @@ async def process_chat_queue(chat_id):
         log.info(f"Chat worker for {chat_id} was cancelled by /stop")
     finally:
         chat_workers.pop(chat_id, None)
+        # 回收空闲的队列条目，防止 chat_queues 随 chat_id 数量单调增长
+        # 仅在队列为空时 pop，避免与并发入队产生竞态
+        q = chat_queues.get(chat_id)
+        if q is not None and q.empty():
+            chat_queues.pop(chat_id, None)
 
 
 async def _process_single_task(chat_id, task):

@@ -253,14 +253,14 @@ def build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_s
         },
         {
             "tag": "markdown",
-            "content": f"**📈 机器人请求统计**\n- **总请求数**: {bot_stats.get('total_requests', 0)}\n- **成功处理**: {bot_stats.get('success_requests', 0)}\n- **执行异常**: {bot_stats.get('failed_requests', 0)}"
+            "content": f"**📈 机器人请求统计 (自上次重启以来)**\n- **总请求数**: {bot_stats.get('total_requests', 0)}\n- **成功处理**: {bot_stats.get('success_requests', 0)}\n- **执行异常**: {bot_stats.get('failed_requests', 0)}"
         },
         {
             "tag": "hr"
         },
         {
             "tag": "markdown",
-            "content": f"**💡 模型算力消耗统计 (自带模型)**\n- **累计消耗 Tokens**: {bot_stats.get('total_tokens', 0):,}"
+            "content": f"**💡 模型算力消耗统计 (自上次重启以来 · 自带模型)**\n- **累计消耗 Tokens**: {bot_stats.get('total_tokens', 0):,}"
         },
         {
             "tag": "hr"

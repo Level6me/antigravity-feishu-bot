@@ -1,4 +1,5 @@
 import json
+import os
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
     ReplyMessageRequest, ReplyMessageRequestBody, PatchMessageRequest,
@@ -97,27 +98,39 @@ def patch_interactive_card_sdk(message_id, card_content):
 def download_message_resource_sdk(message_id, file_key, resource_type, output_path):
     """
     Downloads a message resource (image, file, audio, media) using the official SDK.
+    Writes to a temp file first, then atomically renames on success so a failed
+    download never leaves a partial file at output_path.
     """
+    import tempfile
+    out_dir = os.path.dirname(os.path.abspath(output_path)) or "."
+    os.makedirs(out_dir, exist_ok=True)
+
     req = GetMessageResourceRequest.builder() \
         .message_id(message_id) \
         .file_key(file_key) \
         .type(resource_type) \
         .build()
-    
+
     resp = api_client.im.v1.message_resource.get(req)
-    
-    if resp.code == 0:
-        try:
-            with open(output_path, "wb") as f:
-                while True:
-                    chunk = resp.file.read(8192)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            return True
-        except Exception as e:
-            log.error(f"[download_message_resource_sdk] Error saving file: {e}")
-            return False
-    else:
+
+    if resp.code != 0:
         log.error(f"[download_message_resource_sdk] Failed: {resp.msg}")
+        return False
+
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=out_dir, prefix=".dl_tmp_")
+    try:
+        with os.fdopen(tmp_fd, "wb") as f:
+            while True:
+                chunk = resp.file.read(8192)
+                if not chunk:
+                    break
+                f.write(chunk)
+        os.replace(tmp_path, output_path)
+        return True
+    except Exception as e:
+        log.error(f"[download_message_resource_sdk] Error saving file: {e}")
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
         return False

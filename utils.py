@@ -6,8 +6,13 @@ from config import get_brain_dir, get_transcript_path
 def with_retry(max_retries=3, initial_delay=1.0, backoff_factor=2.0):
     """
     Exponential backoff retry decorator for synchronous functions.
-    Catches network exceptions and retries with increasing delays.
+    Catches only network/IO exceptions; programming errors propagate immediately.
+
+    NOTE: decorated functions call time.sleep() and MUST be invoked from a
+    thread (e.g. via asyncio.run_in_executor), never directly on the event loop.
     """
+    retryable = (ConnectionError, TimeoutError, OSError)
+
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -15,7 +20,7 @@ def with_retry(max_retries=3, initial_delay=1.0, backoff_factor=2.0):
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except Exception as e:
+                except retryable as e:
                     if attempt == max_retries:
                         log.error(f"[Retry] Function {func.__name__} failed after {max_retries} retries. Error: {e}")
                         raise
