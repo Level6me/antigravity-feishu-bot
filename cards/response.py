@@ -7,12 +7,18 @@ from utils import get_context_usage_stats
 
 from cards.common import create_footer
 
+# 飞书卡片/消息体有 ~30KB 上限，markdown 字段预留安全余量
+MAX_MARKDOWN_CHARS = 25000
+TRUNCATION_NOTICE = "\n\n_(回复过长已截断，完整内容请在工作区查看)_"
+
 def build_ai_response(reply_text, choice_card_data=None, current_model="Default", current_project="默认", is_error=False, is_streaming=False, session_data=None):
     elements = []
     
     # 1. Main Text
     if reply_text:
         content = reply_text
+        if len(content) > MAX_MARKDOWN_CHARS:
+            content = content[:MAX_MARKDOWN_CHARS] + TRUNCATION_NOTICE
         if is_streaming:
             content += " ⏳" # Blinking cursor effect
         elements.append({

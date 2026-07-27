@@ -48,6 +48,10 @@ def delete_emoji_sdk(message_id, reaction_id):
 
 @with_retry()
 def send_reply_sdk(message_id, reply_text):
+    # 飞书 text 消息体有 ~30KB 上限，预留安全余量
+    max_text_chars = 28000
+    if reply_text and len(reply_text) > max_text_chars:
+        reply_text = reply_text[:max_text_chars] + "\n\n（回复过长已截断，完整内容请在工作区查看）"
     req = ReplyMessageRequest.builder() \
         .message_id(message_id) \
         .request_body(ReplyMessageRequestBody.builder() \

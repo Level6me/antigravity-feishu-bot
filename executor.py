@@ -96,6 +96,27 @@ async def execute_antigravity(
 ):
     loop = asyncio.get_running_loop()
     
+    async def _sync_conversation_id_from_log(log_path):
+        """从 antigravity 日志中解析 conversation ID 并同步落盘到 session_data。"""
+        if not os.path.exists(log_path):
+            return
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                log_content = f.read()
+            conv_not_found = "not found" in log_content and "conversation" in log_content
+            match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
+            if match:
+                new_conv_id = match.group(1)
+                if session_data.get("conversation") != new_conv_id:
+                    session_data["conversation"] = new_conv_id
+                    await save_session_async(chat_id, session_data)
+            elif conv_not_found:
+                if session_data.get("conversation") != "":
+                    session_data["conversation"] = ""
+                    await save_session_async(chat_id, session_data)
+        except Exception as e:
+            log.error(f"Failed to sync conversation id from log: {e}")
+
     os.makedirs("logs", exist_ok=True)
     log_file_path = f"logs/agy_log_{uuid.uuid4().hex}.txt"
     cmd_args = [
@@ -149,7 +170,11 @@ async def execute_antigravity(
     if bot_reply_msg_id:
         await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card))
     else:
-        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, init_card))
+        new_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, init_card))
+        if new_id:
+            bot_reply_msg_id = new_id
+        else:
+            log.warning(f"[Executor] Initial typing card send failed for chat {chat_id}; will fall back to sending final card as new message")
     
     accumulated_text = ""
     stderr_text = ""
@@ -226,6 +251,7 @@ async def execute_antigravity(
     last_update_text = ""
     last_tool_action = ""
     last_patch_time = time.time()
+    current_patch_interval = 1.0
     process_start_time = time.time()
     
     try:
@@ -234,21 +260,7 @@ async def execute_antigravity(
             
             # 尽早提取并同步主会话 ID (处理新创建会话、失效会话重建与 ID 变化)
             if os.path.exists(log_file_path):
-                try:
-                    with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                        log_content = f.read()
-                    conv_not_found = "not found" in log_content and "conversation" in log_content
-                    match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
-                    if match:
-                        new_conv_id = match.group(1)
-                        if session_data.get("conversation") != new_conv_id:
-                            session_data["conversation"] = new_conv_id
-                            await save_session_async(chat_id, session_data)
-                    elif conv_not_found:
-                        session_data["conversation"] = ""
-                        await save_session_async(chat_id, session_data)
-                except Exception:
-                    pass
+                await _sync_conversation_id_from_log(log_file_path)
             
             # 实时从 transcript.jsonl 中获取最新的工具执行动作以更新状态指示卡片
             action = await loop.run_in_executor(None, fetch_current_action)
@@ -274,10 +286,12 @@ async def execute_antigravity(
             else:
                 indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
             
-            if time.time() - last_patch_time >= 1.0:
+            if time.time() - last_patch_time >= current_patch_interval:
                 last_patch_time = time.time()
                 if bot_reply_msg_id:
                     await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
+                # 指数退避：1s → 2s → 4s → 8s → 10s (封顶)，避免长任务触发飞书限流
+                current_patch_interval = min(current_patch_interval * 2, 10.0)
                             
             if stdout_task.done() and stderr_task.done():
                 break
@@ -298,6 +312,7 @@ async def execute_antigravity(
                     process.kill()
                 except Exception:
                     pass
+        finally:
             running_processes.pop(chat_id, None)
         try:
             await asyncio.wait_for(stdout_task, timeout=2.0)
@@ -352,21 +367,7 @@ async def execute_antigravity(
             
             # 兜底：确保最新 conversation ID 正确写入 session_data
             if os.path.exists(log_file_path):
-                try:
-                    with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                        log_content = f.read()
-                    conv_not_found = "not found" in log_content and "conversation" in log_content
-                    match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
-                    if match:
-                        new_conv_id = match.group(1)
-                        if session_data.get("conversation") != new_conv_id:
-                            session_data["conversation"] = new_conv_id
-                            await save_session_async(chat_id, session_data)
-                    elif conv_not_found:
-                        session_data["conversation"] = ""
-                        await save_session_async(chat_id, session_data)
-                except Exception:
-                    pass
+                await _sync_conversation_id_from_log(log_file_path)
             
             is_error = False
         if not reply_text:
@@ -408,21 +409,7 @@ async def execute_antigravity(
             
         # 再次确保生成卡片前更新 session_data
         if os.path.exists(log_file_path):
-            try:
-                with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    log_content = f.read()
-                conv_not_found = "not found" in log_content and "conversation" in log_content
-                match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
-                if match:
-                    new_conv_id = match.group(1)
-                    if session_data.get("conversation") != new_conv_id:
-                        session_data["conversation"] = new_conv_id
-                        await save_session_async(chat_id, session_data)
-                elif conv_not_found:
-                    session_data["conversation"] = ""
-                    await save_session_async(chat_id, session_data)
-            except Exception as e:
-                log.error(f"Failed to extract conversation id before build_ai_response: {e}")
+            await _sync_conversation_id_from_log(log_file_path)
     
         final_card = CardBuilder.build_ai_response(
             reply_text, 
@@ -435,6 +422,8 @@ async def execute_antigravity(
         )
         if bot_reply_msg_id:
             await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card))
+        else:
+            await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, final_card))
             
         return is_error
     
@@ -442,20 +431,7 @@ async def execute_antigravity(
         if os.path.exists(log_file_path):
             try:
                 # [Last Resort Defense]: 彻底确认主会话 ID 或清除已失效 ID 并同步落盘
-                with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    log_content = f.read()
-                conv_not_found = "not found" in log_content and "conversation" in log_content
-                match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
-                if match:
-                    new_conv_id = match.group(1)
-                    if session_data.get("conversation") != new_conv_id:
-                        session_data["conversation"] = new_conv_id
-                        await save_session_async(chat_id, session_data)
-                elif conv_not_found:
-                    session_data["conversation"] = ""
-                    await save_session_async(chat_id, session_data)
-            except Exception as e:
-                log.error(f"Failed to read/save conversation id in finally block: {e}")
+                await _sync_conversation_id_from_log(log_file_path)
             finally:
                 try:
                     os.remove(log_file_path)
