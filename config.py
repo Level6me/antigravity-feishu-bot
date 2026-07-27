@@ -21,6 +21,9 @@ class Settings(BaseSettings):
         alias="WORKSPACE_ROOT",
     )
 
+    # Optional mirror URL (may embed credentials) used as /update fallback
+    gitee_mirror_url: str = Field(default="", alias="GITEE_MIRROR_URL")
+
     # Antigravity / agy installation overrides (portable across machines & containers)
     antigravity_bin: str = Field(default="", alias="ANTIGRAVITY_BIN")
     antigravity_home: str = Field(
@@ -134,6 +137,8 @@ DANGEROUSLY_SKIP_PERMISSIONS = settings.dangerously_skip_permissions
 
 # --- Workspace & Project Directory Configuration ---
 WORKSPACE_ROOT = settings.workspace_root
+
+GITEE_MIRROR_URL = settings.gitee_mirror_url.strip()
 
 # Back-compat aliases for path helpers (prefer the get_* functions)
 ANTIGRAVITY_HOME = get_antigravity_home()

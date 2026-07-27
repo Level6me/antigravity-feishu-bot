@@ -105,7 +105,7 @@ from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
 from card_builder import CardBuilder
-from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT, BASE_DIR
+from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT, BASE_DIR, GITEE_MIRROR_URL
 
 def get_version_string(commit_ref="HEAD"):
     try:
@@ -353,9 +353,9 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 remote_ref = "origin/main"
             except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
                 log.warning(f"Fetch from origin failed, trying Gitee: {e}")
-                # We use the full URL with the user's gitee token to ensure it works even if the remote isn't explicitly configured on the server
-                gitee_url = "REDACTED_MIRROR_URL"
-                subprocess.run(["git", "fetch", gitee_url, "main"], capture_output=True, text=True, check=True, timeout=15, env=custom_env, cwd=BASE_DIR)
+                if not GITEE_MIRROR_URL:
+                    raise
+                subprocess.run(["git", "fetch", GITEE_MIRROR_URL, "main"], capture_output=True, text=True, check=True, timeout=15, env=custom_env, cwd=BASE_DIR)
                 remote_ref = "FETCH_HEAD"
             
             # Get hashes for comparison
@@ -414,8 +414,9 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True, timeout=15, env=custom_env, cwd=BASE_DIR)
             except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
                 log.warning(f"Pull from origin failed, trying Gitee: {e}")
-                gitee_url = "REDACTED_MIRROR_URL"
-                subprocess.run(["git", "pull", "--rebase", gitee_url, "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
+                if not GITEE_MIRROR_URL:
+                    raise
+                subprocess.run(["git", "pull", "--rebase", GITEE_MIRROR_URL, "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
                 
             subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
             
