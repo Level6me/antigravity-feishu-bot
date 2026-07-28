@@ -156,11 +156,26 @@ async def _process_single_task(chat_id, task):
             final_prompt = f"[System Context: Please strictly follow the user's permanent preferences below:]\n{memory_block}\n\n[User's Message:]\n{user_text}"
             
     # Delegate execution to executor
-    is_error = await execute_antigravity(
-        chat_id, user_text, message_id, bot_reply_msg_id, session_data, 
-        is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
-        download_success, running_processes
-    )
+    # 2000s 总超时兜底：保证即使 executor 内部所有超时机制都失效，协程也能在此返回
+    # 超时时 CancelledError 会进入 execute_antigravity，其 finally 块仍会执行清理
+    is_error = False
+    try:
+        is_error = await asyncio.wait_for(
+            execute_antigravity(
+                chat_id, user_text, message_id, bot_reply_msg_id, session_data, 
+                is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
+                download_success, running_processes
+            ),
+            timeout=2000.0
+        )
+    except asyncio.TimeoutError:
+        from logger import log
+        log.error(f"[Pipeline] execute_antigravity hard timeout (2000s) for chat {chat_id}")
+        is_error = True
+    except Exception as e:
+        from logger import log
+        log.error(f"[Pipeline] execute_antigravity raised for chat {chat_id}: {e}")
+        is_error = True
     
     if is_error:
         await set_emoji(message_id, "CrossMark")
