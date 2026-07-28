@@ -96,6 +96,22 @@ async def execute_antigravity(
 ):
     loop = asyncio.get_running_loop()
     
+    async def _feishu_call(sync_fn, timeout=30.0, label="feishu_call"):
+        """在线程池中执行同步飞书 SDK 调用，并加 30s 超时硬上限。
+        防止网络黑洞（NAT 会话挂起 / 中间设备静默丢包）让主循环无限阻塞。
+        超时或异常统一返回 None，调用方负责降级。"""
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, sync_fn),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            log.error(f"[Executor] {label} timed out after {timeout}s — network black-hole?")
+            return None
+        except Exception as e:
+            log.error(f"[Executor] {label} failed: {e}")
+            return None
+    
     async def _sync_conversation_id_from_log(log_path):
         """从 antigravity 日志中解析 conversation ID 并同步落盘到 session_data。"""
         if not os.path.exists(log_path):
@@ -109,11 +125,17 @@ async def execute_antigravity(
                 new_conv_id = match.group(1)
                 if session_data.get("conversation") != new_conv_id:
                     session_data["conversation"] = new_conv_id
-                    await save_session_async(chat_id, session_data)
+                    try:
+                        await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=3.0)
+                    except (asyncio.TimeoutError, Exception) as e:
+                        log.error(f"save_session_async timed out or failed: {e}")
             elif conv_not_found:
                 if session_data.get("conversation") != "":
                     session_data["conversation"] = ""
-                    await save_session_async(chat_id, session_data)
+                    try:
+                        await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=3.0)
+                    except (asyncio.TimeoutError, Exception) as e:
+                        log.error(f"save_session_async timed out or failed: {e}")
         except Exception as e:
             log.error(f"Failed to sync conversation id from log: {e}")
 
@@ -168,9 +190,15 @@ async def execute_antigravity(
     
     init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text)
     if bot_reply_msg_id:
-        await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card))
+        await _feishu_call(
+            lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card),
+            label="init-card patch"
+        )
     else:
-        new_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, init_card))
+        new_id = await _feishu_call(
+            lambda: send_interactive_card_sdk(message_id, init_card),
+            label="init-card send"
+        )
         if new_id:
             bot_reply_msg_id = new_id
         else:
@@ -253,6 +281,11 @@ async def execute_antigravity(
     last_patch_time = time.time()
     current_patch_interval = 1.0
     process_start_time = time.time()
+    # 活性检测：追踪 stdout 输出增长 + 工具动作变化
+    # 如果两者都长时间无变化，说明子进程内部卡死（例如 antigravity 自身死锁），提前触发超时
+    last_progress_time = process_start_time
+    last_stdout_len = 0
+    STALL_TIMEOUT = 300  # 5 分钟无进展视为卡死
     
     try:
         while process.returncode is None:
@@ -264,10 +297,35 @@ async def execute_antigravity(
             
             # 实时从 transcript.jsonl 中获取最新的工具执行动作以更新状态指示卡片
             action = await loop.run_in_executor(None, fetch_current_action)
-            if action:
-                last_tool_action = action
+            
+            # 活性检测：stdout 有新增数据 或 工具动作发生变化，都算"进展"
+            current_stdout_len = len(accumulated_text)
+            if current_stdout_len > last_stdout_len or (action and action != last_tool_action):
+                last_progress_time = time.time()
+                last_stdout_len = current_stdout_len
+                if action:
+                    last_tool_action = action
             
             think_seconds = int(time.time() - process_start_time)
+            stall_seconds = int(time.time() - last_progress_time)
+            
+            # 活性超时：进程已运行至少 STALL_TIMEOUT 秒 且 连续 STALL_TIMEOUT 秒无进展
+            # 第一个条件避免误杀刚启动、正在做长规划的任务
+            if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
+                log.error(f"[Executor] Process stalled (no stdout/tool progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
+                import signal
+                try:
+                    pgid = os.getpgid(process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except Exception as ex:
+                    log.error(f"Failed to kill stalled process: {ex}")
+                stderr_text = (
+                    f"⚠️ 任务无响应已被强制终止（已运行 {think_seconds // 60} 分钟，"
+                    f"最后 {STALL_TIMEOUT // 60} 分钟无任何输出或工具动作变化）。\n"
+                    "可能原因：Agent 内部死锁、底层命令静默挂起、或模型推理长时间无输出。"
+                )
+                break
+            
             # 全局超时强杀防护 (30分钟超长无响应防挂死)
             if think_seconds > 1800:
                 log.error(f"[Executor] Process timeout reached (1800s) for chat {chat_id}, killing process group...")
@@ -289,7 +347,10 @@ async def execute_antigravity(
             if time.time() - last_patch_time >= current_patch_interval:
                 last_patch_time = time.time()
                 if bot_reply_msg_id:
-                    await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card))
+                    await _feishu_call(
+                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
+                        label="indicator patch"
+                    )
                 # 指数退避：1s → 2s → 4s → 8s → 10s (封顶)，避免长任务触发飞书限流
                 current_patch_interval = min(current_patch_interval * 2, 10.0)
                             
@@ -297,7 +358,21 @@ async def execute_antigravity(
                 break
 
         try:
-            await process.wait()
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            log.warning(f"[Executor] process.wait() timed out for chat {chat_id} (pid {process.pid}) — likely grandchild inherited pipe fd; force-killing process group")
+            import signal
+            try:
+                pgid = os.getpgid(process.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                log.error(f"Failed to kill process group on wait timeout: {e}")
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                log.error(f"[Executor] process.wait() still hung after SIGKILL for chat {chat_id}; abandoning")
         except Exception as e:
             log.error(f"Process wait error: {e}")
             import signal
@@ -314,6 +389,15 @@ async def execute_antigravity(
                     pass
         finally:
             running_processes.pop(chat_id, None)
+            # 子进程退出后显式关闭管道 transport，防止孙进程继承 fd 导致 read_stdout 永远不返回 EOF
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        transport = pipe._transport if hasattr(pipe, "_transport") else None
+                        if transport is not None:
+                            transport.close()
+                    except Exception:
+                        pass
         try:
             await asyncio.wait_for(stdout_task, timeout=2.0)
         except asyncio.TimeoutError:
@@ -363,7 +447,11 @@ async def execute_antigravity(
             ws_root = session_data.get("workspace_root")
             allowed_dirs = [active_project, ws_root]
             
-            await loop.run_in_executor(None, lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs))
+            await _feishu_call(
+                lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs),
+                timeout=120.0,
+                label="extract_and_upload_resources"
+            )
             
             # 兜底：确保最新 conversation ID 正确写入 session_data
             if os.path.exists(log_file_path):
@@ -421,9 +509,23 @@ async def execute_antigravity(
             session_data=session_data
         )
         if bot_reply_msg_id:
-            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card))
+            patch_ok = await _feishu_call(
+                lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card),
+                label="final-card patch"
+            )
+            if patch_ok is None:
+                # patch 失败（超时/网络异常）→ 降级为发送纯文本回复，保证用户能看到结果
+                from lark_client import send_reply_sdk
+                fallback_text = reply_text[:2000] if reply_text else "(AI 回复卡片发送失败，请查看工作区获取完整内容)"
+                await _feishu_call(
+                    lambda: send_reply_sdk(message_id, fallback_text),
+                    label="final-card text fallback"
+                )
         else:
-            await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, final_card))
+            await _feishu_call(
+                lambda: send_interactive_card_sdk(message_id, final_card),
+                label="final-card send"
+            )
             
         return is_error
     
