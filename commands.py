@@ -418,7 +418,10 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                     raise
                 subprocess.run(["git", "pull", "--rebase", GITEE_MIRROR_URL, "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
                 
-            subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
+            pop_res = subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
+            if pop_res.returncode != 0:
+                log.warning(f"git stash pop encountered conflicts or failed; reverting conflict markers: {pop_res.stderr}")
+                subprocess.run(["git", "checkout", "--", "."], capture_output=True, cwd=BASE_DIR)
             
             # Install new requirements if any
             pip_cmd = ["venv/bin/pip", "install", "-r", "requirements.txt"]

@@ -1,5 +1,6 @@
 """Message intake, slash-command routing, and media batch debounce."""
 import asyncio
+import json
 import re
 
 from commands import handle_slash_command
