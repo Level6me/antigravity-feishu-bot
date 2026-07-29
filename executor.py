@@ -12,6 +12,7 @@ from lark_client import patch_interactive_card_sdk, send_interactive_card_sdk, a
 from multimodal import extract_and_upload_resources
 from database import save_session_async
 import stats
+import app_state
 
 def extract_final_response_from_transcript(transcript_path, initial_size=0):
     if not transcript_path or not os.path.exists(transcript_path):
@@ -97,7 +98,7 @@ async def execute_antigravity(
         超时或异常统一返回 None，调用方负责降级。"""
         try:
             return await asyncio.wait_for(
-                loop.run_in_executor(None, sync_fn),
+                app_state.run_feishu_sync(loop, sync_fn),
                 timeout=timeout
             )
         except asyncio.TimeoutError:
