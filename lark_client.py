@@ -93,6 +93,8 @@ def patch_interactive_card_sdk(message_id, card_content):
     resp = api_client.im.v1.message.patch(req)
     if resp.code != 0:
         log.error(f"[patch_interactive_card_sdk] Failed: {resp.msg}")
+        return False
+    return True
 
 @with_retry(max_retries=5, initial_delay=2.0)
 def download_message_resource_sdk(message_id, file_key, resource_type, output_path):

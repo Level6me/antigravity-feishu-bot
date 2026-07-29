@@ -27,8 +27,7 @@ def extract_final_response_from_transcript(transcript_path, initial_size=0):
         if not lines:
             return None
             
-        responses = []
-        # 从本轮新增的行中反向查找，收集纯文字回复，直到遇到本轮用户的输入
+        # 从本轮新增的行中反向查找，仅获取最后一个（即最新的）模型纯文字回复作为最终执行结果
         for line in reversed(lines):
             line_str = line.strip()
             if not line_str:
@@ -47,13 +46,8 @@ def extract_final_response_from_transcript(transcript_path, initial_size=0):
                 if not data.get("tool_calls"):
                     content = data.get("content", "")
                     if content and content.strip():
-                        responses.append(content.strip())
+                        return content.strip()
                         
-        if responses:
-            # 因为是倒序收集的，所以拼接前需要反转顺序
-            responses.reverse()
-            return "\n\n".join(responses)
-            
     except Exception as e:
         log.error(f"Failed to extract final response from transcript: {e}")
     return None
@@ -62,8 +56,9 @@ def extract_final_chinese_response(text):
     if not text:
         return ""
     
-    # 1. 移除被 XML 标签包裹的思考过程与思维链，如 <thought>...</thought>, <thinking>...</thinking>
-    text = re.sub(r'<(?:thought|thinking)>.*?</(?:thought|thinking)>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    # 1. 移除被 XML 标签包裹的思考过程与思维链，如 <thought>...</thought>, <thinking>...</thinking>, <think>...</think>
+    text = re.sub(r'<(?:thought|thinking|think)>.*?</(?:thought|thinking|think)>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'^<(?:thought|thinking|think)>.*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
     
     # 2. 移除开头的常见英文规划与描述前缀 (例如 "I will...", "Sure, I will...", "Let me...", "Here is...", "I need to...")
     text = re.sub(
@@ -81,8 +76,8 @@ def extract_final_chinese_response(text):
         flags=re.IGNORECASE | re.DOTALL
     ).strip()
 
-    # 4. 移除包含 Thinking Process, Thought:, Plan: 等英文小标题的说明段落
-    text = re.sub(r'\*\*(?:Thinking Process|Thought|Plan|Reasoning)\*\*.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    # 4. 移除包含 Thinking Process, Thought:, Plan:, Thinking: 等小标题的说明段落
+    text = re.sub(r'(?:\*\*|\#\#?\s*)?(?:Thinking Process|Thought|Thinking|Plan|Reasoning)(?:\*\*|:)?.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
 
     # 5. 清理残留的动态思考占位符
     text = re.sub(r'\*\(\s*(?:🧠|🔍|⚙️|💡|🚀)?\s*正在.*?\)\*', '', text).strip()
@@ -351,8 +346,8 @@ async def execute_antigravity(
                         lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
                         label="indicator patch"
                     )
-                # 指数退避：1s → 2s → 4s → 8s → 10s (封顶)，避免长任务触发飞书限流
-                current_patch_interval = min(current_patch_interval * 2, 10.0)
+                # 保持 1.0s 高刷新率，实时更新思考计时器与工具动作
+                current_patch_interval = 1.0
                             
             if stdout_task.done() and stderr_task.done():
                 break
