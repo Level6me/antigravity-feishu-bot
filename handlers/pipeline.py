@@ -197,7 +197,7 @@ async def set_emoji(message_id, emoji_type):
     
     loop = asyncio.get_running_loop()
     try:
-        reaction_id = await loop.run_in_executor(None, lambda: set_emoji_sdk(message_id, mapped_type))
+        reaction_id = await app_state.run_feishu_sync(loop, lambda: set_emoji_sdk(message_id, mapped_type))
         return reaction_id
     except Exception as e:
         log.error(f"Failed to set emoji reaction {emoji_type}: {e}")
@@ -209,7 +209,7 @@ async def delete_emoji(message_id, reaction_id):
         return
     loop = asyncio.get_running_loop()
     try:
-        await loop.run_in_executor(None, lambda: delete_emoji_sdk(message_id, reaction_id))
+        await app_state.run_feishu_sync(loop, lambda: delete_emoji_sdk(message_id, reaction_id))
     except Exception as e:
         log.error(f"Failed to delete emoji reaction: {e}")
 
