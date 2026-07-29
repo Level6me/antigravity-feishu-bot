@@ -1,16 +1,106 @@
-"""Card builders: stats_cards."""
-
 import os
-import re
-from datetime import datetime
+import json
+import base64
+import urllib.request
+import ssl
+from datetime import datetime, timezone, timedelta
 
 from cards.common import create_footer
 
+# 北京时间 (UTC+8) 时区定义
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+def get_antigravity_account() -> str:
+    """获取 antigravity cli 当前登录的账号 Email"""
+    try:
+        from config import get_oauth_token_path
+        token_path = get_oauth_token_path()
+        if not os.path.exists(token_path):
+            return ""
+        
+        with open(token_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        if isinstance(data, dict):
+            # 1. 尝试直接读取根或 token 下保存的 email
+            if "email" in data and data["email"]:
+                return str(data["email"])
+            token_obj = data.get("token", {}) if isinstance(data.get("token"), dict) else data
+            if isinstance(token_obj, dict) and "email" in token_obj and token_obj["email"]:
+                return str(token_obj["email"])
+
+            # 2. 从 id_token 中解码 JWT 获取 email
+            id_token = token_obj.get("id_token") if isinstance(token_obj, dict) else None
+            if not id_token and isinstance(data, dict):
+                id_token = data.get("id_token")
+                
+            if id_token and isinstance(id_token, str) and id_token.count(".") == 2:
+                try:
+                    payload_b64 = id_token.split(".")[1]
+                    rem = len(payload_b64) % 4
+                    if rem:
+                        payload_b64 += "=" * (4 - rem)
+                    payload_json = base64.urlsafe_b64decode(payload_b64).decode("utf-8")
+                    payload = json.loads(payload_json)
+                    if "email" in payload and payload["email"]:
+                        return str(payload["email"])
+                except Exception:
+                    pass
+
+            # 3. 备用方式：向 Google UserInfo API 请求
+            access_token = token_obj.get("access_token") if isinstance(token_obj, dict) else None
+            if access_token:
+                try:
+                    req = urllib.request.Request(
+                        "https://www.googleapis.com/oauth2/v3/userinfo",
+                        headers={"Authorization": f"Bearer {access_token}"}
+                    )
+                    ctx = ssl._create_unverified_context()
+                    with urllib.request.urlopen(req, context=ctx, timeout=3) as resp:
+                        user_info = json.loads(resp.read().decode("utf-8"))
+                        if "email" in user_info and user_info["email"]:
+                            return str(user_info["email"])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return ""
+
+
+def get_local_tz_info():
+    """获取当前系统设备的本地时区对象与 UTC 偏移量字符串 (如 UTC+8, UTC-5)"""
+    try:
+        local_now = datetime.now().astimezone()
+        tz = local_now.tzinfo
+        offset = local_now.utcoffset()
+        if offset is None:
+            return timezone.utc, "UTC+0"
+        total_seconds = int(offset.total_seconds())
+        sign = "+" if total_seconds >= 0 else "-"
+        abs_seconds = abs(total_seconds)
+        hours = abs_seconds // 3600
+        minutes = (abs_seconds % 3600) // 60
+        if minutes == 0:
+            tz_str = f"UTC{sign}{hours}"
+        else:
+            tz_str = f"UTC{sign}{hours}:{minutes:02d}"
+        return tz, tz_str
+    except Exception:
+        return timezone.utc, "UTC+0"
+
+LOCAL_TZ, LOCAL_TZ_STR = get_local_tz_info()
+
+
 def build_quota_card(quota_data):
+    account_email = get_antigravity_account()
+    header_content = "⚡ **Google AI Pro 额度大盘** (实时同步自本地 LSP)"
+    if account_email:
+        header_content += f"\n👤 **当前登录账号**: `{account_email}`"
+
     elements = [
         {
             "tag": "markdown",
-            "content": "⚡ **Google AI Pro 额度大盘** (实时同步自本地 LSP)"
+            "content": header_content
         },
         {
             "tag": "hr"
@@ -44,10 +134,12 @@ def build_quota_card(quota_data):
                 group_content += f"• **{bucket_name}**:\n`[{bar_str}] {percentage_str:>6}` {progress_emoji}\n"
                 if reset_time:
                     try:
-                        time_part = reset_time.replace("Z", "")
-                        dt = datetime.fromisoformat(time_part.split(".")[0])
-                        friendly_reset = dt.strftime('%m-%d %H:%M')
-                        group_content += f"(🕒 {friendly_reset})\n"
+                        # 解析 ISO 格式 UTC 时间并转换为当前设备本地系统时区 (动态 UTC+x)
+                        ts_str = reset_time.replace("Z", "+00:00")
+                        dt = datetime.fromisoformat(ts_str)
+                        dt_local = dt.astimezone(LOCAL_TZ)
+                        friendly_reset = dt_local.strftime('%m-%d %H:%M')
+                        group_content += f"(🕒 重置: {friendly_reset} {LOCAL_TZ_STR})\n"
                     except Exception:
                         group_content += f"(🕒 {reset_time})\n"
                 
