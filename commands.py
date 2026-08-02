@@ -44,6 +44,27 @@ async def _handle_create_project(user_text, message_id, chat_id, session_data, r
     ws_root = session_data.get("workspace_root")
     parent_path = ws_root if ws_root and os.path.exists(ws_root) else WORKSPACE_ROOT
     
+    # Check if the input is an existing local directory
+    expanded_path = os.path.abspath(os.path.expanduser(input_text))
+    if os.path.isdir(expanded_path):
+        session_data["project"] = expanded_path
+        
+        # Add to recent projects
+        recent_projects = session_data.get("recent_projects", [])
+        if expanded_path not in recent_projects:
+            recent_projects.append(expanded_path)
+            session_data["recent_projects"] = recent_projects
+            
+        session_data.pop("pending_command", None)
+        from database import save_session_async
+        await save_session_async(chat_id, session_data)
+        
+        dir_name = os.path.basename(expanded_path) or expanded_path
+        reply_text = f"📂 已检测到现有项目目录，直接为您切换至该工作区：`{dir_name}`"
+        from lark_client import send_reply_sdk
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        return True, user_text
+
     git_pattern = re.compile(r'^(https?://|git@|git://)[^\s]+$', re.IGNORECASE)
     is_git_url = bool(git_pattern.match(input_text)) or input_text.endswith(".git")
     
@@ -198,12 +219,19 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
     pending_command = session_data.get("pending_command")
     
     # If the user typed a new slash command, clear any pending state
-    if user_text.startswith("/") and pending_command:
+    first_word = user_text.split()[0] if user_text.strip() else ""
+    is_slash_cmd = first_word in {
+        "/help", "/model", "/card", "/menu", "/project", "/note", "/notes",
+        "/status", "/context", "/quota", "/clear", "/stop", "/update", "/ping",
+        "/newproj_resolve"
+    }
+    
+    if is_slash_cmd and pending_command:
         session_data.pop("pending_command", None)
         await save_session_async(chat_id, session_data)
         pending_command = None
         
-    if not user_text.startswith("/") and pending_command:
+    if not is_slash_cmd and pending_command:
         if pending_command in [PendingCommand.CUSTOM_WORKSPACE_ROOT, "custom_workspace_root"]:
             target_path = user_text.strip()
             if target_path.startswith("~"):
