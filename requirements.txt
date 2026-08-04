@@ -1,6 +1,6 @@
 # Antigravity Feishu Bot - minimal runtime dependencies
 # (agy/antigravity CLI itself is installed separately on the host)
-lark-oapi==1.6.8
+lark-oapi>=1.6.8
 pydantic>=2.0
 pydantic-settings>=2.0
 aiosqlite>=0.20

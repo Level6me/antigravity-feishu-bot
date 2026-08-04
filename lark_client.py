@@ -188,8 +188,9 @@ def get_chat_name_sdk(chat_id):
     try:
         req = GetChatRequest.builder().chat_id(chat_id).build()
         resp = api_client.im.v1.chat.get(req)
-        if resp.code == 0 and resp.data and resp.data.chat:
-            return resp.data.chat.name or ""
+        # GetChatResponse.data 本身就是群信息对象，name 为其直接字段
+        if resp.code == 0 and resp.data:
+            return resp.data.name or ""
         log.error(f"[get_chat_name_sdk] Failed: {resp.msg}")
     except Exception as e:
         log.error(f"[get_chat_name_sdk] Error: {e}")

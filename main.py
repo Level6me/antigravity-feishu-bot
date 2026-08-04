@@ -1,9 +1,12 @@
 """Antigravity Feishu Bot entrypoint."""
 import asyncio
+import base64
+import http
 import json
 import os
 import signal
 import sys
+import time
 
 # Ensure common user-local bin paths are available under PM2 / non-login shells
 _home = os.path.expanduser("~")
@@ -20,6 +23,85 @@ from lark_client import send_reply_sdk
 from garbage_collection import garbage_collector
 import app_state
 from handlers import do_p2_im_message_receive_v1, do_p2_card_action_trigger
+
+# ---------------------------------------------------------------------------
+# Patch: lark-oapi 1.6.8 ws client drops card-action frames.
+# The WebSocket client returns early for MessageType.CARD, so card button
+# callbacks (card.action.trigger) get no response and Feishu reports
+# "出错了，请稍候重试 code:200671". Route CARD frames through the same event
+# dispatcher as EVENT frames. Safe on newer SDK versions too (same envelope).
+# ---------------------------------------------------------------------------
+from lark_oapi.ws import client as _ws_client_mod
+from lark_oapi.ws.const import (
+    HEADER_BIZ_RT,
+    HEADER_MESSAGE_ID,
+    HEADER_SEQ,
+    HEADER_SUM,
+    HEADER_TRACE_ID,
+    HEADER_TYPE,
+)
+from lark_oapi.ws.enum import MessageType as _WsMessageType
+from lark_oapi.ws.model import Response as _WsResponse
+from lark_oapi.core.json import JSON as _WsJSON
+from lark_oapi.core.const import UTF_8 as _UTF8
+
+
+async def _patched_handle_data_frame(self, frame):
+    hs = frame.headers
+    msg_id = _ws_client_mod._get_by_key(hs, HEADER_MESSAGE_ID)
+    trace_id = _ws_client_mod._get_by_key(hs, HEADER_TRACE_ID)
+    sum_ = _ws_client_mod._get_by_key(hs, HEADER_SUM)
+    seq = _ws_client_mod._get_by_key(hs, HEADER_SEQ)
+    type_ = _ws_client_mod._get_by_key(hs, HEADER_TYPE)
+
+    pl = frame.payload
+    if int(sum_) > 1:
+        pl = self._combine(msg_id, int(sum_), int(seq), pl)
+        if pl is None:
+            return
+
+    message_type = _WsMessageType(type_)
+    resp = _WsResponse(code=http.HTTPStatus.OK)
+    try:
+        start = int(round(time.time() * 1000))
+        if message_type == _WsMessageType.CARD:
+            _ws_client_mod.logger.info(
+                self._fmt_log("CARD frame received, dispatching card callback, msg_id: {}", msg_id)
+            )
+            result = self._event_handler._do_without_validation(pl)
+        elif message_type == _WsMessageType.EVENT:
+            result = self._event_handler._do_without_validation(pl)
+        else:
+            return
+        end = int(round(time.time() * 1000))
+        header = hs.add()
+        header.key = HEADER_BIZ_RT
+        header.value = str(end - start)
+        if result is not None:
+            resp.data = base64.b64encode(_WsJSON.marshal(result).encode(_UTF8))
+    except Exception as e:
+        _ws_client_mod.logger.error(
+            self._fmt_log(
+                "handle message failed, message_type: {}, message_id: {}, trace_id: {}, err: {}",
+                message_type.value,
+                msg_id,
+                trace_id,
+                e,
+            )
+        )
+        # 输出 payload 摘要，便于定位 CARD 帧结构与 SDK 预期不一致的问题
+        try:
+            preview = pl.decode("utf-8", errors="replace")[:300]
+            _ws_client_mod.logger.error(f"payload preview: {preview}")
+        except Exception:
+            pass
+        resp = _WsResponse(code=http.HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    frame.payload = _WsJSON.marshal(resp).encode(_UTF8)
+    await self._write_message(frame.SerializeToString())
+
+
+_ws_client_mod.Client._handle_data_frame = _patched_handle_data_frame
 
 
 async def main():

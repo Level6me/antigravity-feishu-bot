@@ -13,6 +13,7 @@ scope bundle (no shell / quota), so existing deployments upgrade seamlessly.
 """
 
 import json
+import asyncio
 import threading
 import time
 
@@ -254,3 +255,70 @@ def allow_execution(chat_id: str) -> bool:
     if is_admin(chat_id):
         return True
     return rate_limiter.allow_daily_execution(chat_id)
+
+
+# ---------------------------------------------------------------------------
+# Display-name resolution (Feishu user / group names)
+# ---------------------------------------------------------------------------
+
+async def resolve_display_name(chat_id: str, chat_type: str, sender_open_id: str = "") -> str:
+    """Resolve a human-readable display name for a chat:
+    group → chat name via im.chat.get; p2p → user name via contact.user.get;
+    falls back to chat.get when no sender open_id is available."""
+    try:
+        from lark_client import get_chat_name_async, get_user_name_async
+        if chat_type == "group":
+            return (await get_chat_name_async(chat_id)) or ""
+        if sender_open_id:
+            return (await get_user_name_async(sender_open_id)) or ""
+        return (await get_chat_name_async(chat_id)) or ""
+    except Exception as e:
+        from logger import log
+        log.error(f"[auth] resolve display name failed: {e}")
+        return ""
+
+
+_display_name_refresh_task = None
+
+
+async def ensure_display_names(sessions: list, per_call_timeout: float = 3.0, max_concurrency: int = 4) -> list:
+    """Fill in missing / placeholder display names for a list of auth sessions
+    (async Feishu lookups) and persist the results. Bounded concurrency and a
+    per-call timeout keep slow APIs from stalling callers for long."""
+    sem = asyncio.Semaphore(max_concurrency)
+
+    async def _one(sess):
+        name = (sess.get("display_name") or "").strip()
+        if name and name != "旧白名单用户":
+            return
+        async with sem:
+            try:
+                resolved = await asyncio.wait_for(
+                    resolve_display_name(
+                        sess.get("chat_id", ""),
+                        sess.get("chat_type", "p2p"),
+                        sess.get("sender_open_id", ""),
+                    ),
+                    timeout=per_call_timeout,
+                )
+            except asyncio.TimeoutError:
+                return
+            except Exception:
+                return
+        if resolved:
+            sess["display_name"] = resolved
+            save_auth_session(sess)
+
+    await asyncio.gather(*(_one(s) for s in sessions), return_exceptions=True)
+    return sessions
+
+
+def start_display_name_refresh(sessions: list):
+    """Start (or reuse) the background display-name refresh task.
+    Returns the running task; callers may await it with a short timeout so
+    panels respond instantly even when Feishu lookups are slow."""
+    global _display_name_refresh_task
+    if _display_name_refresh_task is not None and not _display_name_refresh_task.done():
+        return _display_name_refresh_task
+    _display_name_refresh_task = asyncio.create_task(ensure_display_names(sessions))
+    return _display_name_refresh_task
