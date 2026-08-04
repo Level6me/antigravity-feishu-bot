@@ -15,8 +15,6 @@ from card_builder import CardBuilder
 from lark_client import (
     send_card_to_chat_async,
     send_text_to_chat_async,
-    get_chat_name_async,
-    get_user_name_async,
 )
 from utils.auth import (
     allow_message,
@@ -29,13 +27,8 @@ from utils.auth import (
 
 
 async def _resolve_display_name(chat_id, chat_type, sender_open_id):
-    try:
-        if chat_type == "group":
-            return await get_chat_name_async(chat_id) or ""
-        return await get_user_name_async(sender_open_id) or ""
-    except Exception as e:
-        log.error(f"[auth] resolve display name failed: {e}")
-        return ""
+    from utils.auth import resolve_display_name as _resolve
+    return await _resolve(chat_id, chat_type, sender_open_id)
 
 
 async def _handle_auth_request(chat_id, chat_type, sender_open_id, message_text):

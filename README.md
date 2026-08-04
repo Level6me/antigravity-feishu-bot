@@ -110,9 +110,38 @@ pm2 start venv/bin/python3 --name "agy-daemon" -- agy_daemon.py
 pm2 save
 ```
 
-飞书应用需开启 **WebSocket 长连接**，并开通消息相关权限（如 `im:message`）。
+### 3) 飞书后台配置（必读）
 
-### 3) Docker Compose
+#### ① 开启 WebSocket 长连接
+
+飞书开放平台 → 你的应用 → **开发配置 → 事件与回调**（或"应用能力"），开启 **WebSocket 长连接** 模式。本项目不依赖 HTTP 回调地址，全部事件与卡片回调均通过 WebSocket 推送。
+
+#### ② 开通权限（权限管理）
+
+以下为本项目运行所需的**全部权限**，按用途列出：
+
+| 权限名称 | 权限代码 | 用途 |
+|---|---|---|
+| 获取与发送单聊、群组消息 | `im:message` | 接收消息、回复消息、发送新消息、更新交互卡片 |
+| 获取消息中图片、文件资源 | `im:message:resource` | 下载用户发送的图片 / 文件 / 音视频 |
+| 上传图片 | `im:image` | 将模型生成的图片作为消息回传 |
+| 上传文件 | `im:file` | 将模型生成的文件作为消息回传 |
+| 获取与更新消息表情回复 | `im:message.reaction` | 任务完成 / 失败时添加与清理表情标记 |
+| 获取群信息 | `im:chat:readonly` | 管理面板显示群聊名称 |
+| 获取用户基本信息 | `contact:user.base:readonly` | 管理面板显示用户飞书昵称 |
+
+#### ③ 订阅事件
+
+- `im.message.receive_v1`：接收消息（WebSocket 模式下开通 `im:message` 权限后自动推送）。
+- `card.action.trigger`：卡片按钮回调（授权审批、用户管理等），无需单独申请权限。
+- 其余事件（如消息已读）未订阅，可忽略。
+
+#### ④ 发布版本与可用范围
+
+- 开通 / 修改权限后，需在 **版本管理与发布** 中创建版本并发布，线上应用才会生效。
+- 确认你的账号位于应用的**可用范围**内，否则 `contact.user.get` / `im.chat.get` 会因可见范围限制而失败。
+
+### 4) Docker Compose
 
 ```bash
 cp .env.example .env

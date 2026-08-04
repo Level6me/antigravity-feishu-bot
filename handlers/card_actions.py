@@ -42,7 +42,9 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     is_allowed = True
     if ALLOWED_USERS or ALLOWED_CHATS:
         is_allowed = False
-        sender_id = data.event.operator.operator_id.open_id if data.event.operator and data.event.operator.operator_id else None
+        # 卡片回调操作者字段为 CallBackOperator.open_id（字符串），
+        # 注意与消息事件 sender.sender_id.open_id 的对象结构不同。
+        sender_id = data.event.operator.open_id if data.event.operator else None
         if ALLOWED_USERS and sender_id in ALLOWED_USERS:
             is_allowed = True
         if ALLOWED_CHATS and chat_id in ALLOWED_CHATS:
@@ -53,9 +55,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "您无权操作此卡片！"}})
 
     # Auth gate: guests / pending / banned chats cannot operate any card.
-    operator_open_id = None
-    if data.event.operator and data.event.operator.operator_id:
-        operator_open_id = data.event.operator.operator_id.open_id
+    operator_open_id = data.event.operator.open_id if data.event.operator else None
     role = get_role(chat_id, operator_open_id or "")
     if role in ("guest", "pending", "banned"):
         return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "该会话未授权，无法操作。"}})

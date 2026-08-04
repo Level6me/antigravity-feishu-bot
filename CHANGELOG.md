@@ -1,5 +1,10 @@
 # 开发记录与进度追踪 (Development Log)
 
+## [unreleased] - 2026-08-04
+
+### 🐞 修复缺陷 (Bug Fixes)
+- **修复卡片按钮回调报错 code:200671**：`lark-oapi` 1.6.8 的 WebSocket 客户端对 `CARD` 类型帧直接丢弃，导致授权卡片等所有交互按钮点击后无回调响应。已在 `main.py` 增加运行时补丁，将 CARD 帧接入事件分发器；`requirements.txt` 同步放开 `lark-oapi>=1.6.8`。
+
 ## [v1.2.0] - 2026-07-26
 
 ### 工程成熟度

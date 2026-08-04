@@ -220,7 +220,9 @@ echo "🚀 准备启动机器人后台服务..."
 read -p "是否立即使用 PM2 启动/重启 feishu-bot 服务？[Y/n]: " start_pm2
 if [[ ! "$start_pm2" =~ ^[Nn]$ ]]; then
     # 检查进程是否存在
-    if pm2 status | grep -q "feishu-bot"; then
+    # 使用 pm2 describe 精确判断进程是否存在，避免 grep 子串误匹配
+    # （如 feishusaver-bot / codex-feishu-bot 会把 feishu-bot 误判为已存在）
+    if pm2 describe feishu-bot >/dev/null 2>&1; then
         pm2 restart feishu-bot
         echo "✅ 服务已重启。"
     else
@@ -229,7 +231,7 @@ if [[ ! "$start_pm2" =~ ^[Nn]$ ]]; then
     fi
 
     echo "🚀 准备启动本地语言服务器守护进程 (LSP Daemon)..."
-    if pm2 status | grep -q "agy-daemon"; then
+    if pm2 describe agy-daemon >/dev/null 2>&1; then
         pm2 restart agy-daemon
         echo "✅ LSP 守护进程已重启。"
     else

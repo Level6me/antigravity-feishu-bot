@@ -402,7 +402,14 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
     elif user_text.startswith("/user"):
         args = user_text[len("/user"):].strip()
         if not args:
+            from utils.auth import start_display_name_refresh
             sessions = list_auth_sessions()
+            task = start_display_name_refresh(sessions)
+            try:
+                # 面板最多等 3 秒；姓名解析放后台继续，下次打开即完整
+                await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+            except asyncio.TimeoutError:
+                log.warning("[/user] display-name resolution still running in background")
             panel = CardBuilder.build_user_panel_card(sessions)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, panel))
             return True, user_text
