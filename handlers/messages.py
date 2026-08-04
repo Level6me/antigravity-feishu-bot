@@ -2,9 +2,10 @@
 import asyncio
 import json
 import re
+import time
 
 from commands import handle_slash_command
-from database import get_session_async
+from database import get_session_async, save_pending_task
 from lark_client import send_reply_sdk
 from logger import log
 import stats
@@ -69,7 +70,6 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
     log.info(f"Message received: chat_id={chat_id}, message_type={message_type}, raw_text='{raw_text}', pending_command='{session_data.get('pending_command')}'")
 
     # Handle slash commands first (this allows /stop to bypass the lock)
-    import re
     cleaned_text = raw_text
     if isinstance(cleaned_text, str):
         cleaned_text = re.sub(r'^<at\s+user_id="[^"]*">[^<]*</at>\s*', '', cleaned_text).strip()
@@ -94,7 +94,8 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             "message_type": m_type,
             "content_json": c_json,
             "content_raw": c_raw,
-            "raw_text": r_text
+            "raw_text": r_text,
+            "created_at": int(time.time() * 1000),
         }
         
         if c_id in chat_workers and not chat_workers[c_id].done():
@@ -102,8 +103,10 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
             warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {qsize + 1} 个任务)..."
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(msg_id, warning_msg))
             await chat_queues[c_id].put(task_payload)
+            save_pending_task(c_id, task_payload)
         else:
             await chat_queues[c_id].put(task_payload)
+            save_pending_task(c_id, task_payload)
             chat_workers[c_id] = asyncio.create_task(process_chat_queue(c_id))
 
     # 方案四：多模态多图合并批处理防抖机制
@@ -153,5 +156,3 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         
     # 普通非媒体消息直接分发
     await dispatch_task(chat_id, message_id, message_type, content_json, content_raw, raw_text)
-
-

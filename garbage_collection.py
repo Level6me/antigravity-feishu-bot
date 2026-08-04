@@ -1,7 +1,47 @@
 import os
 import time
+import sqlite3
 import asyncio
 from logger import log
+
+BACKUP_DIR = "backups"
+BACKUP_KEEP = 7
+
+
+def backup_database_if_due():
+    """Daily SQLite backup via VACUUM INTO; keeps the newest BACKUP_KEEP copies."""
+    from database import DB_FILE
+
+    if not os.path.exists(DB_FILE):
+        return
+    today = time.strftime("%Y%m%d", time.localtime())
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    target = os.path.join(BACKUP_DIR, f"antigravity_bot_{today}.db")
+    if os.path.exists(target):
+        return  # 当天已备份
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.execute(f"VACUUM INTO '{target}'")
+        finally:
+            conn.close()
+        log.info(f"[GC] Database backup created: {target}")
+    except Exception as e:
+        log.error(f"[GC] Database backup failed: {e}")
+        return
+
+    # 保留最近 BACKUP_KEEP 份备份
+    try:
+        backups = sorted(
+            f for f in os.listdir(BACKUP_DIR)
+            if f.startswith("antigravity_bot_") and f.endswith(".db")
+        )
+        for old in backups[:-BACKUP_KEEP]:
+            os.remove(os.path.join(BACKUP_DIR, old))
+    except Exception as e:
+        log.error(f"[GC] Backup cleanup failed: {e}")
+
 
 async def garbage_collector(interval_seconds=3600, max_age_seconds=86400):
     """
@@ -15,6 +55,9 @@ async def garbage_collector(interval_seconds=3600, max_age_seconds=86400):
         try:
             now = time.time()
             deleted_count = 0
+
+            # 每日数据库备份
+            backup_database_if_due()
             
             # Clean structured directories
             for d in directories_to_clean:

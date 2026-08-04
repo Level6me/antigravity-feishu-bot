@@ -15,17 +15,25 @@ def extract_and_upload_resources(text, message_id, api_client, additional_safe_d
         os.path.join(workspace_dir, "scratch"),
         get_brain_dir()
     ]
+
+    # 用户主目录本身绝不允许作为回传白名单（防止默认 WORKSPACE_ROOT=~ 时
+    # 模型把任意 home 文件上传到飞书）。具体子目录（如 ~/my-project）不受影响。
+    home_dir = os.path.abspath(os.path.expanduser("~"))
     
     if additional_safe_dirs:
         for d in additional_safe_dirs:
-            if d and d not in ["默认", "Default"]:
+            if d and d not in ["默认", "Default"] and os.path.abspath(d) != home_dir:
                 safe_prefixes.append(d)
     
     def is_safe_path(path):
         try:
             abs_path = os.path.abspath(path)
+            if abs_path == home_dir:
+                return False
             for prefix in safe_prefixes:
-                if abs_path.startswith(os.path.abspath(prefix)):
+                p = os.path.abspath(prefix)
+                # 目录边界判断：/safe 不能通过 /safe_evil 的校验
+                if abs_path == p or abs_path.startswith(p + os.sep):
                     return True
         except:
             pass

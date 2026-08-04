@@ -1,3 +1,5 @@
+"""Utility helpers package (formerly utils.py)."""
+
 import time
 from functools import wraps
 from logger import log
@@ -245,6 +247,5 @@ def get_context_usage_stats(session_data=None):
         "free_pct": free_pct,
         "steps_count": steps_count
     }
-
 
 
