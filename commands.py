@@ -576,17 +576,17 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             conflict_hint = ""
             if pop_res.returncode != 0:
                 log.warning(f"git stash pop encountered conflicts or failed; reverting conflict markers: {pop_res.stderr}")
-                # 不再用 git checkout -- . 丢弃本地改动：冲突文件保留在工作区，
-                # 记录说明文件供用户手动处理，避免升级静默丢失本地代码。
+                # 冲突发生时，执行 git checkout -- . 清理冲突标记，防止 Python SyntaxError 无法启动
+                subprocess.run(["git", "checkout", "--", "."], capture_output=True, text=True, check=False, timeout=10, env=custom_env, cwd=BASE_DIR)
                 conflict_note = os.path.join(BASE_DIR, ".update_conflict.txt")
                 try:
                     with open(conflict_note, "w", encoding="utf-8") as nf:
                         nf.write(
-                            "升级时 git stash pop 发生冲突，本地改动已保留在冲突文件中。\n"
-                            "请手动解决冲突后提交，或执行 git checkout -- . 放弃本地改动。\n\n"
+                            "升级时 git stash pop 发生冲突，为保证系统正常启动已自动清理冲突标记。\n"
+                            "之前的本地未提交改动仍保存在 git stash 中（可通过 `git stash list` 查看/恢复）。\n\n"
                             f"stash pop stderr:\n{pop_res.stderr[:2000]}\n"
                         )
-                    conflict_hint = "\n\n⚠️ 本地改动与更新存在冲突，已保留在工作区，详见 `.update_conflict.txt`"
+                    conflict_hint = "\n\n⚠️ 本地改动与更新存在冲突，已清理冲突标记以保证正常启动（未提交改动存入 `git stash`）。"
                 except Exception as nf_e:
                     log.error(f"Failed to write conflict note: {nf_e}")
             
