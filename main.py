@@ -46,6 +46,9 @@ async def main():
     # Start background GC task
     asyncio.create_task(garbage_collector())
 
+    # Restore queued tasks persisted across a previous process lifetime
+    await restore_pending_tasks()
+
     event_handler = (
         lark.EventDispatcherHandler.builder("", "")
         .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1)
@@ -57,11 +60,41 @@ async def main():
         APP_ID,
         APP_SECRET,
         event_handler=event_handler,
-        log_level=lark.LogLevel.DEBUG,
+        log_level=lark.LogLevel.INFO,
     )
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, cli.start)
+
+
+async def restore_pending_tasks():
+    """Re-queue tasks persisted in SQLite after a restart/crash.
+    Tasks whose message was already processed (dedup table) are dropped."""
+    from database import delete_pending_task, is_message_seen, load_pending_tasks
+    from handlers.pipeline import process_chat_queue
+
+    tasks = load_pending_tasks()
+    if not tasks:
+        return
+
+    recovered = {}
+    for chat_id, task, created_at in tasks:
+        if is_message_seen(task.get("message_id", "")):
+            delete_pending_task(chat_id, created_at)
+            continue
+        recovered.setdefault(chat_id, []).append(task)
+
+    total = 0
+    for chat_id, items in recovered.items():
+        if chat_id not in app_state.chat_queues:
+            app_state.chat_queues[chat_id] = asyncio.Queue()
+        for t in items:
+            await app_state.chat_queues[chat_id].put(t)
+            total += 1
+        if chat_id not in app_state.chat_workers or app_state.chat_workers[chat_id].done():
+            app_state.chat_workers[chat_id] = asyncio.create_task(process_chat_queue(chat_id))
+
+    log.info(f"[restore] recovered {total} pending tasks across {len(recovered)} chats")
 
 
 def cleanup(signum, frame):

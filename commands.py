@@ -127,6 +127,8 @@ from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
 from card_builder import CardBuilder
 from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT, BASE_DIR, GITEE_MIRROR_URL
+from database import list_auth_sessions
+from utils.auth import SCOPE_TIERS, get_admin_chat_id, has_scope, is_admin, set_session_role
 
 def get_version_string(commit_ref="HEAD"):
     try:
@@ -171,8 +173,19 @@ def get_system_status_card_data():
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         err_out = ansi_escape.sub('', err_out)
         
-        err_lines = [l for l in err_out.split('\n') if not l.startswith('[TAILING]') and not l.startswith('/Users') and l.strip()]
-        err_logs = '\n'.join(err_lines).strip()
+        # 脱敏：过滤敏感字段与绝对路径，仅保留最近 3 条摘要，避免向飞书暴露
+        # token / 密钥 / 路径等内部信息。
+        sensitive = re.compile(r'(?i)(token|secret|password|api[_-]?key|authorization|Bearer\s)')
+        err_lines = []
+        for l in err_out.split('\n'):
+            line = l.strip()
+            if not line or line.startswith('[TAILING]'):
+                continue
+            if sensitive.search(line) or '.env' in line or re.match(r'^/[^\s]+', line):
+                continue
+            line = re.sub(r'/Users/[^\s:]+', '<path>', line)
+            err_lines.append(line[:160])
+        err_logs = '\n'.join(err_lines[-3:]).strip()
         if not err_logs:
             err_logs = "无报错日志"
             
@@ -217,6 +230,22 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
     """
     
     pending_command = session_data.get("pending_command")
+
+    # Permission gate for privileged slash commands (guests never reach here;
+    # this protects admin-only and scoped commands from regular users).
+    if not is_admin(chat_id):
+        if user_text.startswith("/update") or user_text.startswith("/user") or user_text.strip() == "/status":
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: send_reply_sdk(message_id, "🔒 该命令仅管理员可用。"),
+            )
+            return True, user_text
+        if user_text.strip() == "/quota" and not has_scope(chat_id, "quota"):
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: send_reply_sdk(message_id, "🔒 当前会话未获得查看额度的权限。"),
+            )
+            return True, user_text
     
     # If the user typed a new slash command, clear any pending state
     first_word = user_text.split()[0] if user_text.strip() else ""
@@ -232,7 +261,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         pending_command = None
         
     if not is_slash_cmd and pending_command:
-        if pending_command in [PendingCommand.CUSTOM_WORKSPACE_ROOT, "custom_workspace_root"]:
+        if pending_command == PendingCommand.CUSTOM_WORKSPACE_ROOT.value:
             target_path = user_text.strip()
             if target_path.startswith("~"):
                 target_path = os.path.expanduser(target_path)
@@ -251,7 +280,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
 
-        elif pending_command in [PendingCommand.CUSTOM_PROJECT_PATH, "custom_project_path"]:
+        elif pending_command == PendingCommand.CUSTOM_PROJECT_PATH.value:
             target_path = user_text.strip()
             if target_path.startswith("~"):
                 target_path = os.path.expanduser(target_path)
@@ -270,7 +299,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
 
-        elif pending_command in [PendingCommand.NOTE_ADD, "note_add"]:
+        elif pending_command == PendingCommand.NOTE_ADD.value:
             note_content = user_text.strip()
             notes = session_data.get("notes", [])
             notes.append(note_content)
@@ -281,7 +310,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
 
-        elif pending_command in [PendingCommand.MEMORY_ADD, "memory_add"]:
+        elif pending_command == PendingCommand.MEMORY_ADD.value:
             memory_text = user_text.strip()
             memories = await get_profile_async(chat_id)
             memories.append(memory_text)
@@ -292,7 +321,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
             
-        elif pending_command == PendingCommand.PROJECT:
+        elif pending_command == PendingCommand.PROJECT.value:
             new_project = user_text.strip()
             if new_project.lower() in ["clear", "default", "默认", "reset"]:
                 session_data["project"] = "默认"
@@ -305,7 +334,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
             
-        elif pending_command == PendingCommand.CREATE_PROJECT:
+        elif pending_command == PendingCommand.CREATE_PROJECT.value:
             return await _handle_create_project(user_text, message_id, chat_id, session_data)
 
     if user_text == "/stop":
@@ -363,6 +392,96 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
     elif user_text == "/ping":
         reply_text = "🏓 Pong! 核心系统运行正常，网络连接畅通。"
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        return True, user_text
+
+    elif user_text.strip() == "/auth":
+        reply_text = "✅ 当前会话已授权，无需申请。"
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+        return True, user_text
+
+    elif user_text.startswith("/user"):
+        args = user_text[len("/user"):].strip()
+        if not args:
+            sessions = list_auth_sessions()
+            panel = CardBuilder.build_user_panel_card(sessions)
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, panel))
+            return True, user_text
+
+        parts = args.split()
+        op = parts[0].lower()
+
+        if op == "grant" and len(parts) >= 2:
+            target = parts[1]
+            tier = parts[2] if len(parts) >= 3 and parts[2] in SCOPE_TIERS else "basic"
+            set_session_role(target, "user", list(SCOPE_TIERS[tier]), operator=chat_id)
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: send_reply_sdk(message_id, f"✅ 已授权 {target}（{tier}）。"),
+            )
+            return True, user_text
+
+        if op in ("revoke", "ban", "unban") and len(parts) >= 2:
+            target = parts[1]
+            if op == "revoke":
+                set_session_role(target, "guest", [], operator=chat_id)
+                msg = f"✅ 已撤销 {target} 的授权。"
+            elif op == "ban":
+                set_session_role(target, "banned", [], operator=chat_id)
+                msg = f"🚫 已拉黑 {target}。"
+            else:
+                set_session_role(target, "guest", [], operator=chat_id)
+                msg = f"✅ 已解除 {target} 的拉黑。"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, msg))
+            return True, user_text
+
+        if op == "promote" and len(parts) >= 2:
+            target = parts[1]
+            set_session_role(target, "admin", [], operator=chat_id)
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: send_reply_sdk(message_id, f"👑 已提升 {target} 为管理员。"),
+            )
+            return True, user_text
+
+        if op == "demote" and len(parts) >= 2:
+            target = parts[1]
+            set_session_role(target, "user", list(SCOPE_TIERS["dev"]), operator=chat_id)
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: send_reply_sdk(message_id, f"✅ 已将 {target} 降为普通用户（开发权限）。"),
+            )
+            return True, user_text
+
+        if op == "reset-admin":
+            if args.strip() == "reset-admin confirm":
+                admin_id = get_admin_chat_id()
+                if admin_id:
+                    set_session_role(admin_id, "user", list(SCOPE_TIERS["dev"]), operator=chat_id)
+                set_session_role(chat_id, "admin", [], operator=chat_id)
+                from database import set_bot_meta
+                set_bot_meta("admin_chat_id", chat_id)
+                await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: send_reply_sdk(message_id, "✅ 管理员已重新绑定到当前会话。"),
+                )
+            else:
+                await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: send_reply_sdk(
+                        message_id,
+                        "⚠️ 重新绑定管理员将把当前会话设为新的管理员。\n确认请发送：`/user reset-admin confirm`",
+                    ),
+                )
+            return True, user_text
+
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: send_reply_sdk(
+                message_id,
+                "用法：\n`/user` 打开管理面板\n`/user grant <chat_id> [basic|dev|full]`\n"
+                "`/user revoke|ban|unban <chat_id>`\n`/user promote|demote <chat_id>`\n`/user reset-admin`",
+            ),
+        )
         return True, user_text
         
     elif user_text == "/update":
@@ -447,15 +566,28 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 subprocess.run(["git", "pull", "--rebase", GITEE_MIRROR_URL, "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
                 
             pop_res = subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
+            conflict_hint = ""
             if pop_res.returncode != 0:
                 log.warning(f"git stash pop encountered conflicts or failed; reverting conflict markers: {pop_res.stderr}")
-                subprocess.run(["git", "checkout", "--", "."], capture_output=True, cwd=BASE_DIR)
+                # 不再用 git checkout -- . 丢弃本地改动：冲突文件保留在工作区，
+                # 记录说明文件供用户手动处理，避免升级静默丢失本地代码。
+                conflict_note = os.path.join(BASE_DIR, ".update_conflict.txt")
+                try:
+                    with open(conflict_note, "w", encoding="utf-8") as nf:
+                        nf.write(
+                            "升级时 git stash pop 发生冲突，本地改动已保留在冲突文件中。\n"
+                            "请手动解决冲突后提交，或执行 git checkout -- . 放弃本地改动。\n\n"
+                            f"stash pop stderr:\n{pop_res.stderr[:2000]}\n"
+                        )
+                    conflict_hint = "\n\n⚠️ 本地改动与更新存在冲突，已保留在工作区，详见 `.update_conflict.txt`"
+                except Exception as nf_e:
+                    log.error(f"Failed to write conflict note: {nf_e}")
             
             # Install new requirements if any
             pip_cmd = ["venv/bin/pip", "install", "-r", "requirements.txt"]
             subprocess.run(pip_cmd, capture_output=True, text=True, timeout=60, cwd=BASE_DIR)
             
-            reply_text = "🔄 系统升级就绪，正在触发自启进程，预计 3 秒后重新上线..."
+            reply_text = "🔄 系统升级就绪，正在触发自启进程，预计 3 秒后重新上线..." + conflict_hint
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             
             # Save pending update state for post-reboot notification
@@ -554,112 +686,12 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         return True, user_text
 
     elif user_text.strip() == "/quota":
-        import re
-        import urllib.request
-        import ssl
-        
-        lsp_port = None
-        quota_data = None
+        from utils.quota import fetch_quota
         try:
-            candidate_ports = set()
-            for pid_dir in os.listdir("/proc"):
-                if not pid_dir.isdigit():
-                    continue
-                try:
-                    cmdline_path = f"/proc/{pid_dir}/cmdline"
-                    with open(cmdline_path, "rb") as f:
-                        cmdline = f.read().decode("utf-8", errors="ignore")
-                    if "agy" not in cmdline and "antigravity" not in cmdline:
-                        continue
-                    log.info(f"[/quota] Found agy process pid={pid_dir}")
-                    fd_dir = f"/proc/{pid_dir}/fd"
-                    if not os.path.isdir(fd_dir):
-                        continue
-                    
-                    found_any_socket = False
-                    for fd in os.listdir(fd_dir):
-                        try:
-                            link = os.readlink(f"{fd_dir}/{fd}")
-                            if "socket:" in link:
-                                found_any_socket = True
-                                inode = link.split("[")[1].rstrip("]")
-                                with open("/proc/net/tcp", "r") as tcp_f:
-                                    for tcp_line in tcp_f:
-                                        parts = tcp_line.strip().split()
-                                        if len(parts) >= 10 and parts[9] == inode:
-                                            if parts[3] == "0A":
-                                                hex_port = parts[1].split(":")[1]
-                                                port = int(hex_port, 16)
-                                                candidate_ports.add(port)
-                        except Exception as e:
-                            log.warning(f"[/quota] Error processing fd {fd} for pid {pid_dir}: {e}")
-                except Exception as e:
-                    log.warning(f"[/quota] Error processing pid {pid_dir}: {e}")
-            
-            if not candidate_ports:
-                try:
-                    out = subprocess.check_output("/usr/bin/ss -tlnp", shell=True, text=True, timeout=3)
-                    for line in out.split("\n"):
-                        if 'users:(("agy"' in line or 'users:(("antigravity"' in line:
-                            match = re.search(r"127\.0\.0\.1:(\d+)", line)
-                            if match:
-                                candidate_ports.add(int(match.group(1)))
-                except Exception as e:
-                    log.warning(f"[/quota] fallback ss failed: {e}")
-            
-            context = ssl._create_unverified_context()
-            metadata_payload = b'{"metadata": {"ideName": "antigravity", "extensionName": "antigravity"}}'
-            
-            def probe_port(port):
-                url = f"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
-                req = urllib.request.Request(url, data=metadata_payload, headers={"Content-Type": "application/json"}, method="POST")
-                try:
-                    with urllib.request.urlopen(req, context=context, timeout=5) as response:
-                        data = json.loads(response.read().decode())
-                        if "response" in data and "groups" in data["response"]:
-                            return port, data
-                except Exception as e:
-                    log.warning(f"[/quota] Port {port} failed: {e}")
-                return port, None
-
-            import concurrent.futures
-            if candidate_ports:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(candidate_ports))) as executor:
-                    futures = [executor.submit(probe_port, p) for p in candidate_ports]
-                    for future in concurrent.futures.as_completed(futures):
-                        p, data = future.result()
-                        if data:
-                            quota_data = data
-                            lsp_port = p
-                            break
+            quota_data = await asyncio.get_running_loop().run_in_executor(None, fetch_quota)
         except Exception as e:
-            log.error(f"Error discovering LSP port: {e}")
-                
-        if not quota_data:
-            token_path = get_oauth_token_path()
-            if os.path.exists(token_path):
-                try:
-                    with open(token_path, "r") as f:
-                        token_info = json.load(f)
-                    access_token = token_info["token"]["access_token"]
-                    url = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-                    req = urllib.request.Request(
-                        url,
-                        data=b'{"project":"high-battery-8d2jw"}',
-                        headers={
-                            "Authorization": f"Bearer {access_token}",
-                            "Content-Type": "application/json",
-                            "User-Agent": "antigravity/cli/1.1.3"
-                        },
-                        method="POST"
-                    )
-                    context = ssl._create_unverified_context()
-                    with urllib.request.urlopen(req, context=context) as response:
-                        api_data = json.loads(response.read().decode())
-                        quota_data = {"response": api_data}
-                except Exception as e:
-                    log.error(f"Error fetching remote quota fallback: {e}")
-                    
+            log.error(f"[/quota] fetch_quota failed: {e}")
+            quota_data = None
         quota_card = CardBuilder.build_quota_card(quota_data)
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, quota_card))
         return True, user_text
@@ -678,21 +710,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, memory_card))
         return True, user_text
 
-    elif user_text.strip() == "/test_ss":
-        try:
-            out = subprocess.check_output("/usr/bin/ss -tlnp", shell=True, text=True, timeout=3)
-            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, {
-                "config": {"wide_screen_mode": True},
-                "header": {"template": "blue", "title": {"content": "SS Output", "tag": "plain_text"}},
-                "elements": [{"tag": "markdown", "content": f"```\n{out[:1000]}\n```"}]
-            }))
-        except Exception as e:
-            await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, {
-                "config": {"wide_screen_mode": True},
-                "header": {"template": "red", "title": {"content": "SS Error", "tag": "plain_text"}},
-                "elements": [{"tag": "markdown", "content": f"```\n{e}\n```"}]
-            }))
-        return True, user_text
 
     elif user_text.startswith("/project"):
         args = user_text[len("/project"):].strip()
@@ -745,7 +762,18 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             stderr=asyncio.subprocess.PIPE,
             stdin=subprocess.DEVNULL
         )
-        stdout, _ = await fetch_proc.communicate()
+        try:
+            stdout, _ = await asyncio.wait_for(fetch_proc.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            try:
+                fetch_proc.kill()
+            except Exception:
+                pass
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: send_reply_sdk(message_id, "⏳ 模型列表获取超时，请稍后重试。"),
+            )
+            return True, user_text
         models_output = stdout.decode().strip()
         
         available_models = [line.strip() for line in models_output.split('\n') if line.strip()]

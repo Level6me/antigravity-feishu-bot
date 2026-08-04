@@ -65,10 +65,10 @@ if [ "$1" == "uninstall" ]; then
         rm -f install.sh
     fi
     
-    if [ -d "$HOME/.pm2" ]; then
-        echo "🗑️ 正在删除 ~/.pm2 配置及日志目录..."
-        rm -rf "$HOME/.pm2"
-    fi
+    # 只移除本项目注册的 PM2 服务，绝不递归删除整个 ~/.pm2
+    # （其中可能包含用户其他应用的服务配置与日志）
+    echo "ℹ️ 已停止并移除本项目注册的 PM2 服务。"
+    echo "ℹ️ 如需清理 ~/.pm2 中的其他 PM2 应用与历史日志，请手动执行：rm -rf ~/.pm2"
     
     echo "✅ 彻底卸载完成！项目所有文件及后台服务已被完全清除。"
     exit 0

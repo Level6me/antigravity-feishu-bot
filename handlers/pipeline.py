@@ -2,7 +2,7 @@
 import asyncio
 import re
 
-from database import get_session_async, get_profile_async, save_session_async
+from database import delete_pending_task, get_session_async, get_profile_async, save_session_async
 from card_builder import CardBuilder
 from lark_client import send_interactive_card_sdk, set_emoji_sdk, delete_emoji_sdk
 from executor import execute_antigravity
@@ -38,6 +38,9 @@ async def process_chat_queue(chat_id):
                 log.error(f"Error processing queued task for {chat_id}: {e}")
             finally:
                 queue.task_done()
+                created_at = task.get("created_at")
+                if created_at:
+                    delete_pending_task(chat_id, created_at)
     except asyncio.CancelledError:
         log.info(f"Chat worker for {chat_id} was cancelled by /stop")
     finally:
@@ -214,4 +217,3 @@ async def delete_emoji(message_id, reaction_id):
         log.error(f"Failed to delete emoji reaction: {e}")
 
 # emoji_spinner removed
-

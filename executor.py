@@ -13,6 +13,10 @@ from multimodal import extract_and_upload_resources
 from database import save_session_async
 import stats
 import app_state
+from utils.auth import SCOPE_PROJECT, allow_execution, has_scope, is_admin
+
+# 增量读取状态：transcript 路径 -> [offset, size]
+_transcript_read_state = {}
 
 def extract_final_response_from_transcript(transcript_path, initial_size=0):
     if not transcript_path or not os.path.exists(transcript_path):
@@ -91,6 +95,21 @@ async def execute_antigravity(
     download_success, running_processes
 ):
     loop = asyncio.get_running_loop()
+
+    # Daily execution limit for non-admin chats.
+    if not allow_execution(chat_id):
+        err_card = CardBuilder.build_ai_response(
+            "⏳ 今日执行次数已达上限，请明天再试或联系管理员提升额度。",
+            is_error=True,
+        )
+        try:
+            if bot_reply_msg_id:
+                await _feishu_call(lambda: patch_interactive_card_sdk(bot_reply_msg_id, err_card), label="daily-limit patch")
+            else:
+                await _feishu_call(lambda: send_interactive_card_sdk(message_id, err_card), label="daily-limit send")
+        except Exception as e:
+            log.error(f"[Executor] daily limit card failed: {e}")
+        return True
     
     async def _feishu_call(sync_fn, timeout=30.0, label="feishu_call"):
         """在线程池中执行同步飞书 SDK 调用，并加 30s 超时硬上限。
@@ -144,17 +163,21 @@ async def execute_antigravity(
         "--print-timeout", "60m",
         "--log-file", log_file_path
     ]
-    if DANGEROUSLY_SKIP_PERMISSIONS:
+    is_admin_chat = is_admin(chat_id)
+    if DANGEROUSLY_SKIP_PERMISSIONS and is_admin_chat:
         cmd_args.append("--dangerously-skip-permissions")
         
     cwd_dir = None
-    if session_data.get("project") and session_data["project"] not in ["默认", "Default"]:
+    allow_project = is_admin_chat or has_scope(chat_id, SCOPE_PROJECT)
+    if allow_project and session_data.get("project") and session_data["project"] not in ["默认", "Default"]:
         proj_val = session_data["project"]
         if os.path.isdir(proj_val):
             cwd_dir = proj_val
             cmd_args.extend(["--add-dir", proj_val])
         else:
             cmd_args.extend(["--project", proj_val])
+    elif not allow_project:
+        log.info(f"[Executor] Chat {chat_id} has no project scope; using default workspace")
         
     if not is_new_conversation:
         cmd_args.extend(["--conversation", session_data["conversation"]])
@@ -238,11 +261,23 @@ async def execute_antigravity(
         if not t_path or not os.path.exists(t_path):
             return ""
         try:
+            size = os.path.getsize(t_path)
+            state = _transcript_read_state.get(t_path)
+            if state is None or size < state[1]:
+                # 文件被重建/截断 → 从头读取
+                state = [0, 0]
+            if size == state[1]:
+                return ""  # 无新增内容，保持上一动作
             with open(t_path, 'r', encoding='utf-8', errors='ignore') as f:
+                f.seek(state[0])
                 lines = f.readlines()
+                state[0] = f.tell()
+            state[1] = size
+            _transcript_read_state[t_path] = state
             if not lines:
                 return ""
-            for line in reversed(lines[-50:]):
+            # 只从本次新增的行中反向查找最新工具动作
+            for line in reversed(lines):
                 line_str = line.strip()
                 if not line_str:
                     continue
@@ -535,4 +570,3 @@ async def execute_antigravity(
                     os.remove(log_file_path)
                 except Exception:
                     pass
-

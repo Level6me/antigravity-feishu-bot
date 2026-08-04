@@ -55,8 +55,7 @@ def get_antigravity_account() -> str:
                         "https://www.googleapis.com/oauth2/v3/userinfo",
                         headers={"Authorization": f"Bearer {access_token}"}
                     )
-                    ctx = ssl._create_unverified_context()
-                    with urllib.request.urlopen(req, context=ctx, timeout=3) as resp:
+                    with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=3) as resp:
                         user_info = json.loads(resp.read().decode("utf-8"))
                         if "email" in user_info and user_info["email"]:
                             return str(user_info["email"])

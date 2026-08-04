@@ -1,5 +1,5 @@
 """Feishu interactive card builders (split modules)."""
-from cards import common, models, indicators, response, projects, system, memory, stats_cards
+from cards import common, models, indicators, response, projects, system, memory, stats_cards, auth
 
 
 class CardBuilder:
@@ -33,3 +33,10 @@ class CardBuilder:
 
     build_quota_card = staticmethod(stats_cards.build_quota_card)
     build_context_card = staticmethod(stats_cards.build_context_card)
+
+    build_auth_hint_card = staticmethod(auth.build_auth_hint_card)
+    build_admin_welcome_card = staticmethod(auth.build_admin_welcome_card)
+    build_auth_request_card = staticmethod(auth.build_auth_request_card)
+    build_auth_result_card = staticmethod(auth.build_auth_result_card)
+    build_user_panel_card = staticmethod(auth.build_user_panel_card)
+    build_rate_limit_card = staticmethod(auth.build_rate_limit_card)

@@ -17,10 +17,12 @@ from lark_client import (
     send_interactive_card_sdk,
     patch_interactive_card_sdk,
 )
-from commands import handle_slash_command
+from commands import PendingCommand, handle_slash_command
 from logger import log
 import app_state
 from handlers.messages import _handle_message_async_internal
+from handlers.auth_actions import handle_auth_card_action
+from utils.auth import get_role, is_admin
 
 # Compatibility aliases for extracted body
 running_processes = app_state.running_processes
@@ -49,6 +51,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     if not is_allowed:
         log.warning(f"Unauthorized card action ignored. chat_id: {chat_id}, operator_id: {sender_id if 'sender_id' in locals() else None}")
         return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "您无权操作此卡片！"}})
+
+    # Auth gate: guests / pending / banned chats cannot operate any card.
+    operator_open_id = None
+    if data.event.operator and data.event.operator.operator_id:
+        operator_open_id = data.event.operator.operator_id.open_id
+    role = get_role(chat_id, operator_open_id or "")
+    if role in ("guest", "pending", "banned"):
+        return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "该会话未授权，无法操作。"}})
         
     if action_value.get("action") == "switch_model":
         new_model = action_value.get("model")
@@ -224,6 +234,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "您的记事本已被全部清空！"}})
         
     elif action_value.get("action") == "refresh_status":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "仅管理员可查看系统状态。"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_refresh_status():
                 from commands import get_system_status_card_data
@@ -237,118 +249,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     elif action_value.get("action") == "refresh_quota":
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_refresh_quota():
-                import re
-                import urllib.request
-                import ssl
-                
-                lsp_port = None
-                quota_data = None
-                try:
-                    candidate_ports = set()
-                    for pid_dir in os.listdir("/proc"):
-                        if not pid_dir.isdigit():
-                            continue
-                        try:
-                            with open(f"/proc/{pid_dir}/cmdline", "rb") as f:
-                                cmdline = f.read().decode("utf-8", errors="ignore")
-                            if "agy" not in cmdline and "antigravity" not in cmdline:
-                                continue
-                            log.info(f"[/refresh_quota] Found agy process pid={pid_dir}")
-                            fd_dir = f"/proc/{pid_dir}/fd"
-                            if not os.path.isdir(fd_dir):
-                                log.info(f"[/refresh_quota] fd_dir {fd_dir} is not a dir")
-                                continue
-                                
-                            found_any_socket = False
-                            for fd in os.listdir(fd_dir):
-                                try:
-                                    link = os.readlink(f"{fd_dir}/{fd}")
-                                    if "socket:" in link:
-                                        found_any_socket = True
-                                        inode = link.split("[")[1].rstrip("]")
-                                        with open("/proc/net/tcp", "r") as tcp_f:
-                                            for tcp_line in tcp_f:
-                                                parts = tcp_line.strip().split()
-                                                if len(parts) >= 10 and parts[9] == inode and parts[3] == "0A":
-                                                    hex_port = parts[1].split(":")[1]
-                                                    port = int(hex_port, 16)
-                                                    candidate_ports.add(port)
-                                                    log.info(f"[/refresh_quota] Found listen port {port} for pid {pid_dir}")
-                                except Exception as e:
-                                    log.warning(f"[/refresh_quota] Error processing fd {fd} for pid {pid_dir}: {e}")
-                        except Exception as e:
-                            log.warning(f"[/refresh_quota] Error processing pid {pid_dir}: {e}")
-                    
-                    if not candidate_ports:
-                        try:
-                            out = subprocess.check_output("/usr/bin/ss -tlnp", shell=True, text=True, timeout=3)
-                            for line in out.split("\n"):
-                                if 'users:(("agy"' in line or 'users:(("antigravity"' in line:
-                                    match = re.search(r"127\.0\.0\.1:(\d+)", line)
-                                    if match:
-                                        candidate_ports.add(int(match.group(1)))
-                        except Exception as e:
-                            log.warning(f"[/refresh_quota] fallback ss failed: {e}")
-                    
-                    log.info(f"[/refresh_quota] Found candidate ports: {candidate_ports}")
-                    context = ssl._create_unverified_context()
-                    metadata_payload = b'{"metadata": {"ideName": "antigravity", "extensionName": "antigravity"}}'
-                    
-                    def probe_port(port):
-                        url = f"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
-                        req = urllib.request.Request(url, data=metadata_payload, headers={"Content-Type": "application/json"}, method="POST")
-                        try:
-                            with urllib.request.urlopen(req, context=context, timeout=5) as response:
-                                data = json.loads(response.read().decode())
-                                if "response" in data and "groups" in data["response"]:
-                                    return port, data
-                        except Exception as e:
-                            log.warning(f"[/refresh_quota] Port {port} failed: {e}")
-                        return port, None
-
-                    import concurrent.futures
-                    if candidate_ports:
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(candidate_ports))) as executor:
-                            futures = [executor.submit(probe_port, p) for p in candidate_ports]
-                            for future in concurrent.futures.as_completed(futures):
-                                p, data = future.result()
-                                if data:
-                                    log.info(f"[/refresh_quota] Port {p} responded successfully")
-                                    quota_data = data
-                                    lsp_port = p
-                                    log.info(f"[/refresh_quota] Selected port {p}")
-                                    break
-                except Exception as e:
-                    log.error(f"Error discovering LSP port in refresh: {e}")
-                        
-                if not quota_data:
-                    token_path = get_oauth_token_path()
-                    if os.path.exists(token_path):
-                        try:
-                            with open(token_path, "r") as f:
-                                token_info = json.load(f)
-                            access_token = token_info["token"]["access_token"]
-                            url = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-                            req = urllib.request.Request(
-                                url,
-                                data=b'{"project":"high-battery-8d2jw"}',
-                                headers={
-                                    "Authorization": f"Bearer {access_token}",
-                                    "Content-Type": "application/json",
-                                    "User-Agent": "antigravity/cli/1.1.3"
-                                },
-                                method="POST"
-                            )
-                            context = ssl._create_unverified_context()
-                            with urllib.request.urlopen(req, context=context) as response:
-                                api_data = json.loads(response.read().decode())
-                                quota_data = {"response": api_data}
-                        except Exception as e:
-                            log.error(f"Error fetching remote quota fallback in refresh: {e}")
+                from utils.quota import fetch_quota
+                quota_data = await asyncio.get_running_loop().run_in_executor(None, fetch_quota)
                 new_card = CardBuilder.build_quota_card(quota_data)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             asyncio.run_coroutine_threadsafe(do_refresh_quota(), app_state.main_loop)
-            
+
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "额度已刷新！"}})
 
     elif action_value.get("action") == "forget_single_memory":
@@ -374,7 +280,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_create_project_prompt():
                 session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = "create_project"
+                session_data["pending_command"] = PendingCommand.CREATE_PROJECT.value
                 session_data["create_project_parent"] = parent_path
                 await save_session_async(chat_id, session_data)
                 
@@ -388,7 +294,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_prompt_ws_root():
                 session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = "custom_workspace_root"
+                session_data["pending_command"] = PendingCommand.CUSTOM_WORKSPACE_ROOT.value
                 await save_session_async(chat_id, session_data)
                 
                 msg = "⚙️ **设置公共项目根目录**\n\n请直接在此回复您想要设定的公共项目根目录绝对路径（例如：`/vol1/1000/github`）：\n\n*(系统收到后将自动校验路径合法性，并将后续所有新建项目与列表面板绑定至该根目录，当前活跃工作区保持不变)*"
@@ -401,7 +307,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_prompt_custom():
                 session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = "custom_project_path"
+                session_data["pending_command"] = PendingCommand.CUSTOM_PROJECT_PATH.value
                 await save_session_async(chat_id, session_data)
                 
                 msg = "⚙️ **设置开发工作区**\n\n请直接回复您想要设定的开发工作区绝对路径（例如：`/vol1/1000/github/my-app`）：\n\n*(系统收到后将自动校验路径合法性并为您切换工作区)*"
@@ -414,7 +320,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_prompt_note():
                 session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = "note_add"
+                session_data["pending_command"] = PendingCommand.NOTE_ADD.value
                 await save_session_async(chat_id, session_data)
                 
                 msg = "📝 **添加笔记**\n\n请直接在此回复您要添加的笔记内容：\n\n*(提示：随时也可发送 `/note add <内容>` 进行快速添加)*"
@@ -427,7 +333,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_prompt_memory():
                 session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = "memory_add"
+                session_data["pending_command"] = PendingCommand.MEMORY_ADD.value
                 await save_session_async(chat_id, session_data)
                 
                 msg = "🧠 **新增个人偏好**\n\n请直接在此回复您希望 AI 记住的偏好或习惯设定（例如：`写代码只用 Python` 或 `用中文回答`）：\n\n*(系统收到后将永久保存至您的个人偏好记忆库)*"
@@ -451,6 +357,9 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_browse_recent_page(), app_state.main_loop)
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"正在载入第 {target_page} 页项目..."}})
-    
-    return P2CardActionTriggerResponse()
 
+    resp = handle_auth_card_action(action_value, chat_id, card_message_id)
+    if resp is not None:
+        return resp
+
+    return P2CardActionTriggerResponse()
