@@ -253,7 +253,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
     is_slash_cmd = first_word in {
         "/help", "/model", "/card", "/menu", "/project", "/note", "/notes",
         "/status", "/context", "/quota", "/clear", "/stop", "/update", "/ping",
-        "/newproj_resolve"
+        "/newproj_resolve", "/cron", "/schedule"
     }
     
     if is_slash_cmd and pending_command:
