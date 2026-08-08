@@ -61,6 +61,36 @@ def init_db():
         )
     ''')
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cron_tasks (
+            id           TEXT PRIMARY KEY,
+            chat_id      TEXT NOT NULL,
+            category     TEXT NOT NULL DEFAULT 'user',
+            name         TEXT NOT NULL,
+            task_type    TEXT NOT NULL DEFAULT 'cron',
+            cron_expr    TEXT NOT NULL,
+            prompt       TEXT NOT NULL,
+            project_path TEXT NOT NULL DEFAULT '',
+            is_active    INTEGER NOT NULL DEFAULT 1,
+            created_by   TEXT NOT NULL DEFAULT '',
+            created_at   INTEGER NOT NULL DEFAULT 0,
+            updated_at   INTEGER NOT NULL DEFAULT 0,
+            last_run_at  INTEGER NOT NULL DEFAULT 0,
+            next_run_at  INTEGER NOT NULL DEFAULT 0,
+            run_count    INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cron_logs (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id      TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            output       TEXT NOT NULL DEFAULT '',
+            error_msg    TEXT NOT NULL DEFAULT '',
+            duration_ms  INTEGER NOT NULL DEFAULT 0,
+            executed_at  INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS recent_messages (
             message_id  TEXT PRIMARY KEY,
             chat_id     TEXT NOT NULL,
@@ -394,3 +424,186 @@ def load_pending_tasks():
         return []
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Cron Task & Log Helper Functions
+# ---------------------------------------------------------------------------
+
+def get_all_cron_tasks(chat_id=None):
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        if chat_id:
+            cursor.execute('SELECT * FROM cron_tasks WHERE chat_id = ? ORDER BY created_at DESC', (chat_id,))
+        else:
+            cursor.execute('SELECT * FROM cron_tasks ORDER BY created_at DESC')
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.error(f"[cron] get_all_cron_tasks failed: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_active_cron_tasks():
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM cron_tasks WHERE is_active = 1')
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.error(f"[cron] get_active_cron_tasks failed: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_cron_task(task_id: str):
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM cron_tasks WHERE id = ?', (task_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        log.error(f"[cron] get_cron_task failed: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def save_cron_task(task_data: dict):
+    conn = get_db()
+    now = int(time.time())
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO cron_tasks (
+                id, chat_id, category, name, task_type, cron_expr, prompt,
+                project_path, is_active, created_by, created_at, updated_at,
+                last_run_at, next_run_at, run_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                category=excluded.category,
+                name=excluded.name,
+                task_type=excluded.task_type,
+                cron_expr=excluded.cron_expr,
+                prompt=excluded.prompt,
+                project_path=excluded.project_path,
+                is_active=excluded.is_active,
+                updated_at=excluded.updated_at,
+                last_run_at=excluded.last_run_at,
+                next_run_at=excluded.next_run_at,
+                run_count=excluded.run_count
+        ''', (
+            task_data.get('id'),
+            task_data.get('chat_id'),
+            task_data.get('category', 'user'),
+            task_data.get('name', '未命名任务'),
+            task_data.get('task_type', 'cron'),
+            task_data.get('cron_expr', '0 9 * * *'),
+            task_data.get('prompt', ''),
+            task_data.get('project_path', ''),
+            1 if task_data.get('is_active', True) else 0,
+            task_data.get('created_by', ''),
+            task_data.get('created_at', now),
+            now,
+            task_data.get('last_run_at', 0),
+            task_data.get('next_run_at', 0),
+            task_data.get('run_count', 0),
+        ))
+        conn.commit()
+        return True
+    except Exception as e:
+        log.error(f"[cron] save_cron_task failed: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def update_cron_task_status(task_id: str, is_active: bool):
+    conn = get_db()
+    now = int(time.time())
+    try:
+        cursor = conn.cursor()
+        cursor.execute('UPDATE cron_tasks SET is_active = ?, updated_at = ? WHERE id = ?', (1 if is_active else 0, now, task_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        log.error(f"[cron] update_cron_task_status failed: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def update_cron_task_run(task_id: str, last_run_at: int, next_run_at: int):
+    conn = get_db()
+    now = int(time.time())
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE cron_tasks
+            SET last_run_at = ?, next_run_at = ?, run_count = run_count + 1, updated_at = ?
+            WHERE id = ?
+        ''', (last_run_at, next_run_at, now, task_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        log.error(f"[cron] update_cron_task_run failed: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def delete_cron_task(task_id: str):
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM cron_tasks WHERE id = ?', (task_id,))
+        cursor.execute('DELETE FROM cron_logs WHERE task_id = ?', (task_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        log.error(f"[cron] delete_cron_task failed: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def record_cron_log(task_id: str, status: str, output: str = '', error_msg: str = '', duration_ms: int = 0):
+    conn = get_db()
+    now = int(time.time())
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO cron_logs (task_id, status, output, error_msg, duration_ms, executed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (task_id, status, output[:2000] if output else '', error_msg[:1000] if error_msg else '', duration_ms, now))
+        conn.commit()
+        return True
+    except Exception as e:
+        log.error(f"[cron] record_cron_log failed: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_cron_logs(task_id=None, limit=10):
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        if task_id:
+            cursor.execute('SELECT * FROM cron_logs WHERE task_id = ? ORDER BY executed_at DESC LIMIT ?', (task_id, limit))
+        else:
+            cursor.execute('SELECT * FROM cron_logs ORDER BY executed_at DESC LIMIT ?', (limit,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.error(f"[cron] get_cron_logs failed: {e}")
+        return []
+    finally:
+        conn.close()
+

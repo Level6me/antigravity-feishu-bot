@@ -221,6 +221,7 @@ class PendingCommand(str, Enum):
     CUSTOM_WORKSPACE_ROOT = "custom_workspace_root"
     NOTE_ADD = "note_add"
     MEMORY_ADD = "memory_add"
+    CRON_ADD = "cron_add"
 
 async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers=None):
     log.info(f"handle_slash_command call: user_text='{user_text}', pending_command='{session_data.get('pending_command')}'")
@@ -318,6 +319,45 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             session_data.pop("pending_command", None)
             await save_session_async(chat_id, session_data)
             reply_text = f"🧠 **已为您保存个人偏好：**\n- {memory_text}"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, user_text
+
+        elif pending_command == PendingCommand.CRON_ADD.value:
+            raw_input = user_text.strip()
+            import re, time
+            parts = [p.strip() for p in re.split(r'[|｜]', raw_input) if p.strip()]
+            if len(parts) < 3:
+                reply_text = "❌ **格式无效！**\n\n请按规范发送 3 段数据，用竖线 `|` 隔开：\n`任务名称 | 触发规则(如 0 9 * * * 或 600s) | 执行 Prompt`\n\n例如：`定时检查存储 | 0 9 * * * | 检查树莓派 iSCSI 运行状态`"
+            else:
+                name, expr, prompt = parts[0], parts[1], parts[2]
+                task_type = 'delay' if re.match(r'^\d+\s*[s|m|h|d]?$', expr.lower()) else 'cron'
+                
+                from cron_engine import compute_next_run
+                now_ts = int(time.time())
+                next_run = compute_next_run(expr, task_type, now_ts)
+                
+                task_id = f"task_usr_{now_ts}"
+                task_data = {
+                    'id': task_id,
+                    'chat_id': chat_id,
+                    'category': 'user',
+                    'name': name,
+                    'task_type': task_type,
+                    'cron_expr': expr,
+                    'prompt': prompt,
+                    'project_path': session_data.get('project', ''),
+                    'is_active': True,
+                    'created_by': chat_id,
+                    'created_at': now_ts,
+                    'next_run_at': next_run
+                }
+                
+                from database import save_cron_task
+                save_cron_task(task_data)
+                reply_text = f"✅ **计划任务创建成功！**\n\n• **任务名称**：**{name}** (`{task_id}`)\n• **触发规则**：`{expr}` ({'倒计时' if task_type == 'delay' else 'Cron'})\n• **执行 Prompt**：`{prompt}`"
+
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, user_text
             
@@ -791,4 +831,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
         return True, user_text
         
+    elif user_text.startswith("/cron") or user_text.startswith("/schedule"):
+        from database import get_all_cron_tasks
+        tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
+        cron_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, cron_card))
+        return True, user_text
+
     return False, user_text
