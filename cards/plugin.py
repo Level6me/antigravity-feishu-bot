@@ -145,14 +145,17 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
         })
         elements.append({"tag": "hr"})
 
+        from plugin_store import fetch_remote_store_plugins
+        remote_plugins = fetch_remote_store_plugins() or FEATURED_REMOTE_PLUGINS
+
         elements.append({
             "tag": "markdown",
-            "content": "**🌟 精选推荐插件库 (Featured Plugins)**"
+            "content": f"**🌟 精选推荐插件库 (共 {len(remote_plugins)} 个在线扩展)**"
         })
 
         installed_ids = {p.get("id") for p in plugin_list}
 
-        for rem in FEATURED_REMOTE_PLUGINS:
+        for rem in remote_plugins:
             r_id = rem["id"]
             r_name = rem["name"]
             r_url = rem["repo_url"]
