@@ -251,6 +251,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             return True, user_text
     
     # Dynamic slash command detection via plugin manager
+    first_word = user_text.split()[0] if user_text.strip() else ""
     from plugin_manager import plugin_manager
     is_slash_cmd = plugin_manager.is_slash_command(first_word) or first_word.startswith("/")
     
