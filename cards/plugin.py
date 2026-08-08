@@ -149,17 +149,41 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
             btn_type = "default" if is_installed_rem else "primary"
 
             elements.append({
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
-                    "content": f"**{r_name}** (`{r_id}`)\n{r_desc}"
-                },
-                "extra": {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": btn_text},
-                    "type": btn_type,
-                    "value": {"action": "install_github_repo", "repo_url": r_url, "plugin_id": r_id}
-                }
+                "tag": "column_set",
+                "flex_mode": "none",
+                "background_style": "default",
+                "columns": [
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 4,
+                        "elements": [
+                            {
+                                "tag": "markdown",
+                                "content": f"**{r_name}** (`{r_id}`)\n{r_desc}"
+                            }
+                        ]
+                    },
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "vertical_align": "center",
+                        "elements": [
+                            {
+                                "tag": "action",
+                                "actions": [
+                                    {
+                                        "tag": "button",
+                                        "text": {"tag": "plain_text", "content": btn_text},
+                                        "type": btn_type,
+                                        "value": {"action": "install_github_repo", "repo_url": r_url, "plugin_id": r_id}
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
             })
             elements.append({"tag": "hr"})
 
