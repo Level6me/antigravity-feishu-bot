@@ -125,6 +125,10 @@ async def main():
         except Exception as e:
             log.error(f"Failed to process post-update notification: {e}")
 
+    # Load plugins
+    from plugin_manager import plugin_manager
+    plugin_manager.load_all_plugins()
+
     # Start background GC task
     asyncio.create_task(garbage_collector())
 

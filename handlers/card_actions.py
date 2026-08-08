@@ -437,6 +437,25 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_run_now(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已触发即刻运行计划任务！"}})
 
+    elif action_value.get("action") == "reload_plugins":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_reload_plugins():
+                from plugin_manager import plugin_manager
+                plugin_manager.reload_plugins()
+                p_list = plugin_manager.get_plugin_list()
+                new_card = CardBuilder.build_plugin_panel_card(p_list)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_reload_plugins(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功热重载插件库！"}})
+
+    # Dispatch to plugin manager
+    action_name = action_value.get("action", "")
+    if action_name and app_state.main_loop and app_state.main_loop.is_running():
+        async def do_dispatch_plugin_card():
+            from plugin_manager import plugin_manager
+            await plugin_manager.dispatch_card_action(action_name, action_value, chat_id, card_message_id)
+        asyncio.run_coroutine_threadsafe(do_dispatch_plugin_card(), app_state.main_loop)
+
     resp = handle_auth_card_action(action_value, chat_id, card_message_id)
     if resp is not None:
         return resp
