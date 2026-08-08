@@ -145,26 +145,21 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
             r_desc = rem["description"]
             is_installed_rem = r_id in installed_ids
 
-            btn_text = "✅ 已安装" if is_installed_rem else "📥 一键安装"
+            btn_text = "已安装" if is_installed_rem else "安装"
             btn_type = "default" if is_installed_rem else "primary"
 
             elements.append({
-                "tag": "markdown",
-                "content": f"**{r_name}** (`{r_id}`)\n" \
-                           f"• **简介**：{r_desc}\n" \
-                           f"• **源仓库**：`{r_url}`"
-            })
-            elements.append({
-                "tag": "action",
-                "layout": "flow",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": btn_text},
-                        "type": btn_type,
-                        "value": {"action": "install_github_repo", "repo_url": r_url, "plugin_id": r_id}
-                    }
-                ]
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**{r_name}** (`{r_id}`)\n{r_desc}"
+                },
+                "extra": {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": btn_text},
+                    "type": btn_type,
+                    "value": {"action": "install_github_repo", "repo_url": r_url, "plugin_id": r_id}
+                }
             })
             elements.append({"tag": "hr"})
 
