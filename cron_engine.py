@@ -154,11 +154,13 @@ class CronEngine:
             )
             
             # Get latest transcript result
-            from executor import get_latest_transcript_file, extract_final_response_from_transcript
-            log_dir = os.path.join(os.path.expanduser("~"), ".gemini/antigravity-cli/brain", session_data.get("conversation_id", ""))
-            transcript_path = os.path.join(log_dir, ".system_generated/logs/transcript.jsonl")
+            from config import get_transcript_path
+            from executor import extract_final_response_from_transcript
             
-            extracted = extract_final_response_from_transcript(transcript_path) if os.path.exists(transcript_path) else None
+            conv_id = session_data.get("conversation_id", "")
+            transcript_path = get_transcript_path(conv_id) if conv_id else None
+            
+            extracted = extract_final_response_from_transcript(transcript_path) if (transcript_path and os.path.exists(transcript_path)) else None
             result_text = extracted or "任务已成功触发执行完成。"
             
         except Exception as e:
