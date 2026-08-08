@@ -16,6 +16,7 @@ class PluginManager:
     def __init__(self):
         self.plugins = {}         # plugin_id -> plugin_instance
         self.command_map = {}      # command (e.g. "/sysinfo") -> plugin_instance
+        self.system_commands = set()  # set of registered system commands
         self.ensure_plugins_dir()
 
     def ensure_plugins_dir(self):
@@ -126,6 +127,39 @@ class PluginManager:
                 "dir": instance.plugin_dir
             })
         return res
+
+    def is_slash_command(self, cmd_word: str) -> bool:
+        """Check if cmd_word is registered by any plugin or system command."""
+        cmd_norm = cmd_word.lower().strip()
+        return cmd_norm in self.command_map or cmd_norm in self.system_commands
+
+    def register_system_commands(self, commands: list[str]):
+        """Register built-in system slash commands into dynamic registry."""
+        for c in commands:
+            self.system_commands.add(c.lower().strip())
+
+    async def dispatch_before_ai(self, user_text: str, chat_id: str, session_data: dict) -> tuple[str, dict]:
+        """Pipe user_text through on_before_ai hooks of all active plugins."""
+        curr_text = user_text
+        curr_data = session_data
+        for pid, plugin in self.plugins.items():
+            if plugin.enabled:
+                try:
+                    curr_text, curr_data = await plugin.on_before_ai(curr_text, chat_id, curr_data)
+                except Exception as e:
+                    log.error(f"[PluginManager] Error in plugin '{pid}' on_before_ai: {e}")
+        return curr_text, curr_data
+
+    async def dispatch_after_ai(self, ai_response_text: str, chat_id: str, session_data: dict) -> str:
+        """Pipe ai_response_text through on_after_ai hooks of all active plugins."""
+        curr_resp = ai_response_text
+        for pid, plugin in self.plugins.items():
+            if plugin.enabled:
+                try:
+                    curr_resp = await plugin.on_after_ai(curr_resp, chat_id, session_data)
+                except Exception as e:
+                    log.error(f"[PluginManager] Error in plugin '{pid}' on_after_ai: {e}")
+        return curr_resp
 
 
 # Global singleton instance
