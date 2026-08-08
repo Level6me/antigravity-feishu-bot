@@ -560,10 +560,17 @@ async def execute_antigravity(
                     label="final-card text fallback"
                 )
         else:
-            await _feishu_call(
-                lambda: send_interactive_card_sdk(message_id, final_card),
-                label="final-card send"
-            )
+            if message_id and str(message_id).startswith("om_"):
+                await _feishu_call(
+                    lambda: send_interactive_card_sdk(message_id, final_card),
+                    label="final-card send"
+                )
+            else:
+                from lark_client import send_card_to_chat_sdk
+                await _feishu_call(
+                    lambda: send_card_to_chat_sdk(chat_id, final_card),
+                    label="final-card send to chat"
+                )
             
         return is_error
     
