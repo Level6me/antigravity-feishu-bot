@@ -171,15 +171,10 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
                         "vertical_align": "center",
                         "elements": [
                             {
-                                "tag": "action",
-                                "actions": [
-                                    {
-                                        "tag": "button",
-                                        "text": {"tag": "plain_text", "content": btn_text},
-                                        "type": btn_type,
-                                        "value": {"action": "install_github_repo", "repo_url": r_url, "plugin_id": r_id}
-                                    }
-                                ]
+                                "tag": "button",
+                                "text": {"tag": "plain_text", "content": btn_text},
+                                "type": btn_type,
+                                "value": {"action": "install_github_repo", "repo_url": r_url, "plugin_id": r_id}
                             }
                         ]
                     }
