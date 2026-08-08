@@ -253,7 +253,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
     is_slash_cmd = first_word in {
         "/help", "/model", "/card", "/menu", "/project", "/note", "/notes",
         "/status", "/context", "/quota", "/clear", "/stop", "/update", "/ping",
-        "/newproj_resolve", "/cron", "/schedule"
+        "/newproj_resolve", "/cron", "/schedule", "/plugin", "/plugins"
     }
     
     if is_slash_cmd and pending_command:
@@ -835,6 +835,28 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
         cron_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, cron_card))
+        return True, user_text
+
+    elif first_word in ["/plugin", "/plugins"]:
+        from plugin_manager import plugin_manager
+        args = user_text[len(first_word):].strip()
+        if args == "reload":
+            plugin_manager.reload_plugins()
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "✅ 已成功热重载插件中心！")
+            )
+        else:
+            p_list = plugin_manager.get_plugin_list()
+            card = CardBuilder.build_plugin_panel_card(p_list)
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_interactive_card_sdk(message_id, card)
+            )
+        return True, user_text
+
+    # Dispatch command to plugin manager
+    from plugin_manager import plugin_manager
+    plugin_handled, p_res = await plugin_manager.dispatch_command(user_text, message_id, chat_id, session_data)
+    if plugin_handled:
         return True, user_text
 
     return False, user_text

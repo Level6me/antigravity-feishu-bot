@@ -1,0 +1,9 @@
+{
+  "id": "server_health",
+  "name": "🖥️ 服务器巡检插件",
+  "version": "1.0.0",
+  "author": "Antigravity",
+  "description": "实时巡检服务器 CPU 负载、内存占用、磁盘余量及运行时间，并推送飞书交互卡片",
+  "commands": ["/sysinfo", "/health"],
+  "enabled": true
+}
