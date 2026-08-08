@@ -443,10 +443,91 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 from plugin_manager import plugin_manager
                 plugin_manager.reload_plugins()
                 p_list = plugin_manager.get_plugin_list()
-                new_card = CardBuilder.build_plugin_panel_card(p_list)
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed")
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             asyncio.run_coroutine_threadsafe(do_reload_plugins(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功热重载插件库！"}})
+
+    elif action_value.get("action") == "switch_plugin_tab":
+        tab = action_value.get("tab", "installed")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_switch_plugin():
+                from plugin_manager import plugin_manager
+                p_list = plugin_manager.get_plugin_list()
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab=tab)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_switch_plugin(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"已切换至 {'已安装插件' if tab=='installed' else '插件源与商店'}"}})
+
+    elif action_value.get("action") == "update_plugin":
+        plugin_id = action_value.get("plugin_id")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_update_plugin():
+                from plugin_store import update_plugin
+                ok, msg = await asyncio.get_running_loop().run_in_executor(None, lambda: update_plugin(plugin_id))
+                from plugin_manager import plugin_manager
+                plugin_manager.reload_plugins()
+                p_list = plugin_manager.get_plugin_list()
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed")
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, f"🔄 **插件更新结果：**\n{msg}"))
+            asyncio.run_coroutine_threadsafe(do_update_plugin(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在从 Git 拉取插件 {plugin_id} 最新代码..."}})
+
+    elif action_value.get("action") == "uninstall_plugin":
+        plugin_id = action_value.get("plugin_id")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_uninstall_plugin():
+                from plugin_store import uninstall_plugin
+                ok, msg = await asyncio.get_running_loop().run_in_executor(None, lambda: uninstall_plugin(plugin_id))
+                from plugin_manager import plugin_manager
+                plugin_manager.reload_plugins()
+                p_list = plugin_manager.get_plugin_list()
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed")
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, f"🗑️ **插件卸载通知：**\n{msg}"))
+            asyncio.run_coroutine_threadsafe(do_uninstall_plugin(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "warning", "content": f"正在卸载插件 {plugin_id}..."}})
+
+    elif action_value.get("action") == "install_github_repo":
+        repo_url = action_value.get("repo_url")
+        plugin_id = action_value.get("plugin_id", "")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_install_repo():
+                from plugin_store import install_plugin_from_github
+                ok, msg = await asyncio.get_running_loop().run_in_executor(None, lambda: install_plugin_from_github(repo_url, plugin_id))
+                from plugin_manager import plugin_manager
+                plugin_manager.reload_plugins()
+                p_list = plugin_manager.get_plugin_list()
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed")
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, f"📥 **插件安装通知：**\n{msg}"))
+            asyncio.run_coroutine_threadsafe(do_install_repo(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在一键安装 GitHub 插件仓库..."}})
+
+    elif action_value.get("action") == "prompt_install_github":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_prompt_install():
+                from commands import PendingCommand
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = PendingCommand.PLUGIN_INSTALL_GITHUB.value
+                await save_session_async(chat_id, session_data)
+                msg = "📥 **从 GitHub 安装插件**\n\n请在此直接回复 GitHub 插件仓库地址，例如：\n`https://github.com/owner/my-feishu-plugin.git` 或 `owner/my-feishu-plugin`"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+            asyncio.run_coroutine_threadsafe(do_prompt_install(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复 GitHub 仓库地址"}})
+
+    elif action_value.get("action") == "prompt_add_source":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_prompt_source():
+                from commands import PendingCommand
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = PendingCommand.PLUGIN_ADD_SOURCE.value
+                await save_session_async(chat_id, session_data)
+                msg = "➕ **添加 GitHub 插件源**\n\n请直接在此回复 2~3 段信息，中间用竖线 `|` 隔开：\n`源名称 | 仓库URL | [可选描述]`\n\n例如：`开源社区插件源 | https://github.com/my-org/plugins-repo | 社区维护插件集`"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+            asyncio.run_coroutine_threadsafe(do_prompt_source(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复源名称与 URL"}})
 
     # Dispatch to plugin manager
     action_name = action_value.get("action", "")

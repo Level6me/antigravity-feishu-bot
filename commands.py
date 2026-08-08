@@ -222,6 +222,8 @@ class PendingCommand(str, Enum):
     NOTE_ADD = "note_add"
     MEMORY_ADD = "memory_add"
     CRON_ADD = "cron_add"
+    PLUGIN_INSTALL_GITHUB = "plugin_install_github"
+    PLUGIN_ADD_SOURCE = "plugin_add_source"
 
 async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers=None):
     log.info(f"handle_slash_command call: user_text='{user_text}', pending_command='{session_data.get('pending_command')}'")
@@ -359,6 +361,57 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 await save_session_async(chat_id, session_data)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, created_card))
                 return True, user_text
+
+        elif pending_command == PendingCommand.PLUGIN_INSTALL_GITHUB.value:
+            repo_url = user_text.strip()
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"⬇️ 正在从 GitHub 克隆安装插件 `{repo_url}`，请稍候...")
+            )
+
+            from plugin_store import install_plugin_from_github
+            ok, msg = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: install_plugin_from_github(repo_url)
+            )
+
+            if ok:
+                from plugin_manager import plugin_manager
+                plugin_manager.reload_plugins()
+                p_list = plugin_manager.get_plugin_list()
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed")
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_interactive_card_sdk(message_id, new_card)
+                )
+            else:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_reply_sdk(message_id, f"❌ **插件安装失败：**\n{msg}")
+                )
+            return True, user_text
+
+        elif pending_command == PendingCommand.PLUGIN_ADD_SOURCE.value:
+            raw_input = user_text.strip()
+            import re
+            parts = [p.strip() for p in re.split(r'[|｜]', raw_input) if p.strip()]
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+
+            if len(parts) < 2:
+                reply_text = "❌ **格式错误！**\n请发送格式为 `源名称 | GitHub仓库URL [| 描述]` 的文本。"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            else:
+                name, url = parts[0], parts[1]
+                desc = parts[2] if len(parts) > 2 else ""
+                from plugin_store import add_plugin_source
+                add_plugin_source(name, url, desc)
+                from plugin_manager import plugin_manager
+                p_list = plugin_manager.get_plugin_list()
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="sources")
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_interactive_card_sdk(message_id, new_card)
+                )
+            return True, user_text
             
         elif pending_command == PendingCommand.PROJECT.value:
             new_project = user_text.strip()
