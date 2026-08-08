@@ -136,6 +136,7 @@ async def execute_antigravity(
     
     async def _sync_conversation_id_from_log(log_path):
         """从 antigravity 日志中解析 conversation ID 并同步落盘到 session_data。"""
+        nonlocal target_transcript_path
         if not os.path.exists(log_path):
             return
         try:
@@ -151,6 +152,10 @@ async def execute_antigravity(
                         await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=3.0)
                     except (asyncio.TimeoutError, Exception) as e:
                         log.error(f"save_session_async timed out or failed: {e}")
+                if not target_transcript_path:
+                    path = get_transcript_path(new_conv_id)
+                    if os.path.exists(path):
+                        target_transcript_path = path
             elif conv_not_found:
                 if session_data.get("conversation") != "":
                     session_data["conversation"] = ""
@@ -272,22 +277,16 @@ async def execute_antigravity(
         if not t_path or not os.path.exists(t_path):
             return ""
         try:
-            size = os.path.getsize(t_path)
-            state = _transcript_read_state.get(t_path)
-            if state is None or size < state[1]:
-                # 文件被重建/截断 → 从头读取
-                state = [0, 0]
-            if size == state[1]:
-                return ""  # 无新增内容，保持上一动作
             with open(t_path, 'r', encoding='utf-8', errors='ignore') as f:
-                f.seek(state[0])
+                if initial_transcript_size > 0:
+                    try:
+                        f.seek(initial_transcript_size)
+                    except Exception:
+                        pass
                 lines = f.readlines()
-                state[0] = f.tell()
-            state[1] = size
-            _transcript_read_state[t_path] = state
             if not lines:
                 return ""
-            # 只从本次新增的行中反向查找最新工具动作
+            # 从本轮新增的行中反向查找最新工具动作
             for line in reversed(lines):
                 line_str = line.strip()
                 if not line_str:
