@@ -1,0 +1,9 @@
+{
+  "id": "notes_manager",
+  "name": "📝 备忘录与随手记插件",
+  "version": "2.0.0",
+  "author": "Antigravity",
+  "description": "随时快速记录、列出与管理个人的随手记、灵感与工作备忘条目",
+  "commands": ["/note", "/notes"],
+  "enabled": true
+}

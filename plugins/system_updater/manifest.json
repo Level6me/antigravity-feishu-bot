@@ -1,0 +1,9 @@
+{
+  "id": "system_updater",
+  "name": "🔄 系统在线热更新插件",
+  "version": "2.0.0",
+  "author": "Antigravity",
+  "description": "检查并拉取 Git 云端最新代码版本，一键自动构建热重启机器人引擎",
+  "commands": ["/update"],
+  "enabled": true
+}

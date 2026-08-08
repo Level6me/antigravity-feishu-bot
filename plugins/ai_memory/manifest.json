@@ -1,0 +1,9 @@
+{
+  "id": "ai_memory",
+  "name": "🧠 AI 长期记忆管理插件",
+  "version": "2.0.0",
+  "author": "Antigravity",
+  "description": "管理个人的长期对话偏好与全局 AI 记忆库，并在大模型对话前自动注入偏好上下文",
+  "commands": ["/memory"],
+  "enabled": true
+}

@@ -1,5 +1,11 @@
 # 开发记录与进度追踪 (Development Log)
 
+## [v2.0.0] - 2026-08-08
+
+### 🚀 架构重大升级 (v2.0 Microkernel Architecture)
+- **微内核插件系统**：全面重构系统架构，将 `/cron` (计划任务)、`/memory` (AI记忆)、`/notes` (备忘录)、`/update` (云端更新) 彻底从内核中剥离，转为独立解耦的 Plugin 扩展。
+- **全动态指令与双向 AI Hook**：引入 `on_before_ai`、`on_after_ai`、动态指令注册表，打造高可扩展、支持 GitHub 在线增删改查的插件生态。
+
 ## [unreleased] - 2026-08-04
 
 ### 🐞 修复缺陷 (Bug Fixes)
