@@ -112,6 +112,7 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None):
             })
             elements.append({"tag": "hr"})
 
+    elements.append(create_footer())
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -123,7 +124,6 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None):
         },
         "elements": elements
     }
-    create_footer(card, session_data)
     return card
 
 
