@@ -89,20 +89,26 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"模型已切换为 {new_model}"}})
 
     elif action_value.get("action") == "user_choice":
-        choice = action_value.get("choice")
+        choice = action_value.get("choice", "")
         label = action_value.get("label", choice)
         log.info(f"User selected choice: {choice}")
         
         if app_state.main_loop and app_state.main_loop.is_running():
             async def notify_and_process():
-                if choice.startswith("/"):
-                    # For slash commands, directly call the command handler
-                    # Use card_message_id as the reply target
+                handled = False
+                if choice and choice.startswith("/"):
+                    # 1. 提取首个命令词（处理带说明括号的选项如 "/light (常用缩写...)" -> "/light"）
+                    clean_cmd = choice.split()[0].strip()
                     session_data = await get_session_async(chat_id)
-                    await handle_slash_command(choice, card_message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
-                else:
-                    # For regular choices, notify and send to LLM
-                    user_display_text = f"✅ **您已选择：{label}**\n*(选项内容已发送给 AI 进行下一步处理...)*"
+                    handled_res, _ = await handle_slash_command(clean_cmd, card_message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
+                    handled = bool(handled_res)
+                    if not handled and clean_cmd != choice:
+                        handled_res2, _ = await handle_slash_command(choice, card_message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
+                        handled = bool(handled_res2)
+
+                if not handled:
+                    # 2. 如果不是有效斜杠指令或未被命令捕获，统一模拟为用户回复提交给 AI 继续处理
+                    user_display_text = f"✅ **您已选择：{label}**\n*(选项内容已提交 AI 进行下一步处理...)*"
                     await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, user_display_text))
                     simulated_content = json.dumps({"text": f"我的选择是：{choice}"})
                     await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
