@@ -2,7 +2,7 @@
   {
     "id": "official",
     "name": "🌟 官方精选插件源",
-    "repo_url": "https://github.com/Level6me/antigravity-feishu-bot",
-    "description": "Antigravity 团队推荐的优质飞书机器人插件"
+    "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+    "description": "Antigravity 团队官方维护的插件仓库中心"
   }
 ]

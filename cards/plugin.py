@@ -10,22 +10,36 @@ FEATURED_REMOTE_PLUGINS = [
         "id": "server_health",
         "name": "🖥️ 服务器巡检与健康报告",
         "author": "Antigravity",
-        "repo_url": "https://github.com/Level6me/antigravity-feishu-bot",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
         "description": "监控 CPU 负载、内存率、磁盘余量，发送 /sysinfo 即可查看"
     },
     {
-        "id": "git_notifier",
-        "name": "🐙 GitHub/GitLab Webhook 提通知",
-        "author": "Community",
-        "repo_url": "https://github.com/Level6me/antigravity-feishu-bot",
-        "description": "接收 Git Commit & PR 事件并推送优雅飞书通知卡片"
+        "id": "cron_scheduler",
+        "name": "⏱️ 计划任务与定时调度",
+        "author": "Antigravity",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "基于 Cron 表达式与秒级倒计时的后台定时任务与巡检调度中心"
     },
     {
-        "id": "rss_subscriber",
-        "name": "📰 RSS 订阅与定时新闻推送",
-        "author": "Community",
-        "repo_url": "https://github.com/Level6me/antigravity-feishu-bot",
-        "description": "订阅科技/博客 RSS，配合 Cron 定时生成每日要闻总结"
+        "id": "ai_memory",
+        "name": "🧠 AI 长期记忆管理",
+        "author": "Antigravity",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "管理个人的长期对话偏好与全局 AI 记忆库，并在大模型对话前自动注入"
+    },
+    {
+        "id": "notes_manager",
+        "name": "📝 备忘录与随手记",
+        "author": "Antigravity",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "随时快速记录、列出与管理个人的随手记、灵感与工作备忘条目"
+    },
+    {
+        "id": "system_updater",
+        "name": "🔄 系统在线热更新",
+        "author": "Antigravity",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "检查并拉取 Git 云端最新代码版本，一键自动构建热重启机器人引擎"
     }
 ]
 
