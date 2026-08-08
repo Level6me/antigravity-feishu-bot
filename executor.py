@@ -32,8 +32,9 @@ def extract_final_response_from_transcript(transcript_path, initial_size=0):
         if not lines:
             return None
             
-        # 从本轮新增的行中反向查找，仅获取最后一个（即最新的）模型纯文字回复作为最终执行结果
-        for line in reversed(lines):
+        # 收集本轮对话中 Model 输出的所有文本回复（按时间顺序顺序拼接，防止中间大篇幅报告被最后一句简短回复丢弃）
+        turn_lines = []
+        for line in lines:
             line_str = line.strip()
             if not line_str:
                 continue
@@ -41,17 +42,23 @@ def extract_final_response_from_transcript(transcript_path, initial_size=0):
                 data = json.loads(line_str)
             except Exception:
                 continue
-            
-            # 如果遇到用户输入，说明属于当前对话回合的日志结束了
             if data.get("type") == "USER_INPUT":
-                break
-                
+                turn_lines = []
+            else:
+                turn_lines.append(data)
+
+        responses = []
+        for data in turn_lines:
             if data.get("source") == "MODEL" and data.get("type") == "PLANNER_RESPONSE":
-                # 如果没有 tool_calls (为 None 或空列表)，说明是主模型的纯文字回复
-                if not data.get("tool_calls"):
-                    content = data.get("content", "")
-                    if content and content.strip():
-                        return content.strip()
+                content = (data.get("content") or "").strip()
+                if content:
+                    clean_text = extract_final_chinese_response(content)
+                    if clean_text:
+                        if not responses or responses[-1] != clean_text:
+                            responses.append(clean_text)
+
+        if responses:
+            return "\n\n".join(responses)
                         
     except Exception as e:
         log.error(f"Failed to extract final response from transcript: {e}")
