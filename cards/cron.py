@@ -215,3 +215,64 @@ def build_cron_execution_card(task_data, result_text, is_error=False, duration_m
         "elements": elements
     }
     return card
+
+
+def build_cron_created_card(task_data):
+    """当新计划任务创建成功后推送的确认交互卡片"""
+    t_name = task_data.get('name', '计划任务')
+    t_id = task_data.get('id', '')
+    cat = "👤 用户主动任务" if task_data.get('category') == 'user' else "⚙️ 系统后台任务"
+    expr = task_data.get('cron_expr', '')
+    task_type = "标准 Cron 表达式" if task_data.get('task_type') == 'cron' else "倒计时定时器"
+    prompt = task_data.get('prompt', '')
+    
+    next_ts = task_data.get('next_run_at', 0)
+    next_str = datetime.fromtimestamp(next_ts).strftime('%Y-%m-%d %H:%M:%S') if next_ts > 0 else "算中..."
+
+    elements = [
+        {
+            "tag": "markdown",
+            "content": f"**📌 任务基本信息**\n" \
+                       f"• **任务名称**：**{t_name}** (`{t_id}`)\n" \
+                       f"• **任务类别**：{cat} | **规则类型**：{task_type}\n" \
+                       f"• **触发规则**：`{expr}` | **下次预计触发**：`{next_str}`"
+        },
+        {"tag": "hr"},
+        {
+            "tag": "markdown",
+            "content": f"**📝 预设执行 Prompt**\n`{prompt}`\n\n🛡️ *该任务已持久化存入数据库，中途发生重启亦可自动恢复倒计时与触发。*"
+        },
+        {"tag": "hr"},
+        {
+            "tag": "action",
+            "layout": "flow",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "⚡ 立即触发一次"},
+                    "type": "primary",
+                    "value": {"action": "run_cron_now", "task_id": t_id}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "⚙️ 打开任务中心"},
+                    "type": "default",
+                    "value": {"action": "open_cron_panel"}
+                }
+            ]
+        },
+        create_footer()
+    ]
+
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": f"✅ 计划任务创建成功: {t_name}"
+            },
+            "template": "green"
+        },
+        "elements": elements
+    }
+    return card

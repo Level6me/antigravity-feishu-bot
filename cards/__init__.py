@@ -44,3 +44,4 @@ class CardBuilder:
     build_cron_panel_card = staticmethod(cron.build_cron_panel_card)
     build_cron_start_card = staticmethod(cron.build_cron_start_card)
     build_cron_execution_card = staticmethod(cron.build_cron_execution_card)
+    build_cron_created_card = staticmethod(cron.build_cron_created_card)

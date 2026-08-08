@@ -354,12 +354,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 
                 from database import save_cron_task
                 save_cron_task(task_data)
-                reply_text = f"✅ **计划任务创建成功！**\n\n• **任务名称**：**{name}** (`{task_id}`)\n• **触发规则**：`{expr}` ({'倒计时' if task_type == 'delay' else 'Cron'})\n• **执行 Prompt**：`{prompt}`"
-
-            session_data.pop("pending_command", None)
-            await save_session_async(chat_id, session_data)
-            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
-            return True, user_text
+                created_card = CardBuilder.build_cron_created_card(task_data)
+                session_data.pop("pending_command", None)
+                await save_session_async(chat_id, session_data)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, created_card))
+                return True, user_text
             
         elif pending_command == PendingCommand.PROJECT.value:
             new_project = user_text.strip()
