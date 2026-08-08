@@ -375,9 +375,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             async def do_open_cron():
                 from database import get_all_cron_tasks
                 tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
-                session_data = await get_session_async(chat_id)
-                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(chat_id, new_card))
+                from lark_client import send_card_to_chat_sdk
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_card_to_chat_sdk(chat_id, new_card))
             asyncio.run_coroutine_threadsafe(do_open_cron(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在打开计划任务中心..."}})
 

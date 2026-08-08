@@ -17,7 +17,7 @@ from database import (
     get_session_async
 )
 from cards import CardBuilder
-from lark_client import send_interactive_card_sdk
+from lark_client import send_card_to_chat_sdk
 
 
 def parse_delay_seconds(expr: str) -> int:
@@ -117,7 +117,7 @@ class CronEngine:
         # 1. Send Start Interactive Card
         start_card = CardBuilder.build_cron_start_card(task)
         await asyncio.get_running_loop().run_in_executor(
-            None, lambda: send_interactive_card_sdk(chat_id, start_card)
+            None, lambda: send_card_to_chat_sdk(chat_id, start_card)
         )
         
         result_text = ""
@@ -189,7 +189,7 @@ class CronEngine:
         # 4. Send Execution Result Card
         result_card = CardBuilder.build_cron_execution_card(task, result_text, is_error=is_error, duration_ms=duration_ms)
         await asyncio.get_running_loop().run_in_executor(
-            None, lambda: send_interactive_card_sdk(chat_id, result_card)
+            None, lambda: send_card_to_chat_sdk(chat_id, result_card)
         )
         
         self._running_tasks.remove(task_id)
