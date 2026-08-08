@@ -145,8 +145,9 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
             r_desc = rem["description"]
             is_installed_rem = r_id in installed_ids
 
-            btn_text = "已安装" if is_installed_rem else "安装"
-            btn_type = "default" if is_installed_rem else "primary"
+            btn_text = "卸载" if is_installed_rem else "安装"
+            btn_type = "danger" if is_installed_rem else "primary"
+            action_dict = {"action": "uninstall_plugin", "plugin_id": r_id} if is_installed_rem else {"action": "install_github_repo", "repo_url": r_url, "plugin_id": r_id}
 
             elements.append({
                 "tag": "column_set",
@@ -174,7 +175,7 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
                                 "tag": "button",
                                 "text": {"tag": "plain_text", "content": btn_text},
                                 "type": btn_type,
-                                "value": {"action": "install_github_repo", "repo_url": r_url, "plugin_id": r_id}
+                                "value": action_dict
                             }
                         ]
                     }
