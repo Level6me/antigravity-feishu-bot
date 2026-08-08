@@ -163,27 +163,71 @@ def uninstall_plugin(plugin_id: str) -> tuple[bool, str]:
         return False, f"卸载异常: {e}"
 
 
-STORE_INDEX_URL = "https://raw.githubusercontent.com/Level6me/feishu-bot-plugin/main/index.json"
-_store_cache = {"timestamp": 0, "plugins": []}
+DEFAULT_FEATURED_PLUGINS = [
+    {
+        "id": "server_health",
+        "name": "🖥️ 服务器巡检与健康报告",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "监控 CPU 负载、内存率、磁盘余量，发送 /sysinfo 即可查看"
+    },
+    {
+        "id": "cron_scheduler",
+        "name": "⏱️ 计划任务与定时调度",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "基于 Cron 表达式与秒级倒计时的后台定时任务与巡检调度中心"
+    },
+    {
+        "id": "ai_memory",
+        "name": "🧠 AI 长期记忆管理",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "管理个人的长期对话偏好与全局 AI 记忆库，并在大模型对话前自动注入"
+    },
+    {
+        "id": "notes_manager",
+        "name": "📝 备忘录与随手记",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "随时快速记录、列出与管理个人的随手记、灵感与工作备忘条目"
+    },
+    {
+        "id": "system_updater",
+        "name": "🔄 系统在线热更新",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "检查并拉取 Git 云端最新代码版本，一键自动构建热重启机器人引擎"
+    }
+]
+
+_store_cache = {"timestamp": 0, "plugins": DEFAULT_FEATURED_PLUGINS}
 
 
-def fetch_remote_store_plugins() -> list:
-    """Fetch real-time plugin store index.json from GitHub remote repository."""
-    import time
+def fetch_remote_store_plugins(force_refresh: bool = False) -> list:
+    """Fetch plugin list from GitHub plugins/ subdirectories without index.json."""
     import urllib.request
-    now = time.time()
-    if _store_cache["plugins"] and (now - _store_cache["timestamp"] < 60):
+    if not force_refresh and _store_cache["plugins"]:
         return _store_cache["plugins"]
 
+    url = "https://api.github.com/repos/Level6me/feishu-bot-plugin/contents/plugins"
     try:
-        req = urllib.request.Request(STORE_INDEX_URL, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            if isinstance(data, list) and data:
-                _store_cache["timestamp"] = now
-                _store_cache["plugins"] = data
-                return data
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            items = json.loads(resp.read().decode('utf-8'))
+            fetched = []
+            for item in items:
+                if item.get("type") == "dir":
+                    pid = item.get("name")
+                    m_url = f"https://raw.githubusercontent.com/Level6me/feishu-bot-plugin/main/plugins/{pid}/manifest.json"
+                    try:
+                        m_req = urllib.request.Request(m_url, headers={'User-Agent': 'Mozilla/5.0'})
+                        with urllib.request.urlopen(m_req, timeout=4) as m_resp:
+                            manifest = json.loads(m_resp.read().decode('utf-8'))
+                            manifest["repo_url"] = "https://github.com/Level6me/feishu-bot-plugin"
+                            fetched.append(manifest)
+                    except Exception as e:
+                        log.warning(f"[PluginStore] Error loading manifest for {pid}: {e}")
+            if fetched:
+                _store_cache["plugins"] = fetched
+                log.info(f"[PluginStore] Refreshed remote store plugins: {len(fetched)} plugins found.")
+                return fetched
     except Exception as e:
-        log.warning(f"[PluginStore] Failed to fetch remote index.json: {e}")
+        log.warning(f"[PluginStore] Failed to scan GitHub plugins directory: {e}")
 
-    return _store_cache["plugins"]
+    return _store_cache["plugins"] or DEFAULT_FEATURED_PLUGINS

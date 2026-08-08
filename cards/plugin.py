@@ -140,26 +140,26 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
         sources = load_plugin_sources()
         elements.append({
             "tag": "markdown",
-            "content": f"**🏪 GitHub 插件仓库与商店** (已配置 **{len(sources)}** 个插件源)\n" \
-                       f"可以直接安装精选扩展插件，或提交 GitHub 仓库 URL 进行在线克隆安装。"
+            "content": f"**🏪 插件源与商店**\n" \
+                       f"• **当前插件源仓库**：`https://github.com/Level6me/feishu-bot-plugin`"
         })
         elements.append({"tag": "hr"})
 
         from plugin_store import fetch_remote_store_plugins
-        remote_plugins = fetch_remote_store_plugins() or FEATURED_REMOTE_PLUGINS
+        remote_plugins = fetch_remote_store_plugins(force_refresh=False) or FEATURED_REMOTE_PLUGINS
 
         elements.append({
             "tag": "markdown",
-            "content": f"**🌟 精选推荐插件库 (共 {len(remote_plugins)} 个在线扩展)**"
+            "content": f"**🌟 在线插件扩展库 (共 {len(remote_plugins)} 个插件)**"
         })
 
         installed_ids = {p.get("id") for p in plugin_list}
 
         for rem in remote_plugins:
             r_id = rem["id"]
-            r_name = rem["name"]
-            r_url = rem["repo_url"]
-            r_desc = rem["description"]
+            r_name = rem.get("name", r_id)
+            r_url = rem.get("repo_url", "https://github.com/Level6me/feishu-bot-plugin")
+            r_desc = rem.get("description", "")
             is_installed_rem = r_id in installed_ids
 
             btn_text = "卸载" if is_installed_rem else "安装"
@@ -206,8 +206,14 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
             "actions": [
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "➕ 添加 GitHub 插件源"},
+                    "text": {"tag": "plain_text", "content": "🔄 刷新插件列表"},
                     "type": "primary",
+                    "value": {"action": "refresh_store_plugins"}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "➕ 添加 GitHub 插件源"},
+                    "type": "default",
                     "value": {"action": "prompt_add_source"}
                 }
             ]

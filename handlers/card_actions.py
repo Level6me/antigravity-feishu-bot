@@ -459,6 +459,18 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_switch_plugin(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"已切换至 {'已安装插件' if tab=='installed' else '插件源与商店'}"}})
 
+    elif action_value.get("action") == "refresh_store_plugins":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_refresh_store():
+                from plugin_store import fetch_remote_store_plugins
+                remote_list = await asyncio.get_running_loop().run_in_executor(None, lambda: fetch_remote_store_plugins(force_refresh=True))
+                from plugin_manager import plugin_manager
+                p_list = plugin_manager.get_plugin_list()
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="sources")
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_refresh_store(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功刷新 GitHub 插件列表！"}})
+
     elif action_value.get("action") == "update_plugin":
         plugin_id = action_value.get("plugin_id")
         if app_state.main_loop and app_state.main_loop.is_running():
