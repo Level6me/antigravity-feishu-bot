@@ -77,3 +77,13 @@ class BasePlugin:
             except Exception as e:
                 log.error(f"[Plugin:{self.plugin_id}] Failed to load config: {e}")
         return {}
+
+    def get_data_dir(self) -> str:
+        """Return isolated private directory for storing plugin data files."""
+        data_dir = os.path.abspath(os.path.join(self.plugin_dir, "..", "..", "plugin_data", self.plugin_id))
+        os.makedirs(data_dir, exist_ok=True)
+        return data_dir
+
+    def get_data_file(self, filename: str) -> str:
+        """Return absolute path for a private file inside plugin isolated data directory."""
+        return os.path.join(self.get_data_dir(), filename)

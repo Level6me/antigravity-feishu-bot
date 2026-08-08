@@ -97,6 +97,9 @@ def install_plugin_from_github(repo_url: str, custom_id: str = "") -> tuple[bool
             shutil.rmtree(target_dir, ignore_errors=True)
             return False, "克隆成功但仓库根目录下未找到 `manifest.json` 插件规范文件！"
 
+        # Auto-install requirements.txt if present
+        _install_plugin_requirements(target_dir)
+
         return True, f"插件 `{plugin_id}` 从 GitHub 安装成功！"
 
     except subprocess.TimeoutExpired:
@@ -105,6 +108,20 @@ def install_plugin_from_github(repo_url: str, custom_id: str = "") -> tuple[bool
     except Exception as e:
         shutil.rmtree(target_dir, ignore_errors=True)
         return False, f"安装异常: {e}"
+
+
+def _install_plugin_requirements(target_dir: str):
+    """Automatically pip install requirements.txt if present in plugin directory."""
+    req_file = os.path.join(target_dir, "requirements.txt")
+    if os.path.exists(req_file):
+        import sys
+        venv_python = os.path.join(BASE_DIR, "venv", "bin", "python3")
+        python_bin = venv_python if os.path.exists(venv_python) else sys.executable
+        try:
+            log.info(f"[PluginStore] Installing dependencies from {req_file} using {python_bin}")
+            subprocess.run([python_bin, "-m", "pip", "install", "-r", req_file], capture_output=True, timeout=60, check=True)
+        except Exception as e:
+            log.error(f"[PluginStore] Failed to install requirements for {target_dir}: {e}")
 
 
 def update_plugin(plugin_id: str) -> tuple[bool, str]:
@@ -140,6 +157,7 @@ def update_plugin(plugin_id: str) -> tuple[bool, str]:
             )
 
         if res.returncode == 0:
+            _install_plugin_requirements(target_dir)
             return True, f"插件 `{plugin_id}` 代码同步更新完成！\n`{res.stdout.strip()}`"
         else:
             return False, f"更新失败: {res.stderr.strip()}"
