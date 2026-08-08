@@ -250,13 +250,9 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             )
             return True, user_text
     
-    # If the user typed a new slash command, clear any pending state
-    first_word = user_text.split()[0] if user_text.strip() else ""
-    is_slash_cmd = first_word in {
-        "/help", "/model", "/card", "/menu", "/project", "/note", "/notes",
-        "/status", "/context", "/quota", "/clear", "/stop", "/update", "/ping",
-        "/newproj_resolve", "/cron", "/schedule", "/plugin", "/plugins"
-    }
+    # Dynamic slash command detection via plugin manager
+    from plugin_manager import plugin_manager
+    is_slash_cmd = plugin_manager.is_slash_command(first_word) or first_word.startswith("/")
     
     if is_slash_cmd and pending_command:
         session_data.pop("pending_command", None)

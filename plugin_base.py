@@ -41,6 +41,16 @@ class BasePlugin:
         """Hook called periodically by CronEngine if scheduled."""
         pass
 
+    async def on_before_ai(self, user_text: str, chat_id: str, session_data: dict) -> tuple[str, dict]:
+        """Hook called right before user_text is passed to AI model.
+        Can modify user_text or session_data. Return (user_text, session_data)."""
+        return user_text, session_data
+
+    async def on_after_ai(self, ai_response_text: str, chat_id: str, session_data: dict) -> str:
+        """Hook called right after AI returns response text before sending to Feishu.
+        Can post-process or modify ai_response_text."""
+        return ai_response_text
+
     def send_card(self, chat_id: str, card_content: dict):
         """Helper to send an interactive card to chat."""
         return send_card_to_chat_sdk(chat_id, card_content)
