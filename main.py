@@ -128,6 +128,10 @@ async def main():
     # Start background GC task
     asyncio.create_task(garbage_collector())
 
+    # Start background Cron scheduler engine
+    from cron_engine import cron_engine
+    cron_engine.start()
+
     # Restore queued tasks persisted across a previous process lifetime
     await restore_pending_tasks()
 

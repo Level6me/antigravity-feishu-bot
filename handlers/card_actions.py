@@ -358,6 +358,86 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"正在载入第 {target_page} 页项目..."}})
 
+    elif action_value.get("action") == "switch_cron_tab":
+        tab = action_value.get("tab", "user")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_switch_cron():
+                from database import get_all_cron_tasks
+                tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
+                session_data = await get_session_async(chat_id)
+                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab=tab, session_data=session_data)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_switch_cron(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"已切换至 {'用户' if tab=='user' else '系统'} 任务面板"}})
+
+    elif action_value.get("action") == "open_cron_panel":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_open_cron():
+                from database import get_all_cron_tasks
+                tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
+                session_data = await get_session_async(chat_id)
+                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(chat_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_open_cron(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在打开计划任务中心..."}})
+
+    elif action_value.get("action") == "open_cron_create":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_open_create():
+                from commands import PendingCommand
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = PendingCommand.CRON_ADD.value
+                await save_session_async(chat_id, session_data)
+                
+                msg = "⏱️ **新建计划任务**\n\n请直接在此回复 3 段信息，中间用竖线 `|` 隔开：\n" \
+                      "`任务名称 | 触发规则(Cron表达式/秒数) | 执行 Prompt`\n\n" \
+                      "📌 **示例 1 (标准 Cron 每天 09:00 执行)**：\n" \
+                      "`每日总结 | 0 9 * * * | 检查当前工作区的 Git 提交并生成日报`\n\n" \
+                      "📌 **示例 2 (倒计时 10 分钟后一次性执行)**：\n" \
+                      "`磁盘压测汇报 | 600s | 提取 /tmp/iscsi_stab_test.log 并分析报告`"
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+            asyncio.run_coroutine_threadsafe(do_open_create(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请发送格式为 '名称 | 规则 | Prompt' 的任务文本"}})
+
+    elif action_value.get("action") == "toggle_cron_active":
+        task_id = action_value.get("task_id")
+        is_active = bool(action_value.get("is_active", True))
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_toggle_cron():
+                from database import update_cron_task_status, get_all_cron_tasks
+                await asyncio.get_running_loop().run_in_executor(None, lambda: update_cron_task_status(task_id, is_active))
+                tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
+                session_data = await get_session_async(chat_id)
+                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_toggle_cron(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"任务已{'启用' if is_active else '暂停'}"}})
+
+    elif action_value.get("action") == "delete_cron_task":
+        task_id = action_value.get("task_id")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_delete_cron():
+                from database import delete_cron_task, get_all_cron_tasks
+                await asyncio.get_running_loop().run_in_executor(None, lambda: delete_cron_task(task_id))
+                tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
+                session_data = await get_session_async(chat_id)
+                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_delete_cron(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "计划任务已物理删除！"}})
+
+    elif action_value.get("action") == "run_cron_now":
+        task_id = action_value.get("task_id")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_run_now():
+                from database import get_cron_task
+                task = await asyncio.get_running_loop().run_in_executor(None, lambda: get_cron_task(task_id))
+                if task:
+                    from cron_engine import cron_engine
+                    asyncio.create_task(cron_engine._run_task_wrapper(task))
+            asyncio.run_coroutine_threadsafe(do_run_now(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已触发即刻运行计划任务！"}})
+
     resp = handle_auth_card_action(action_value, chat_id, card_message_id)
     if resp is not None:
         return resp
