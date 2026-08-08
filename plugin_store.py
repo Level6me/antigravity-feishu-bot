@@ -161,3 +161,29 @@ def uninstall_plugin(plugin_id: str) -> tuple[bool, str]:
         return True, f"插件 `{plugin_id}` 已成功从物理磁盘卸载移除！"
     except Exception as e:
         return False, f"卸载异常: {e}"
+
+
+STORE_INDEX_URL = "https://raw.githubusercontent.com/Level6me/feishu-bot-plugin/main/index.json"
+_store_cache = {"timestamp": 0, "plugins": []}
+
+
+def fetch_remote_store_plugins() -> list:
+    """Fetch real-time plugin store index.json from GitHub remote repository."""
+    import time
+    import urllib.request
+    now = time.time()
+    if _store_cache["plugins"] and (now - _store_cache["timestamp"] < 60):
+        return _store_cache["plugins"]
+
+    try:
+        req = urllib.request.Request(STORE_INDEX_URL, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            if isinstance(data, list) and data:
+                _store_cache["timestamp"] = now
+                _store_cache["plugins"] = data
+                return data
+    except Exception as e:
+        log.warning(f"[PluginStore] Failed to fetch remote index.json: {e}")
+
+    return _store_cache["plugins"]
