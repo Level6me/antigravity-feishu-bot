@@ -259,6 +259,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         session_data.pop("pending_command", None)
         await save_session_async(chat_id, session_data)
         pending_command = None
+
+    # Dispatch command to loaded plugins first
+    handled_by_plugin, override_txt = await plugin_manager.dispatch_command(user_text, message_id, chat_id, session_data)
+    if handled_by_plugin:
+        return True, override_txt
         
     if not is_slash_cmd and pending_command:
         if pending_command == PendingCommand.CUSTOM_WORKSPACE_ROOT.value:

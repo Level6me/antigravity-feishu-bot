@@ -1,0 +1,9 @@
+{
+  "id": "cron_scheduler",
+  "name": "⏱️ 计划任务与定时调度插件",
+  "version": "2.0.0",
+  "author": "Antigravity",
+  "description": "基于 Cron 表达式与秒级倒计时的后台定时任务与巡检调度中心",
+  "commands": ["/cron", "/schedule"],
+  "enabled": true
+}
