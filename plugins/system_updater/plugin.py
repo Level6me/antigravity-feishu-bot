@@ -42,15 +42,19 @@ class SystemUpdaterPlugin(BasePlugin):
                     else:
                         raise e
 
+                from commands import get_version_string
                 local_hash = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5, env=custom_env, cwd=BASE_DIR).stdout.strip()
                 remote_hash = subprocess.run(["git", "rev-parse", "--short", remote_ref], capture_output=True, text=True, timeout=5, env=custom_env, cwd=BASE_DIR).stdout.strip()
 
+                local_version_str = get_version_string("HEAD")
+                remote_version_str = get_version_string(remote_ref)
+
                 if local_hash == remote_hash:
-                    card = CardBuilder.build_no_update_card(local_hash)
+                    card = CardBuilder.build_no_update_card(local_version_str)
                 else:
                     changelog_cmd = ["git", "log", f"{local_hash}..{remote_ref}", "--pretty=format:- %s"]
                     changelog = subprocess.run(changelog_cmd, capture_output=True, text=True, timeout=10, cwd=BASE_DIR).stdout.strip() or "- 未知更新"
-                    card = CardBuilder.build_update_card(local_hash, remote_hash, changelog)
+                    card = CardBuilder.build_update_card(local_version_str, remote_version_str, changelog)
 
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card))
             except Exception as ex:
