@@ -113,6 +113,39 @@ def build_download_indicator(file_name, media_type="文件"):
     }
 
 
+def build_streaming_indicator(partial_text, tool_action=None, user_text="", think_seconds=0):
+    title, _ = _guess_intent(user_text)
+    header_title = f"⚡ 打字机生成中 | {title}"
+    
+    status_bar = f"*( ⏱️ 已思考 {think_seconds}s"
+    if tool_action:
+        status_bar += f" | 🛠️ {tool_action}"
+    status_bar += " )*\n\n---\n\n"
+    
+    # Trim to last 3500 chars if ultra-long to keep card patch within safe payload limit
+    max_streaming_chars = 3500
+    display_text = partial_text
+    if len(display_text) > max_streaming_chars:
+        display_text = "... (前文已自动隐藏) ...\n\n" + display_text[-max_streaming_chars:]
+        
+    full_content = status_bar + display_text + " ▌"
+    
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"content": header_title, "tag": "plain_text"}
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": full_content
+            },
+            create_footer()
+        ]
+    }
+
+
 def build_stall_warning_card(user_prompt, think_seconds, stall_seconds):
     mins = stall_seconds // 60
     return {
