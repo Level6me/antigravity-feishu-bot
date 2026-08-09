@@ -322,11 +322,13 @@ async def execute_antigravity(
     last_patch_time = time.time()
     current_patch_interval = 1.0
     process_start_time = time.time()
-    # 活性检测：追踪 stdout 输出增长 + 工具动作变化
-    # 如果两者都长时间无变化，说明子进程内部卡死（例如 antigravity 自身死锁），提前触发超时
+    # 活性检测：追踪 stdout + 日志文件增长 + transcript.jsonl 增量 Token + 工具动作变化
+    # 如果连续 STALL_TIMEOUT 秒无任何 Token 或日志写入，说明进程已死锁/挂起，自动强行终止
     last_progress_time = process_start_time
     last_stdout_len = 0
-    STALL_TIMEOUT = 300  # 5 分钟无进展视为卡死
+    last_log_size = 0
+    last_transcript_size = 0
+    STALL_TIMEOUT = 180  # 连续 3 分钟 0 Token / 0 日志增长判定为卡死自动终止
     
     try:
         while process.returncode is None:
@@ -339,21 +341,30 @@ async def execute_antigravity(
             # 实时从 transcript.jsonl 中获取最新的工具执行动作以更新状态指示卡片
             action = await loop.run_in_executor(None, fetch_current_action)
             
-            # 活性检测：stdout 有新增数据 或 工具动作发生变化，都算"进展"
+            # 检测日志文件与 transcript 文件大小变化
+            current_log_size = os.path.getsize(log_file_path) if os.path.exists(log_file_path) else 0
+            t_path = target_transcript_path or get_latest_transcript_file()
+            current_transcript_size = os.path.getsize(t_path) if (t_path and os.path.exists(t_path)) else 0
             current_stdout_len = len(accumulated_text)
-            if current_stdout_len > last_stdout_len or (action and action != last_tool_action):
+            
+            # 活性检测：stdout / 日志 / transcript 有任何字节写入 或 工具动作变化，都算"活跃 Token 推进"
+            if (current_stdout_len > last_stdout_len or 
+                current_log_size > last_log_size or 
+                current_transcript_size > last_transcript_size or 
+                (action and action != last_tool_action)):
                 last_progress_time = time.time()
                 last_stdout_len = current_stdout_len
+                last_log_size = current_log_size
+                last_transcript_size = current_transcript_size
                 if action:
                     last_tool_action = action
             
             think_seconds = int(time.time() - process_start_time)
             stall_seconds = int(time.time() - last_progress_time)
             
-            # 活性超时：进程已运行至少 STALL_TIMEOUT 秒 且 连续 STALL_TIMEOUT 秒无进展
-            # 第一个条件避免误杀刚启动、正在做长规划的任务
+            # 活性超时：连续 STALL_TIMEOUT 秒 0 Token/日志增长
             if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
-                log.error(f"[Executor] Process stalled (no stdout/tool progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
+                log.error(f"[Executor] Process stalled (no Token/log progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
                 import signal
                 try:
                     pgid = os.getpgid(process.pid)
@@ -361,9 +372,8 @@ async def execute_antigravity(
                 except Exception as ex:
                     log.error(f"Failed to kill stalled process: {ex}")
                 stderr_text = (
-                    f"⚠️ 任务无响应已被强制终止（已运行 {think_seconds // 60} 分钟，"
-                    f"最后 {STALL_TIMEOUT // 60} 分钟无任何输出或工具动作变化）。\n"
-                    "可能原因：Agent 内部死锁、底层命令静默挂起、或模型推理长时间无输出。"
+                    f"⚠️ 任务已检测到卡死并自动终止（连续 {STALL_TIMEOUT // 60} 分钟没有任何新 Token 或日志写入）。\n"
+                    "可能原因：底层模型 API 流式响应断连、Shell 命令静默阻塞挂起或 Agent 内部死锁。"
                 )
                 break
             
