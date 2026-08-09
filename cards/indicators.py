@@ -111,3 +111,79 @@ def build_download_indicator(file_name, media_type="文件"):
             create_footer()
         ]
     }
+
+
+def build_stall_warning_card(user_prompt, think_seconds, stall_seconds):
+    mins = stall_seconds // 60
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange",
+            "title": {"content": "⏱️ AI 处于深度推理等待中", "tag": "plain_text"}
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": f"模型已思考 **{think_seconds} 秒**（静默生成等待已达 **{mins} 分钟**）。\n\n*模型 API 正在云端进行思维链推理或长数据检索，后台守护机制正常工作中，已为您自动延长等待时间。*"
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🟢 继续静默等待"},
+                        "type": "primary",
+                        "value": {"action": "user_choice", "choice": "继续等待", "label": "继续静默等待"}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🛑 叫停任务"},
+                        "type": "danger",
+                        "value": {"action": "user_choice", "choice": "/stop", "label": "叫停任务"}
+                    }
+                ]
+            },
+            create_footer()
+        ]
+    }
+
+
+def build_stall_error_card(user_prompt, think_seconds, stall_seconds):
+    clean_prompt = user_prompt[:80] if user_prompt else "重试上条请求"
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "red",
+            "title": {"content": "⚠️ 任务无响应已终止", "tag": "plain_text"}
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": f"任务已连续 **{stall_seconds // 60} 分钟** 无任何 Token、CPU 计算或日志写入，已判定为卡死并自动终止。\n\n**建议操作选项**："
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🔄 重新发送此请求"},
+                        "type": "primary",
+                        "value": {"action": "user_choice", "choice": clean_prompt, "label": "重新发送请求"}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "⚙️ 切换更快的模型"},
+                        "type": "default",
+                        "value": {"action": "user_choice", "choice": "/model", "label": "打开模型切换面板"}
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🧹 清空上下文重试"},
+                        "type": "default",
+                        "value": {"action": "user_choice", "choice": "/clear", "label": "清空上下文"}
+                    }
+                ]
+            },
+            create_footer()
+        ]
+    }

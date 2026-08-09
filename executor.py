@@ -18,6 +18,19 @@ from utils.auth import SCOPE_PROJECT, allow_execution, has_scope, is_admin
 # 增量读取状态：transcript 路径 -> [offset, size]
 _transcript_read_state = {}
 
+def _is_process_cpu_active(pid: int) -> bool:
+    if not pid:
+        return False
+    try:
+        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "%cpu"], text=True, timeout=2).strip()
+        lines = [l.strip() for l in out.split("\n") if l.strip()]
+        if len(lines) >= 2:
+            cpu_val = float(lines[1])
+            return cpu_val > 0.05
+    except Exception:
+        pass
+    return False
+
 def extract_final_response_from_transcript(transcript_path, initial_size=0):
     if not transcript_path or not os.path.exists(transcript_path):
         return None
@@ -211,6 +224,8 @@ async def execute_antigravity(
     custom_env["GIT_TERMINAL_PROMPT"] = "0"
     custom_env["DEBIAN_FRONTEND"] = "noninteractive"
     custom_env["GIT_ASKPASS"] = "echo"
+    custom_env["PYTHONUNBUFFERED"] = "1"
+    custom_env["STDOUT_LINE_BUFFERED"] = "1"
 
     process = await asyncio.create_subprocess_exec(
         *cmd_args,
@@ -322,13 +337,14 @@ async def execute_antigravity(
     last_patch_time = time.time()
     current_patch_interval = 1.0
     process_start_time = time.time()
-    # 活性检测：追踪 stdout + 日志文件增长 + transcript.jsonl 增量 Token + 工具动作变化
-    # 如果连续 STALL_TIMEOUT 秒无任何 Token 或日志写入，说明进程已死锁/挂起，自动强行终止
+    # 活性检测：追踪 stdout + 日志文件增长 + transcript.jsonl 增量 Token + CPU 活性 + 工具动作变化
+    # 如果连续 STALL_TIMEOUT 秒无任何 Token、CPU 计算或日志写入，说明进程真正挂死，进行交互式回收
     last_progress_time = process_start_time
     last_stdout_len = 0
     last_log_size = 0
     last_transcript_size = 0
-    STALL_TIMEOUT = 180  # 连续 3 分钟 0 Token / 0 日志增长判定为卡死自动终止
+    STALL_TIMEOUT = 600  # 连续 10 分钟 0 Token / 0 CPU / 0 日志增长判定为真卡死终止
+    QUIET_WARNING_THRESHOLD = 180  # 连续 3 分钟无输出时触发带有交互按钮的预警卡片
     
     try:
         while process.returncode is None:
@@ -347,10 +363,16 @@ async def execute_antigravity(
             current_transcript_size = os.path.getsize(t_path) if (t_path and os.path.exists(t_path)) else 0
             current_stdout_len = len(accumulated_text)
             
-            # 活性检测：stdout / 日志 / transcript 有任何字节写入 或 工具动作变化，都算"活跃 Token 推进"
+            # 轮询 CPU 活性
+            cpu_active = False
+            if process.pid:
+                cpu_active = await loop.run_in_executor(None, lambda: _is_process_cpu_active(process.pid))
+            
+            # 活性检测：stdout / 日志 / transcript 有任何字节写入、工具动作变化 或 CPU 正在计算，都算"活跃推进"
             if (current_stdout_len > last_stdout_len or 
                 current_log_size > last_log_size or 
                 current_transcript_size > last_transcript_size or 
+                cpu_active or
                 (action and action != last_tool_action)):
                 last_progress_time = time.time()
                 last_stdout_len = current_stdout_len
@@ -362,19 +384,24 @@ async def execute_antigravity(
             think_seconds = int(time.time() - process_start_time)
             stall_seconds = int(time.time() - last_progress_time)
             
-            # 活性超时：连续 STALL_TIMEOUT 秒 0 Token/日志增长
+            # 活性超时：连续 10 分钟无 Token、无 CPU、无日志增长，自动安全回收并推带有重试按钮的卡片
             if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
-                log.error(f"[Executor] Process stalled (no Token/log progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
+                log.error(f"[Executor] Process stalled (no Token/log/CPU progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
                 import signal
                 try:
                     pgid = os.getpgid(process.pid)
                     os.killpg(pgid, signal.SIGKILL)
                 except Exception as ex:
                     log.error(f"Failed to kill stalled process: {ex}")
-                stderr_text = (
-                    f"⚠️ 任务已检测到卡死并自动终止（连续 {STALL_TIMEOUT // 60} 分钟没有任何新 Token 或日志写入）。\n"
-                    "可能原因：底层模型 API 流式响应断连、Shell 命令静默阻塞挂起或 Agent 内部死锁。"
-                )
+                
+                # 发送带有交互操作按钮的最终卡片
+                error_card = CardBuilder.build_stall_error_card(user_text, think_seconds, stall_seconds)
+                if bot_reply_msg_id:
+                    await _feishu_call(
+                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, error_card),
+                        label="stall error card patch"
+                    )
+                stderr_text = f"⚠️ 任务已检测到卡死并自动终止（连续 {STALL_TIMEOUT // 60} 分钟没有任何新 Token 或日志写入）。"
                 break
             
             # 全局超时强杀防护 (12小时超长任务防护上限)
@@ -389,10 +416,16 @@ async def execute_antigravity(
                 stderr_text = "⚠️ 执行超时 (12小时)：后台超大型任务已达到系统设定的 12 小时最高保护上限。"
                 break
 
-            display_action = action or last_tool_action
-            if display_action:
-                indicator_card = CardBuilder.build_tool_indicator(display_action, user_text, downloaded_file_name, download_success, think_seconds)
+            # 渲染进度或预警卡片
+            if stall_seconds >= QUIET_WARNING_THRESHOLD:
+                # 超过 3 分钟未更新输出时，推送带有 [继续等待] 与 [叫停任务] 按钮的交互卡片
+                indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
             else:
+                display_action = action or last_tool_action
+                if display_action:
+                    indicator_card = CardBuilder.build_tool_indicator(display_action, user_text, downloaded_file_name, download_success, think_seconds)
+                else:
+                    indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
                 indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
             
             if time.time() - last_patch_time >= current_patch_interval:
