@@ -159,7 +159,7 @@ async def _process_single_task(chat_id, task):
             final_prompt = f"[System Context: Please strictly follow the user's permanent preferences below:]\n{memory_block}\n\n[User's Message:]\n{user_text}"
             
     # Delegate execution to executor
-    # 2000s 总超时兜底：保证即使 executor 内部所有超时机制都失效，协程也能在此返回
+    # 43200s (12小时) 总超时兜底：支持长达数小时至十几小时的超大型自动化工程任务
     # 超时时 CancelledError 会进入 execute_antigravity，其 finally 块仍会执行清理
     is_error = False
     try:
@@ -169,11 +169,11 @@ async def _process_single_task(chat_id, task):
                 is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
                 download_success, running_processes
             ),
-            timeout=2000.0
+            timeout=43200.0
         )
     except asyncio.TimeoutError:
         from logger import log
-        log.error(f"[Pipeline] execute_antigravity hard timeout (2000s) for chat {chat_id}")
+        log.error(f"[Pipeline] execute_antigravity hard timeout (43200s / 12h) for chat {chat_id}")
         is_error = True
     except Exception as e:
         from logger import log
