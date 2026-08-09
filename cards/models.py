@@ -6,10 +6,34 @@ from datetime import datetime
 
 from cards.common import create_footer
 
+def _parse_model_entry(entry_str):
+    entry_str = entry_str.strip()
+    if not entry_str:
+        return "", ""
+        
+    parts = entry_str.split(maxsplit=1)
+    if len(parts) == 2:
+        model_id, label = parts[0].strip(), parts[1].strip()
+        if model_id.islower() or "-" in model_id:
+            return model_id, label
+            
+    match = re.match(r'^([a-z0-9\.\_\-]+?)([A-Z].*)$', entry_str)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+        
+    return entry_str, entry_str
+
+
 def build_model_panel(available_models, current_model):
+    parsed_models = []
+    for item in available_models[:12]:
+        m_id, m_label = _parse_model_entry(item)
+        if m_id:
+            parsed_models.append((m_id, m_label))
+
     model_groups = {}
-    for model_name in available_models[:12]:
-        lower = model_name.lower()
+    for m_id, m_label in parsed_models:
+        lower = m_id.lower()
         if "gemini" in lower:
             group = "gemini"
         elif "claude" in lower:
@@ -18,7 +42,7 @@ def build_model_panel(available_models, current_model):
             group = "gpt"
         else:
             group = "other"
-        model_groups.setdefault(group, []).append(model_name)
+        model_groups.setdefault(group, []).append((m_id, m_label))
     
     group_meta = {
         "gemini": {"icon": "💎", "title": "Gemini 系列", "color": "blue"},
@@ -47,15 +71,15 @@ def build_model_panel(available_models, current_model):
         })
         
         actions = []
-        for model_name in models:
-            is_current = (model_name == current_model)
-            display = f"✅ {model_name}" if is_current else model_name
+        for m_id, m_label in models:
+            is_current = (m_id == current_model or m_label == current_model or m_id.lower() == current_model.lower())
+            display = f"✅ {m_label}" if is_current else m_label
             btn_type = "primary" if is_current else "default"
             actions.append({
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": display},
                 "type": btn_type,
-                "value": {"action": "switch_model", "model": model_name}
+                "value": {"action": "switch_model", "model": m_id}
             })
         
         elements.append({
