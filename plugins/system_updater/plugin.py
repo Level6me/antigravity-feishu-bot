@@ -107,11 +107,17 @@ class SystemUpdaterPlugin(BasePlugin):
                         pip_cmd = [pip_bin, "install", "-r", os.path.join(BASE_DIR, "requirements.txt")]
                         subprocess.run(pip_cmd, capture_output=True, text=True, timeout=60, cwd=BASE_DIR)
                     
-                    # Save pending update notice before restarting
+                    # Save pending update notice before restarting (both DB and file for max reliability)
                     await asyncio.get_running_loop().run_in_executor(
                         None, 
                         lambda: save_pending_update_notice(chat_id, message_id, old_version)
                     )
+                    pending_file = os.path.join(BASE_DIR, ".update_pending.json")
+                    try:
+                        with open(pending_file, "w") as f:
+                            json.dump({"chat_id": chat_id, "message_id": message_id, "old_version": old_version}, f)
+                    except Exception as ex:
+                        log.error(f"Failed to write .update_pending.json: {ex}")
 
                     reply_text = "🔄 系统升级就绪，正在触发自启进程，预计 3 秒后重新上线..." + conflict_hint
                     await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))

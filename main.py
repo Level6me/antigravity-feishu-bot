@@ -108,22 +108,57 @@ async def main():
     app_state.main_loop = asyncio.get_running_loop()
     log.info("Starting Lark WS Client...")
 
+async def main():
+    app_state.main_loop = asyncio.get_running_loop()
+    log.info("Starting Lark WS Client...")
+
     # Send post-update notification if applicable
-    pending_file = os.path.join(BASE_DIR, ".update_pending.json")
-    if os.path.exists(pending_file):
-        try:
-            with open(pending_file, "r") as f:
-                data = json.load(f)
-            os.remove(pending_file)
-            msg_id = data.get("message_id")
-            if msg_id:
-                from commands import get_version_string
-                v_str = get_version_string("HEAD")
-                text = f"✨ 升级完毕！系统已成功重新上线。\n当前运行版本：{v_str}"
-                asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(msg_id, text))
-                log.info(f"Sent post-update notification to {msg_id}")
-        except Exception as e:
-            log.error(f"Failed to process post-update notification: {e}")
+    try:
+        from database import get_and_clear_pending_update_notice
+        from commands import get_version_string
+        from cards.common import create_footer
+        from lark_client import send_interactive_card_sdk, send_reply_sdk
+        
+        data = None
+        pending_file = os.path.join(BASE_DIR, ".update_pending.json")
+        if os.path.exists(pending_file):
+            try:
+                with open(pending_file, "r") as f:
+                    data = json.load(f)
+                os.remove(pending_file)
+            except Exception as e:
+                log.error(f"Error reading .update_pending.json: {e}")
+
+        if not data:
+            data = await asyncio.get_running_loop().run_in_executor(None, get_and_clear_pending_update_notice)
+
+        if data:
+            message_id = data.get("message_id")
+            old_ver = data.get("old_version", "")
+            if message_id:
+                new_ver = await asyncio.get_running_loop().run_in_executor(None, lambda: get_version_string("HEAD"))
+                ver_info = f"从 ~`{old_ver}`~ 升级至 **`{new_ver}`**" if old_ver else f"**`{new_ver}`**"
+                card = {
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "template": "green",
+                        "title": {"content": "🎉 系统升级成功！", "tag": "plain_text"}
+                    },
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": f"✅ **核心代码与服务组件已成功热升级！**\n\n> 🔖 **当前版本**：{ver_info}\n> 🔄 **运行状态**：后台 PM2 进程已完成自动重启与加载。\n\n系统所有功能与指令插件均已恢复，欢迎继续使用！"
+                        },
+                        create_footer()
+                    ]
+                }
+                res = await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card))
+                if not res:
+                    fallback_text = f"🎉 系统升级成功！当前运行版本：{new_ver}"
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, fallback_text))
+                log.info(f"[PostUpdate] Notification sent to message_id {message_id}")
+    except Exception as e:
+        log.error(f"Failed to process post-update notification: {e}")
 
     # Register system commands & load plugins
     from plugin_manager import plugin_manager
