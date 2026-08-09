@@ -128,7 +128,7 @@ ANTIGRAVITY_BIN = find_antigravity_bin()
 
 # --- Versioning Configuration ---
 BASE_VERSION_PREFIX = "v2.0."
-VERSION_START_COMMIT = 235  # Used to calculate patch number (commit_count - start_commit)
+VERSION_START_COMMIT = 247  # Used to calculate patch number (commit_count - start_commit)
 
 # --- Whitelist & Permission Configuration ---
 ALLOWED_USERS = [uid.strip() for uid in settings.allowed_users.split(",") if uid.strip()]
