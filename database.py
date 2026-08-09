@@ -602,3 +602,26 @@ def get_cron_logs(task_id=None, limit=10):
     finally:
         conn.close()
 
+
+def save_pending_update_notice(chat_id, message_id, old_version=""):
+    data = json.dumps({"chat_id": chat_id, "message_id": message_id, "old_version": old_version, "timestamp": time.time()})
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR REPLACE INTO bot_meta (key, value) VALUES (?, ?)', ('pending_update_notice', data))
+        conn.commit()
+
+
+def get_and_clear_pending_update_notice():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT value FROM bot_meta WHERE key = ?', ('pending_update_notice',))
+        row = cursor.fetchone()
+        if row:
+            cursor.execute('DELETE FROM bot_meta WHERE key = ?', ('pending_update_notice',))
+            conn.commit()
+            try:
+                return json.loads(row['value'])
+            except Exception:
+                pass
+    return None
+

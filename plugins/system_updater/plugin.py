@@ -20,12 +20,60 @@ class SystemUpdaterPlugin(BasePlugin):
 
     def initialize(self):
         log.info(f"[Plugin:{self.plugin_id}] System Updater plugin initialized.")
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._check_and_notify_update_completed())
+        except Exception as e:
+            log.error(f"[SystemUpdater] Failed to schedule post-update notification check: {e}")
+
+    async def _check_and_notify_update_completed(self):
+        await asyncio.sleep(2.0)
+        try:
+            from database import get_and_clear_pending_update_notice
+            from commands import get_version_string
+            from cards.common import create_footer
+            from lark_client import send_interactive_card_sdk
+            
+            notice_data = await asyncio.get_running_loop().run_in_executor(None, get_and_clear_pending_update_notice)
+            if notice_data:
+                chat_id = notice_data.get("chat_id")
+                message_id = notice_data.get("message_id")
+                old_ver = notice_data.get("old_version", "")
+                
+                new_ver = await asyncio.get_running_loop().run_in_executor(None, lambda: get_version_string("HEAD"))
+                
+                ver_info = f"从 ~`{old_ver}`~ 升级至 **`{new_ver}`**" if old_ver else f"**`{new_ver}`**"
+                card = {
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "template": "green",
+                        "title": {"content": "🎉 系统升级成功！", "tag": "plain_text"}
+                    },
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": f"✅ **核心代码与服务组件已成功热升级！**\n\n> 🔖 **当前版本**：{ver_info}\n> 🔄 **运行状态**：后台 PM2 进程已完成自动重启与加载。\n\n系统所有功能与指令插件均已恢复，欢迎继续使用！"
+                        },
+                        create_footer()
+                    ]
+                }
+                if message_id:
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card))
+                log.info(f"[SystemUpdater] Post-update notification pushed for chat {chat_id}")
+        except Exception as e:
+            log.error(f"[SystemUpdater] Failed to process post-update notification: {e}")
 
     async def on_command(self, command: str, args: str, chat_id: str, message_id: str, session_data: dict) -> bool:
         if command.lower() == "/update":
             clean_args = (args or "").strip().lower()
             
             if clean_args == "confirm":
+                from commands import get_version_string
+                from database import save_pending_update_notice
+                
+                old_version = await asyncio.get_running_loop().run_in_executor(None, lambda: get_version_string("HEAD"))
+                
                 reply_text = "⬇️ 正在执行核心系统升级，请勿中断..."
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
                 
@@ -59,6 +107,12 @@ class SystemUpdaterPlugin(BasePlugin):
                         pip_cmd = [pip_bin, "install", "-r", os.path.join(BASE_DIR, "requirements.txt")]
                         subprocess.run(pip_cmd, capture_output=True, text=True, timeout=60, cwd=BASE_DIR)
                     
+                    # Save pending update notice before restarting
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, 
+                        lambda: save_pending_update_notice(chat_id, message_id, old_version)
+                    )
+
                     reply_text = "🔄 系统升级就绪，正在触发自启进程，预计 3 秒后重新上线..." + conflict_hint
                     await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
                     
