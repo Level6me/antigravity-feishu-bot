@@ -31,6 +31,33 @@ def _is_process_cpu_active(pid: int) -> bool:
         pass
     return False
 
+async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, think_seconds, feishu_call_fn):
+    """Smoothly stream full_text onto Feishu interactive card with ▌ cursor."""
+    if not bot_reply_msg_id or not full_text or len(full_text) < 40:
+        return
+        
+    chunk_size = 35
+    total_len = len(full_text)
+    
+    # Cap typewriter steps to at most 25 steps (~5s max)
+    if total_len / chunk_size > 25:
+        chunk_size = int(total_len / 25) + 1
+        
+    current_len = 0
+    while current_len < total_len:
+        current_len += chunk_size
+        if current_len > total_len:
+            current_len = total_len
+            
+        typed_part = full_text[:current_len]
+        card = CardBuilder.build_streaming_indicator(typed_part, tool_action=None, user_text=user_text, think_seconds=think_seconds)
+        
+        await feishu_call_fn(
+            lambda: patch_interactive_card_sdk(bot_reply_msg_id, card),
+            label="typewriter patch"
+        )
+        await asyncio.sleep(0.2)
+
 def extract_final_response_from_transcript(transcript_path, initial_size=0):
     if not transcript_path or not os.path.exists(transcript_path):
         return None
@@ -598,6 +625,12 @@ async def execute_antigravity(
         if os.path.exists(log_file_path):
             await _sync_conversation_id_from_log(log_file_path)
     
+        if not is_error and bot_reply_msg_id and reply_text:
+            try:
+                await _stream_typewriter_to_feishu(bot_reply_msg_id, reply_text, user_text, think_seconds, _feishu_call)
+            except Exception as e:
+                log.error(f"[Executor] Typewriter streaming failed: {e}")
+
         final_card = CardBuilder.build_ai_response(
             reply_text, 
             choice_card_data=choice_card_data,
