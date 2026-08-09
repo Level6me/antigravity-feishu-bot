@@ -31,19 +31,24 @@ def _is_process_cpu_active(pid: int) -> bool:
         pass
     return False
 
-async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, think_seconds, feishu_call_fn):
-    """Smoothly stream full_text onto Feishu interactive card with ▌ cursor."""
-    if not bot_reply_msg_id or not full_text or len(full_text) < 40:
+async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, think_seconds, feishu_call_fn, start_index=0):
+    """Smoothly stream full_text onto Feishu interactive card starting from start_index with ▌ cursor."""
+    if not bot_reply_msg_id or not full_text:
+        return
+        
+    total_len = len(full_text)
+    if start_index >= total_len:
+        return
+        
+    remaining = total_len - start_index
+    if remaining < 20:
         return
         
     chunk_size = 35
-    total_len = len(full_text)
-    
-    # Cap typewriter steps to at most 25 steps (~5s max)
-    if total_len / chunk_size > 25:
-        chunk_size = int(total_len / 25) + 1
+    if remaining / chunk_size > 20:
+        chunk_size = int(remaining / 20) + 1
         
-    current_len = 0
+    current_len = start_index
     while current_len < total_len:
         current_len += chunk_size
         if current_len > total_len:
@@ -361,6 +366,7 @@ async def execute_antigravity(
     
     last_update_text = ""
     last_tool_action = ""
+    last_streamed_length = 0
     last_patch_time = time.time()
     current_patch_interval = 1.0
     process_start_time = time.time()
@@ -456,9 +462,12 @@ async def execute_antigravity(
                 # 超过 3 分钟未更新输出时，推送带有 [继续等待] 与 [叫停任务] 按钮的交互卡片
                 indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
             elif partial_text and len(partial_text.strip()) > 0:
-                # 捕获到增量文本，渲染带有 ▌ 游标的全流式打字机卡片
-                indicator_card = CardBuilder.build_streaming_indicator(partial_text, action or last_tool_action, user_text, think_seconds)
-                current_patch_interval = 0.5
+                target_len = len(partial_text)
+                if last_streamed_length < target_len:
+                    last_streamed_length = min(target_len, last_streamed_length + 40)
+                display_partial = partial_text[:last_streamed_length]
+                indicator_card = CardBuilder.build_streaming_indicator(display_partial, action or last_tool_action, user_text, think_seconds)
+                current_patch_interval = 0.3
             else:
                 display_action = action or last_tool_action
                 if display_action:
@@ -627,7 +636,10 @@ async def execute_antigravity(
     
         if not is_error and bot_reply_msg_id and reply_text:
             try:
-                await _stream_typewriter_to_feishu(bot_reply_msg_id, reply_text, user_text, think_seconds, _feishu_call)
+                await _stream_typewriter_to_feishu(
+                    bot_reply_msg_id, reply_text, user_text, think_seconds, _feishu_call,
+                    start_index=last_streamed_length
+                )
             except Exception as e:
                 log.error(f"[Executor] Typewriter streaming failed: {e}")
 
