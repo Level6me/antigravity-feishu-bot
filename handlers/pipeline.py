@@ -149,15 +149,6 @@ async def _process_single_task(chat_id, task):
         notes_block = "\n".join([f"- {note}" for note in notes])
         system_instruction += f"[User's Permanent Notes / 备忘录]\n{notes_block}\n\n"
     
-    # 自动识别超大型工程任务并注入阶段性拆解指令
-    heavy_kws = ["全栈", "重构", "审查", "通宵", "架构", "重写", "彻底优化", "迁移", "整个项目", "全部代码", "深度检查", "从零搭建", "全盘"]
-    if any(kw in user_text.lower() for kw in heavy_kws) or len(user_text) > 250:
-        system_instruction += (
-            "[System Active Mode: ULTRA LARGE ENGINEERING TASK DETECTED. "
-            "Please break down the implementation into progressive milestones, execute each step systematically with tests, "
-            "and output periodic milestone summaries.]\n\n"
-        )
-    
     # Load long-term memory if this is a new conversation
     final_prompt = user_text
     is_new_conversation = not session_data.get("conversation")
