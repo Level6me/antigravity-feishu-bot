@@ -363,6 +363,14 @@ async def execute_antigravity(
             current_transcript_size = os.path.getsize(t_path) if (t_path and os.path.exists(t_path)) else 0
             current_stdout_len = len(accumulated_text)
             
+            # 实时提取已增量生成的文本（打字机流式输出）
+            partial_text = None
+            if t_path and os.path.exists(t_path):
+                partial_text = await loop.run_in_executor(
+                    None,
+                    lambda: extract_final_response_from_transcript(t_path, initial_transcript_size)
+                )
+
             # 轮询 CPU 活性
             cpu_active = False
             if process.pid:
@@ -416,10 +424,14 @@ async def execute_antigravity(
                 stderr_text = "⚠️ 执行超时 (12小时)：后台超大型任务已达到系统设定的 12 小时最高保护上限。"
                 break
 
-            # 渲染进度或预警卡片
+            # 渲染进度、全流式打字机或预警卡片
             if stall_seconds >= QUIET_WARNING_THRESHOLD:
                 # 超过 3 分钟未更新输出时，推送带有 [继续等待] 与 [叫停任务] 按钮的交互卡片
                 indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
+            elif partial_text and len(partial_text.strip()) > 0:
+                # 捕获到增量文本，渲染带有 ▌ 游标的全流式打字机卡片
+                indicator_card = CardBuilder.build_streaming_indicator(partial_text, action or last_tool_action, user_text, think_seconds)
+                current_patch_interval = 0.5
             else:
                 display_action = action or last_tool_action
                 if display_action:
