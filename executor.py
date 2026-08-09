@@ -426,7 +426,6 @@ async def execute_antigravity(
                     indicator_card = CardBuilder.build_tool_indicator(display_action, user_text, downloaded_file_name, download_success, think_seconds)
                 else:
                     indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
-                indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
             
             if time.time() - last_patch_time >= current_patch_interval:
                 last_patch_time = time.time()
