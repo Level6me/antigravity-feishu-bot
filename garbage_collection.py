@@ -87,6 +87,21 @@ async def garbage_collector(interval_seconds=3600, max_age_seconds=86400):
                             except Exception as e:
                                 log.error(f"[GC] Error deleting legacy file {filepath}: {e}")
 
+            # Clean scratch directory (files older than 7 days = 604800s)
+            scratch_dir = "scratch"
+            scratch_max_age = 7 * 86400
+            if os.path.exists(scratch_dir):
+                for filename in os.listdir(scratch_dir):
+                    filepath = os.path.join(scratch_dir, filename)
+                    if os.path.isfile(filepath):
+                        file_age = now - os.path.getmtime(filepath)
+                        if file_age > scratch_max_age:
+                            try:
+                                os.remove(filepath)
+                                deleted_count += 1
+                            except Exception as e:
+                                log.error(f"[GC] Error deleting scratch file {filepath}: {e}")
+
             if deleted_count > 0:
                 log.info(f"[GC] Garbage collection finished. Deleted {deleted_count} old files.")
                 

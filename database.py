@@ -101,30 +101,29 @@ def init_db():
     conn.close()
 
 def migrate_from_json():
-    conn = get_db()
-    cursor = conn.cursor()
-    if os.path.exists("chat_sessions.json"):
-        try:
-            with open("chat_sessions.json", "r") as f:
-                sessions = json.load(f)
-            for chat_id, data in sessions.items():
-                cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
-            os.rename("chat_sessions.json", "chat_sessions.json.bak")
-        except Exception as e:
-            log.error(f"Error migrating sessions: {e}")
-            
-    if os.path.exists("user_profiles.json"):
-        try:
-            with open("user_profiles.json", "r") as f:
-                profiles = json.load(f)
-            for user_id, data in profiles.items():
-                cursor.execute('INSERT OR REPLACE INTO user_profiles (user_id, data) VALUES (?, ?)', (user_id, json.dumps(data)))
-            os.rename("user_profiles.json", "user_profiles.json.bak")
-        except Exception as e:
-            log.error(f"Error migrating profiles: {e}")
-            
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if os.path.exists("chat_sessions.json"):
+            try:
+                with open("chat_sessions.json", "r") as f:
+                    sessions = json.load(f)
+                for chat_id, data in sessions.items():
+                    cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
+                os.rename("chat_sessions.json", "chat_sessions.json.bak")
+            except Exception as e:
+                log.error(f"Error migrating sessions: {e}")
+                
+        if os.path.exists("user_profiles.json"):
+            try:
+                with open("user_profiles.json", "r") as f:
+                    profiles = json.load(f)
+                for user_id, data in profiles.items():
+                    cursor.execute('INSERT OR REPLACE INTO user_profiles (user_id, data) VALUES (?, ?)', (user_id, json.dumps(data)))
+                os.rename("user_profiles.json", "user_profiles.json.bak")
+            except Exception as e:
+                log.error(f"Error migrating profiles: {e}")
+                
+        conn.commit()
 
 init_db()
 migrate_from_json()
@@ -170,11 +169,10 @@ async def save_profile_async(user_id, data):
         await db.commit()
 
 def load_sessions():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT chat_id, data FROM chat_sessions')
-    rows = cursor.fetchall()
-    conn.close()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT chat_id, data FROM chat_sessions')
+        rows = cursor.fetchall()
     sessions = {}
     for row in rows:
         data = json.loads(row['data'])
@@ -184,19 +182,17 @@ def load_sessions():
     return sessions
 
 def save_sessions(sessions):
-    conn = get_db()
-    cursor = conn.cursor()
-    for chat_id, data in sessions.items():
-        cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for chat_id, data in sessions.items():
+            cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
+        conn.commit()
 
 def get_session_sync(chat_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,))
-    row = cursor.fetchone()
-    conn.close()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,))
+        row = cursor.fetchone()
     if row:
         data = json.loads(row['data'])
         if data.get('model') == 'Gemini 3.5 Flash':
@@ -205,11 +201,10 @@ def get_session_sync(chat_id):
     return {"conversation": "", "model": "Gemini 3.5 Flash (Medium)", "role": "无", "project": "默认"}
 
 def save_session_sync(chat_id, data):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
