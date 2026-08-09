@@ -23,6 +23,58 @@ class SystemUpdaterPlugin(BasePlugin):
 
     async def on_command(self, command: str, args: str, chat_id: str, message_id: str, session_data: dict) -> bool:
         if command.lower() == "/update":
+            clean_args = (args or "").strip().lower()
+            
+            if clean_args == "confirm":
+                reply_text = "⬇️ 正在执行核心系统升级，请勿中断..."
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+                
+                custom_env = os.environ.copy()
+                custom_env["GIT_TERMINAL_PROMPT"] = "0"
+                custom_env["DEBIAN_FRONTEND"] = "noninteractive"
+                custom_env["GIT_ASKPASS"] = "echo"
+                
+                try:
+                    # Safe update without losing local uncommitted changes
+                    subprocess.run(["git", "stash"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
+                    
+                    try:
+                        subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
+                    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+                        log.warning(f"Pull from origin failed, trying Gitee: {e}")
+                        if not GITEE_MIRROR_URL:
+                            raise
+                        subprocess.run(["git", "pull", "--rebase", GITEE_MIRROR_URL, "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
+                        
+                    pop_res = subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
+                    conflict_hint = ""
+                    if pop_res.returncode != 0:
+                        log.warning(f"git stash pop encountered conflicts or failed; reverting conflict markers: {pop_res.stderr}")
+                        subprocess.run(["git", "checkout", "--", "."], capture_output=True, text=True, check=False, timeout=10, env=custom_env, cwd=BASE_DIR)
+                        conflict_hint = "\n\n⚠️ 本地改动与更新存在冲突，已自动清理冲突标记以保证正常启动。"
+                    
+                    # Install new requirements if any
+                    pip_bin = os.path.join(BASE_DIR, "venv", "bin", "pip")
+                    if os.path.exists(pip_bin):
+                        pip_cmd = [pip_bin, "install", "-r", os.path.join(BASE_DIR, "requirements.txt")]
+                        subprocess.run(pip_cmd, capture_output=True, text=True, timeout=60, cwd=BASE_DIR)
+                    
+                    reply_text = "🔄 系统升级就绪，正在触发自启进程，预计 3 秒后重新上线..." + conflict_hint
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+                    
+                    # Restart via pm2 in background
+                    subprocess.Popen(
+                        ["pm2", "restart", "feishu-bot"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        stdin=subprocess.DEVNULL
+                    )
+                except Exception as e:
+                    log.error(f"Failed to apply update: {e}")
+                    error_text = f"❌ 升级执行失败: {e}"
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, error_text))
+                return True
+
             reply_text = "🔍 正在从云端拉取最新版本信息，请稍候..."
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
 

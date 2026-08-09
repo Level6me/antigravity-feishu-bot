@@ -97,14 +97,16 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             async def notify_and_process():
                 handled = False
                 if choice and choice.startswith("/"):
-                    # 1. 提取首个命令词（处理带说明括号的选项如 "/light (常用缩写...)" -> "/light"）
-                    clean_cmd = choice.split()[0].strip()
                     session_data = await get_session_async(chat_id)
-                    handled_res, _ = await handle_slash_command(clean_cmd, card_message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
+                    # 1. 优先使用完整的 choice 执行命令（保留如 "/update confirm" 等子命令参数）
+                    handled_res, _ = await handle_slash_command(choice, card_message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
                     handled = bool(handled_res)
-                    if not handled and clean_cmd != choice:
-                        handled_res2, _ = await handle_slash_command(choice, card_message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
-                        handled = bool(handled_res2)
+                    if not handled:
+                        # 2. 提取首个命令词（处理带说明括号的选项如 "/light (常用缩写...)" -> "/light"）
+                        clean_cmd = choice.split()[0].strip()
+                        if clean_cmd != choice:
+                            handled_res2, _ = await handle_slash_command(clean_cmd, card_message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
+                            handled = bool(handled_res2)
 
                 if not handled:
                     # 2. 如果不是有效斜杠指令或未被命令捕获，统一模拟为用户回复提交给 AI 继续处理
