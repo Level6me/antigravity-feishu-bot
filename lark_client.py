@@ -50,22 +50,55 @@ def delete_emoji_sdk(message_id, reaction_id):
         log.error(f"[delete_emoji_sdk] Error: {e}")
 
 
+def split_text_into_chunks(text, max_chunk_size=20000):
+    if not text or len(text) <= max_chunk_size:
+        return [text]
+    
+    chunks = []
+    current_chunk = []
+    current_length = 0
+    
+    lines = text.split("\n")
+    for line in lines:
+        line_len = len(line) + 1
+        if current_length + line_len > max_chunk_size and current_chunk:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+            current_length = line_len
+        else:
+            current_chunk.append(line)
+            current_length += line_len
+            
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+        
+    return chunks
+
+
 @with_retry(max_retries=1)
 def send_reply_sdk(message_id, reply_text):
-    # 飞书 text 消息体有 ~30KB 上限，预留安全余量
-    max_text_chars = 28000
-    if reply_text and len(reply_text) > max_text_chars:
-        reply_text = reply_text[:max_text_chars] + "\n\n（回复过长已截断，完整内容请在工作区查看）"
-    req = ReplyMessageRequest.builder() \
-        .message_id(message_id) \
-        .request_body(ReplyMessageRequestBody.builder() \
-            .msg_type("text") \
-            .content(json.dumps({"text": reply_text})) \
-            .build()) \
-        .build()
-    resp = api_client.im.v1.message.reply(req)
-    if resp.code != 0:
-        log.error(f"[send_reply_sdk] Failed: {resp.msg}")
+    if not reply_text:
+        return
+        
+    max_text_chars = 20000
+    if len(reply_text) <= max_text_chars:
+        chunks = [reply_text]
+    else:
+        raw_chunks = split_text_into_chunks(reply_text, max_text_chars)
+        total = len(raw_chunks)
+        chunks = [f"📄 **[第 {idx+1}/{total} 页]**\n\n{c}" for idx, c in enumerate(raw_chunks)]
+
+    for chunk in chunks:
+        req = ReplyMessageRequest.builder() \
+            .message_id(message_id) \
+            .request_body(ReplyMessageRequestBody.builder() \
+                .msg_type("text") \
+                .content(json.dumps({"text": chunk})) \
+                .build()) \
+            .build()
+        resp = api_client.im.v1.message.reply(req)
+        if resp.code != 0:
+            log.error(f"[send_reply_sdk] Failed: {resp.msg}")
 
 @with_retry(max_retries=1)
 def send_interactive_card_sdk(message_id, card_content):
