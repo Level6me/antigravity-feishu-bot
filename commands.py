@@ -134,7 +134,7 @@ def get_version_string(commit_ref="HEAD"):
     try:
         count_str = subprocess.run(["git", "rev-list", "--count", commit_ref], capture_output=True, text=True, timeout=5, cwd=BASE_DIR).stdout.strip()
         commit_count = int(count_str)
-        patch = max(1, commit_count - VERSION_START_COMMIT)
+        patch = max(0, commit_count - VERSION_START_COMMIT)
         hash_str = subprocess.run(["git", "rev-parse", "--short", commit_ref], capture_output=True, text=True, timeout=5, cwd=BASE_DIR).stdout.strip()
         return f"{BASE_VERSION_PREFIX}{patch} (Build: {hash_str})"
     except Exception:
