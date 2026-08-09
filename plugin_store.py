@@ -214,14 +214,44 @@ DEFAULT_FEATURED_PLUGINS = [
     }
 ]
 
-_store_cache = {"timestamp": 0, "plugins": DEFAULT_FEATURED_PLUGINS}
+CACHE_FILE = os.path.join(BASE_DIR, "remote_plugin_cache.json")
+_store_cache = {"timestamp": 0, "plugins": None}
+
+
+def load_remote_store_cache() -> list:
+    """Load cached remote plugin store list from disk."""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                plugins = json.load(f)
+                if isinstance(plugins, list) and plugins:
+                    return plugins
+        except Exception as e:
+            log.error(f"[PluginStore] Error reading cache file {CACHE_FILE}: {e}")
+    return DEFAULT_FEATURED_PLUGINS
+
+
+def save_remote_store_cache(plugins: list):
+    """Save remote plugin store list to disk for permanent persistence."""
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(plugins, f, ensure_ascii=False, indent=2)
+        log.info(f"[PluginStore] Saved {len(plugins)} remote plugins to {CACHE_FILE}")
+    except Exception as e:
+        log.error(f"[PluginStore] Error saving cache file {CACHE_FILE}: {e}")
 
 
 def fetch_remote_store_plugins(force_refresh: bool = False) -> list:
     """Fetch plugin list from GitHub plugins/ subdirectories without index.json."""
     import urllib.request
-    if not force_refresh and _store_cache["plugins"]:
-        return _store_cache["plugins"]
+
+    if not force_refresh:
+        if _store_cache["plugins"]:
+            return _store_cache["plugins"]
+        disk_plugins = load_remote_store_cache()
+        if disk_plugins:
+            _store_cache["plugins"] = disk_plugins
+            return disk_plugins
 
     url = "https://api.github.com/repos/Level6me/feishu-bot-plugin/contents/plugins"
     try:
@@ -243,9 +273,12 @@ def fetch_remote_store_plugins(force_refresh: bool = False) -> list:
                         log.warning(f"[PluginStore] Error loading manifest for {pid}: {e}")
             if fetched:
                 _store_cache["plugins"] = fetched
+                save_remote_store_cache(fetched)
                 log.info(f"[PluginStore] Refreshed remote store plugins: {len(fetched)} plugins found.")
                 return fetched
     except Exception as e:
         log.warning(f"[PluginStore] Failed to scan GitHub plugins directory: {e}")
 
-    return _store_cache["plugins"] or DEFAULT_FEATURED_PLUGINS
+    disk_plugins = load_remote_store_cache()
+    _store_cache["plugins"] = disk_plugins
+    return disk_plugins
