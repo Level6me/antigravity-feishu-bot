@@ -32,7 +32,7 @@ def _is_process_cpu_active(pid: int) -> bool:
     return False
 
 async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, think_seconds, feishu_call_fn, start_index=0):
-    """Smoothly stream full_text onto Feishu interactive card starting from start_index with ▌ cursor."""
+    """Smoothly stream full_text onto Feishu interactive card at 2x Fast Speed (~450 chars/sec) with ▌ cursor."""
     if not bot_reply_msg_id or not full_text:
         return
         
@@ -44,9 +44,9 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
     if remaining < 20:
         return
         
-    chunk_size = 35
-    if remaining / chunk_size > 20:
-        chunk_size = int(remaining / 20) + 1
+    chunk_size = 90
+    if remaining / chunk_size > 15:
+        chunk_size = int(remaining / 15) + 1
         
     current_len = start_index
     while current_len < total_len:
@@ -464,10 +464,10 @@ async def execute_antigravity(
             elif partial_text and len(partial_text.strip()) > 0:
                 target_len = len(partial_text)
                 if last_streamed_length < target_len:
-                    last_streamed_length = min(target_len, last_streamed_length + 40)
+                    last_streamed_length = min(target_len, last_streamed_length + 90)
                 display_partial = partial_text[:last_streamed_length]
                 indicator_card = CardBuilder.build_streaming_indicator(display_partial, action or last_tool_action, user_text, think_seconds)
-                current_patch_interval = 0.3
+                current_patch_interval = 0.2
             else:
                 display_action = action or last_tool_action
                 if display_action:
