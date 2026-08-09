@@ -36,8 +36,9 @@ archive_debug/
 *.gif
 *.ogg
 
-# Local agent customizations (unless intended for repository sharing)
+# Local agent customizations
 .agents/
+!.agents/skills/
 .env
 
 # Database and backups
