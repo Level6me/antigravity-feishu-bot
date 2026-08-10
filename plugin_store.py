@@ -94,6 +94,31 @@ def install_plugin_from_github(repo_url: str, custom_id: str = "") -> tuple[bool
 
         manifest_path = os.path.join(target_dir, "manifest.json")
         if not os.path.exists(manifest_path):
+            # Check if this is a monorepo containing plugins/<plugin_id>/manifest.json or plugins/*/manifest.json
+            sub_plugin_dir = None
+            if plugin_id:
+                candidate = os.path.join(target_dir, "plugins", plugin_id)
+                if os.path.exists(os.path.join(candidate, "manifest.json")):
+                    sub_plugin_dir = candidate
+
+            if not sub_plugin_dir:
+                plugins_parent = os.path.join(target_dir, "plugins")
+                if os.path.exists(plugins_parent) and os.path.isdir(plugins_parent):
+                    for sub in os.listdir(plugins_parent):
+                        candidate = os.path.join(plugins_parent, sub)
+                        if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, "manifest.json")):
+                            sub_plugin_dir = candidate
+                            break
+
+            if sub_plugin_dir and os.path.exists(os.path.join(sub_plugin_dir, "manifest.json")):
+                import time
+                temp_extract = os.path.join(PLUGINS_DIR, f"_tmp_{plugin_id}_{int(time.time())}")
+                shutil.move(sub_plugin_dir, temp_extract)
+                shutil.rmtree(target_dir, ignore_errors=True)
+                shutil.move(temp_extract, target_dir)
+                manifest_path = os.path.join(target_dir, "manifest.json")
+
+        if not os.path.exists(manifest_path):
             shutil.rmtree(target_dir, ignore_errors=True)
             return False, "克隆成功但仓库根目录下未找到 `manifest.json` 插件规范文件！"
 
