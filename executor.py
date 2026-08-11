@@ -61,7 +61,7 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
             lambda: patch_interactive_card_sdk(bot_reply_msg_id, card),
             label="typewriter patch"
         )
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(1.0)
 
 def extract_final_response_from_transcript(transcript_path, initial_size=0):
     if not transcript_path or not os.path.exists(transcript_path):
@@ -474,7 +474,7 @@ async def execute_antigravity(
                     last_streamed_length = min(target_len, last_streamed_length + 90)
                 display_partial = clean_partial[:last_streamed_length]
                 indicator_card = CardBuilder.build_streaming_indicator(display_partial, action or last_tool_action, user_text, think_seconds)
-                desired_patch_interval = 0.35
+                desired_patch_interval = 1.0
             else:
                 display_action = action or last_tool_action
                 if display_action:
