@@ -260,11 +260,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await save_session_async(chat_id, session_data)
         pending_command = None
 
-    # Dispatch command to loaded plugins first
-    handled_by_plugin, override_txt = await plugin_manager.dispatch_command(user_text, message_id, chat_id, session_data)
-    if handled_by_plugin:
-        return True, override_txt
-        
+    # If user is responding to an interactive prompt (pending_command) and didn't type a new slash command, handle it first!
     if not is_slash_cmd and pending_command:
         if pending_command == PendingCommand.CUSTOM_WORKSPACE_ROOT.value:
             target_path = user_text.strip()
@@ -430,6 +426,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             
         elif pending_command == PendingCommand.CREATE_PROJECT.value:
             return await _handle_create_project(user_text, message_id, chat_id, session_data)
+
+    # Dispatch command to loaded plugins (if not handling a pending_command response)
+    handled_by_plugin, override_txt = await plugin_manager.dispatch_command(user_text, message_id, chat_id, session_data)
+    if handled_by_plugin:
+        return True, override_txt
 
     if user_text == "/stop":
         cleared = False
