@@ -253,15 +253,17 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
     # Dynamic slash command detection via plugin manager
     first_word = user_text.split()[0] if user_text.strip() else ""
     from plugin_manager import plugin_manager
-    is_slash_cmd = plugin_manager.is_slash_command(first_word) or first_word.startswith("/")
+    # Only treat as true slash command if it is registered in system/plugins
+    is_registered_slash = plugin_manager.is_slash_command(first_word)
     
-    if is_slash_cmd and pending_command:
+    # If it is a registered slash command (like /stop, /project), cancel pending_command
+    if is_registered_slash and pending_command:
         session_data.pop("pending_command", None)
         await save_session_async(chat_id, session_data)
         pending_command = None
 
-    # If user is responding to an interactive prompt (pending_command) and didn't type a new slash command, handle it first!
-    if not is_slash_cmd and pending_command:
+    # If user is responding to an interactive prompt (pending_command) and didn't type a registered slash command, handle it first!
+    if not is_registered_slash and pending_command:
         if pending_command == PendingCommand.CUSTOM_WORKSPACE_ROOT.value:
             target_path = user_text.strip()
             if target_path.startswith("~"):
