@@ -294,7 +294,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 
                 prompt_msg = f"📂 **请输入新建项目的名称，或直接输入项目的 Git 仓库地址**：\n\n*(支持通过 Git URL 克隆；若输入项目名，将在公共根目录 `{parent_path}` 下新建并初始化)*"
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, prompt_msg))
-            asyncio.run_coroutine_threadsafe(do_create_project_prompt(), app_state.main_loop)
+
+            future = asyncio.run_coroutine_threadsafe(do_create_project_prompt(), app_state.main_loop)
+            try:
+                future.result(timeout=5)
+            except Exception as e:
+                log.error(f"[create_project_prompt] error: {e}")
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "请输入项目名或Git仓库地址！"}})
 
@@ -307,7 +312,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 
                 msg = "⚙️ **设置公共项目根目录**\n\n请直接在此回复您想要设定的公共项目根目录绝对路径（例如：`/vol1/1000/github`）：\n\n*(系统收到后将自动校验路径合法性，并将后续所有新建项目与列表面板绑定至该根目录，当前活跃工作区保持不变)*"
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-            asyncio.run_coroutine_threadsafe(do_prompt_ws_root(), app_state.main_loop)
+
+            future = asyncio.run_coroutine_threadsafe(do_prompt_ws_root(), app_state.main_loop)
+            try:
+                future.result(timeout=5)
+            except Exception as e:
+                log.error(f"[prompt_custom_workspace_root] error: {e}")
             
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复公共项目根目录绝对路径！"}})
 
@@ -320,7 +330,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 
                 msg = "⚙️ **设置开发工作区**\n\n请直接回复您想要设定的开发工作区绝对路径（例如：`/vol1/1000/github/my-app`）：\n\n*(系统收到后将自动校验路径合法性并为您切换工作区)*"
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-            asyncio.run_coroutine_threadsafe(do_prompt_custom(), app_state.main_loop)
+
+            future = asyncio.run_coroutine_threadsafe(do_prompt_custom(), app_state.main_loop)
+            try:
+                future.result(timeout=5)
+            except Exception as e:
+                log.error(f"[prompt_custom_project_path] error: {e}")
             
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复开发工作区绝对路径！"}})
 
@@ -333,7 +348,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 
                 msg = "📝 **添加笔记**\n\n请直接在此回复您要添加的笔记内容：\n\n*(提示：随时也可发送 `/note add <内容>` 进行快速添加)*"
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-            asyncio.run_coroutine_threadsafe(do_prompt_note(), app_state.main_loop)
+
+            future = asyncio.run_coroutine_threadsafe(do_prompt_note(), app_state.main_loop)
+            try:
+                future.result(timeout=5)
+            except Exception as e:
+                log.error(f"[prompt_add_note] error: {e}")
             
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复您要添加的笔记内容！"}})
 
@@ -346,7 +366,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 
                 msg = "🧠 **新增个人偏好**\n\n请直接在此回复您希望 AI 记住的偏好或习惯设定（例如：`写代码只用 Python` 或 `用中文回答`）：\n\n*(系统收到后将永久保存至您的个人偏好记忆库)*"
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-            asyncio.run_coroutine_threadsafe(do_prompt_memory(), app_state.main_loop)
+
+            future = asyncio.run_coroutine_threadsafe(do_prompt_memory(), app_state.main_loop)
+            try:
+                future.result(timeout=5)
+            except Exception as e:
+                log.error(f"[prompt_add_memory] error: {e}")
             
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复您的个人偏好设定！"}})
 
