@@ -2,9 +2,9 @@
   "enabled": true,
   "hardware_mode": "auto",
   "gpio_pins": {
-    "red": 17,
+    "red": 22,
     "yellow": 27,
-    "green": 22
+    "green": 17
   },
   "blink_interval_sec": 0.3
 }

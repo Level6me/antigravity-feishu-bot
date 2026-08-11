@@ -36,7 +36,7 @@ class RpiGpioStatusPlugin(BasePlugin):
 
     def initialize(self):
         cfg = self.get_config()
-        self.pins = cfg.get("gpio_pins", {"red": 17, "yellow": 27, "green": 22})
+        self.pins = cfg.get("gpio_pins", {"red": 22, "yellow": 27, "green": 17})
         self.blink_interval = cfg.get("blink_interval_sec", 0.3)
         self._blinking_thread = None
         self._stop_blink = False
