@@ -197,6 +197,21 @@ class RpiGpioStatusPlugin(BasePlugin):
         """Hook: 调用/使用工具 -> 规则 1b 呼吸黄灯"""
         self.set_state_breathing_yellow()
 
+    def on_service_restarting(self):
+        """Hook: feishu-bot 重启服务时 -> 规则 1c 闪烁黄灯"""
+        self.turn_all_off()
+        self.current_state = "restarting_yellow_blink"
+
+        def _restarting_worker():
+            state = False
+            while not self._stop_anim:
+                state = not state
+                self._set_raw_pin("yellow", 1.0 if state else 0.0)
+                time.sleep(0.25)
+
+        self._anim_thread = threading.Thread(target=_restarting_worker, daemon=True)
+        self._anim_thread.start()
+
     async def on_after_ai(self, ai_response_text: str, chat_id: str, session_data: dict) -> str:
         """Hook: AI 任务响应分析 -> 规则 2 / 规则 3"""
         if any(err_kw in ai_response_text.lower() for err_kw in ["⚠️", "❌", "错误", "失败", "超时", "已被终止", "stopped"]):

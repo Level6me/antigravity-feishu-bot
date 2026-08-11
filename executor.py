@@ -61,7 +61,7 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
             lambda: patch_interactive_card_sdk(bot_reply_msg_id, card),
             label="typewriter patch"
         )
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.4)
 
 def extract_final_response_from_transcript(transcript_path, initial_size=0):
     if not transcript_path or not os.path.exists(transcript_path):
@@ -419,8 +419,10 @@ async def execute_antigravity(
                 last_stdout_len = current_stdout_len
                 last_log_size = current_log_size
                 last_transcript_size = current_transcript_size
-                if action:
+                if action and action != last_tool_action:
                     last_tool_action = action
+                    from plugin_manager import plugin_manager
+                    await plugin_manager.dispatch_tool_call(action, {})
             
             think_seconds = int(time.time() - process_start_time)
             stall_seconds = int(time.time() - last_progress_time)
@@ -658,6 +660,7 @@ async def execute_antigravity(
             session_data=session_data
         )
         if bot_reply_msg_id:
+            await asyncio.sleep(0.5)
             patch_ok = await _feishu_call(
                 lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card),
                 label="final-card patch"

@@ -166,6 +166,24 @@ class PluginManager:
                     log.error(f"[PluginManager] Error in plugin '{pid}' on_after_ai: {e}")
         return curr_resp
 
+    async def dispatch_tool_call(self, tool_name: str, tool_args: dict = None):
+        """Dispatch tool call event to all active plugins."""
+        for pid, plugin in self.plugins.items():
+            if plugin.enabled:
+                try:
+                    await plugin.on_tool_call(tool_name, tool_args or {})
+                except Exception as e:
+                    log.error(f"[PluginManager] Error in plugin '{pid}' on_tool_call: {e}")
+
+    def dispatch_service_restarting(self):
+        """Sync dispatch service restarting event to all plugins."""
+        for pid, plugin in self.plugins.items():
+            if plugin.enabled:
+                try:
+                    plugin.on_service_restarting()
+                except Exception as e:
+                    log.error(f"[PluginManager] Error in plugin '{pid}' on_service_restarting: {e}")
+
 
 # Global singleton instance
 plugin_manager = PluginManager()

@@ -51,6 +51,14 @@ class BasePlugin:
         Can post-process or modify ai_response_text."""
         return ai_response_text
 
+    async def on_tool_call(self, tool_name: str, tool_args: dict):
+        """Hook called when AI executes a tool action during pipeline."""
+        pass
+
+    def on_service_restarting(self):
+        """Hook called when feishu-bot service is shutting down / restarting."""
+        pass
+
     def send_card(self, chat_id: str, card_content: dict):
         """Helper to send an interactive card to chat."""
         return send_card_to_chat_sdk(chat_id, card_content)

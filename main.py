@@ -229,6 +229,11 @@ async def restore_pending_tasks():
 
 def cleanup(signum, frame):
     log.warning("Gracefully shutting down... killing zombie processes")
+    try:
+        from plugin_manager import plugin_manager
+        plugin_manager.dispatch_service_restarting()
+    except Exception:
+        pass
     for process in app_state.running_processes.values():
         try:
             pgid = os.getpgid(process.pid)

@@ -118,7 +118,7 @@ def send_interactive_card_sdk(message_id, card_content):
     except:
         return None
 
-@with_retry()
+@with_retry(max_retries=4, initial_delay=0.6)
 def patch_interactive_card_sdk(message_id, card_content):
     req = PatchMessageRequest.builder() \
         .message_id(message_id) \
@@ -128,8 +128,8 @@ def patch_interactive_card_sdk(message_id, card_content):
         .build()
     resp = api_client.im.v1.message.patch(req)
     if resp.code != 0:
-        log.error(f"[patch_interactive_card_sdk] Failed: {resp.msg}")
-        return False
+        log.error(f"[patch_interactive_card_sdk] Failed (code {resp.code}): {resp.msg}")
+        raise Exception(f"Feishu Patch API error code {resp.code}: {resp.msg}")
     return True
 
 @with_retry(max_retries=5, initial_delay=2.0)
