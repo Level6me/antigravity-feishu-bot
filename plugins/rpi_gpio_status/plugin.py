@@ -120,6 +120,50 @@ class RpiGpioStatusPlugin(BasePlugin):
         self._set_pin("yellow", False)
         self._set_pin("red", True)
 
+    def start_blink_pattern(self, color: str = "yellow", interval_sec: float = 0.25):
+        """Starts non-blocking threaded blinking animation for the specified LED color."""
+        self._stop_active_blinking()
+        self._stop_blink = False
+        self.current_color = f"blink_{color}"
+
+        def _blink_worker():
+            for p in ["red", "yellow", "green"]:
+                self._set_pin(p, False)
+            state = False
+            while not self._stop_blink:
+                state = not state
+                self._set_pin(color, state)
+                time.sleep(interval_sec)
+
+        self._blinking_thread = threading.Thread(target=_blink_worker, daemon=True)
+        self._blinking_thread.start()
+
+    def run_marquee_test(self):
+        """Triggers 3-color hardware LED marquee self-test animation."""
+        self._stop_active_blinking()
+        self.current_color = "marquee_test"
+
+        def _marquee_worker():
+            for p in ["red", "yellow", "green"]:
+                self._set_pin(p, False)
+            # Cycle 1: Sweep Red -> Yellow -> Green
+            for p in ["red", "yellow", "green", "red", "yellow", "green"]:
+                self._set_pin(p, True)
+                time.sleep(0.2)
+                self._set_pin(p, False)
+                time.sleep(0.1)
+            # Cycle 2: All ON flash
+            for p in ["red", "yellow", "green"]:
+                self._set_pin(p, True)
+            time.sleep(0.5)
+            for p in ["red", "yellow", "green"]:
+                self._set_pin(p, False)
+            time.sleep(0.2)
+            # Restore Idle
+            self.set_state_idle()
+
+        threading.Thread(target=_marquee_worker, daemon=True).start()
+
     async def on_before_ai(self, user_text: str, chat_id: str, session_data: dict) -> tuple[str, dict]:
         """Hook called before AI pipeline execution -> Turn on Yellow LED (Running)."""
         self.set_state_running()
@@ -150,11 +194,18 @@ class RpiGpioStatusPlugin(BasePlugin):
         elif active_color == "off":
             status_badge = "⚪ 所有指示灯已关闭 (All OFF)"
             header_template = "wathet"
+        elif active_color.startswith("blink_"):
+            blink_c = active_color.replace("blink_", "").upper()
+            status_badge = f"⚡ 闪烁警报中 [{blink_c}]"
+            header_template = "orange"
+        elif active_color == "marquee_test":
+            status_badge = "✨ 跑马灯自检中 (Testing...)"
+            header_template = "purple"
 
         card = {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "💡 树莓派 LED 状态指示灯控制台"},
+                "title": {"tag": "plain_text", "content": "💡 树莓派 LED 状态指示灯控制台 PRO"},
                 "template": header_template
             },
             "elements": [
@@ -170,7 +221,7 @@ class RpiGpioStatusPlugin(BasePlugin):
                 {"tag": "hr"},
                 {
                     "tag": "markdown",
-                    "content": "**🎛️ 快捷交互控制按钮组（点击即刻控制指示灯）：**"
+                    "content": "**🎛️ 快捷交互控制组（点击即刻控制物理指示灯与效果）：**"
                 },
                 {
                     "tag": "action",
@@ -196,6 +247,18 @@ class RpiGpioStatusPlugin(BasePlugin):
                         },
                         {
                             "tag": "button",
+                            "text": {"tag": "plain_text", "content": "✨ 跑马灯自检"},
+                            "type": "primary",
+                            "value": {"action": "set_rpi_light", "color": "test"}
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "⚡ 黄灯闪烁"},
+                            "type": "warning",
+                            "value": {"action": "set_rpi_light", "color": "blink_yellow"}
+                        },
+                        {
+                            "tag": "button",
                             "text": {"tag": "plain_text", "content": "⚪ 关闭所有灯"},
                             "type": "default",
                             "value": {"action": "set_rpi_light", "color": "off"}
@@ -209,7 +272,13 @@ class RpiGpioStatusPlugin(BasePlugin):
     async def on_command(self, command: str, args: str, chat_id: str, message_id: str, session_data: dict) -> bool:
         if command.lower() in ["/light", "/led"]:
             sub_cmd = args.strip().lower()
-            if sub_cmd == "red":
+            if sub_cmd in ["test", "marquee", "自检"]:
+                self.run_marquee_test()
+            elif sub_cmd.startswith("blink"):
+                parts = sub_cmd.split()
+                color = parts[1] if len(parts) > 1 and parts[1] in ["red", "yellow", "green"] else "yellow"
+                self.start_blink_pattern(color=color)
+            elif sub_cmd == "red":
                 self.set_state_error()
             elif sub_cmd == "yellow":
                 self.set_state_running()
@@ -230,7 +299,11 @@ class RpiGpioStatusPlugin(BasePlugin):
         act = action or (value.get("action") if isinstance(value, dict) else "")
         if act == "set_rpi_light":
             color = value.get("color", "") if isinstance(value, dict) else ""
-            if color == "green":
+            if color == "test":
+                self.run_marquee_test()
+            elif color == "blink_yellow":
+                self.start_blink_pattern(color="yellow")
+            elif color == "green":
                 self.set_state_success()
             elif color == "yellow":
                 self.set_state_running()

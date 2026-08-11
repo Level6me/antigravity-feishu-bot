@@ -1,53 +1,23 @@
-# 💡 树莓派 LED 状态指示灯插件 (RPi Status Light Plugin)
+# 🍓 树莓派 GPIO 状态灯指示插件 (rpi_gpio_status PRO)
 
-本插件为 `antigravity-feishu-bot` 提供了针对树莓派 (Raspberry Pi) 的硬件级运行状态可视化解决方案。通过物理 GPIO 引脚驱动**红、黄、绿**三色 LED 灯，实时呈现 AI 引擎的工作状态。
+通过树莓派 40Pin 物理 GPIO 引脚控制红绿黄三色 LED 灯，实时展现 AI 任务的就绪、运行中、成功及异常状态。
 
----
+## ✨ 核心特性
 
-## 🚦 状态灯对应逻辑
+- **🔴 状态实时映射**：
+  - 🟢 **绿灯 (GPIO 17)**：系统就绪 / 任务成功完成
+  - 🟡 **黄灯 (GPIO 27)**：AI 思考中 / 任务执行中
+  - 🔴 **红灯 (GPIO 22)**：异常告警 / 执行失败
+- **✨ 跑马灯自检**：提供 `/light test` 硬件自检指令与面板按钮，一键巡检三色 LED 连线。
+- **⚡ 闪烁警报**：支持闪烁模式 `/light blink [red|yellow|green]`，用于长任务追踪或警报提醒。
+- **🎛️ 飞书交互卡片**：在飞书群中提供全功能控制面板与按钮组。
 
-| 指示灯颜色 | 代表状态 | 触发时机 | 硬件行为 |
-| :--- | :--- | :--- | :--- |
-| 🟢 **绿灯 (Green)** | **系统就绪 (Idle / Standby)** | AI 空闲、任务执行完毕 | 常亮 |
-| 🟡 **黄灯 (Yellow)** | **任务执行中 (Running / Thinking)** | 大模型推理、命令行/工具调用中 | 常亮 |
-| 🔴 **红灯 (Red)** | **异常/错误 (Error / Failed)** | 任务抛出异常、超时或报错 | 常亮 |
+## 💬 指令列表
 
----
-
-## 🔌 硬件接线示意 (Hardware Wiring)
-
-使用标准 330Ω 限流电阻与 3 颗 LED 灯，引脚默认使用 **BCM 编码**：
-
-| LED 颜色 | GPIO 引脚 (BCM) | 树莓派物理 Pin | 限流电阻配置 |
-| :--- | :--- | :--- | :--- |
-| 🔴 **红灯** | `GPIO 17` | Pin 11 | 330Ω 电阻 -> GND |
-| 🟡 **黄灯** | `GPIO 27` | Pin 13 | 330Ω 电阻 -> GND |
-| 🟢 **绿灯** | `GPIO 22` | Pin 15 | 330Ω 电阻 -> GND |
-| ⚪ **GND (接地)** | `GND` | Pin 6 / Pin 9 / Pin 14 | -- |
-
----
-
-## ⚙️ 配置文件说明 (`config.json`)
-
-```json
-{
-  "enabled": true,
-  "hardware_mode": "auto",
-  "gpio_pins": {
-    "red": 17,
-    "yellow": 27,
-    "green": 22
-  },
-  "blink_interval_sec": 0.3
-}
-```
-
----
-
-## 💬 飞书指令支持
-
-- `/light` - 查看 LED 当前工作模式与引脚映射表
-- `/light green` - 手动点亮绿灯 (测试系统就绪)
-- `/light yellow` - 手动点亮黄灯 (测试运行状态)
-- `/light red` - 手动点亮红灯 (测试错误状态)
-- `/light off` - 手动关闭所有指示灯
+- `/light` 或 `/led`：发送交互控制卡片
+- `/light green`：点亮绿灯 (就绪)
+- `/light yellow`：点亮黄灯 (运行)
+- `/light red`：点亮红灯 (错误)
+- `/light test` 或 `/light 自检`：触发跑马灯流水硬件自检
+- `/light blink yellow`：开启黄灯闪烁警报
+- `/light off`：关闭所有指示灯
