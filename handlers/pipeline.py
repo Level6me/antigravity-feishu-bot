@@ -119,9 +119,7 @@ async def _process_single_task(chat_id, task):
         "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
         "Any English text in the response must be limited to code syntax or technical names only. "
         "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles (such as 'I will...', 'Let me...'). "
-        "Output ONLY your final answer directly in Simplified Chinese. "
-        "If you need the user to make a choice, format your options inside [CHOICE_CARD] Q: <Question> \n - <Option1> \n - <Option2> [/CHOICE_CARD] tags. "
-        "NEVER ask normal text multi-choice questions. ONLY output plain text choices, avoid complex formatting inside choices.]\n\n"
+        "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
     )
 
 

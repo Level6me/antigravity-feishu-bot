@@ -458,32 +458,36 @@ async def execute_antigravity(
                 break
 
             # 渲染进度、全流式打字机或预警卡片
+            desired_patch_interval = 1.0
             if stall_seconds >= QUIET_WARNING_THRESHOLD:
                 # 超过 3 分钟未更新输出时，推送带有 [继续等待] 与 [叫停任务] 按钮的交互卡片
                 indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
+                desired_patch_interval = 2.0
             elif partial_text and len(partial_text.strip()) > 0:
-                target_len = len(partial_text)
+                clean_partial = re.sub(r'\[CHOICE_CARD\]\s*Q:.*?(?:\[/CHOICE_CARD\]|\Z)', '', partial_text, flags=re.DOTALL | re.IGNORECASE).strip()
+                if not clean_partial:
+                    clean_partial = partial_text
+                target_len = len(clean_partial)
                 if last_streamed_length < target_len:
                     last_streamed_length = min(target_len, last_streamed_length + 90)
-                display_partial = partial_text[:last_streamed_length]
+                display_partial = clean_partial[:last_streamed_length]
                 indicator_card = CardBuilder.build_streaming_indicator(display_partial, action or last_tool_action, user_text, think_seconds)
-                current_patch_interval = 0.2
+                desired_patch_interval = 0.35
             else:
                 display_action = action or last_tool_action
                 if display_action:
                     indicator_card = CardBuilder.build_tool_indicator(display_action, user_text, downloaded_file_name, download_success, think_seconds)
                 else:
                     indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
+                desired_patch_interval = 1.0
             
-            if time.time() - last_patch_time >= current_patch_interval:
+            if time.time() - last_patch_time >= desired_patch_interval:
                 last_patch_time = time.time()
                 if bot_reply_msg_id:
                     await _feishu_call(
                         lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
                         label="indicator patch"
                     )
-                # 保持 1.0s 高刷新率，实时更新思考计时器与工具动作
-                current_patch_interval = 1.0
                             
             if stdout_task.done() and stderr_task.done():
                 break
@@ -636,9 +640,10 @@ async def execute_antigravity(
     
         if not is_error and bot_reply_msg_id and reply_text:
             try:
+                safe_start_index = min(last_streamed_length, len(reply_text))
                 await _stream_typewriter_to_feishu(
                     bot_reply_msg_id, reply_text, user_text, think_seconds, _feishu_call,
-                    start_index=last_streamed_length
+                    start_index=safe_start_index
                 )
             except Exception as e:
                 log.error(f"[Executor] Typewriter streaming failed: {e}")

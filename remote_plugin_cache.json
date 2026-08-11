@@ -1,0 +1,99 @@
+[
+  {
+    "id": "ai_memory",
+    "name": "🧠 AI 长期记忆管理插件",
+    "version": "2.0.0",
+    "author": "Antigravity",
+    "description": "管理个人的长期对话偏好与全局 AI 记忆库，并在大模型对话前自动注入偏好上下文",
+    "commands": [
+      "/memory"
+    ],
+    "enabled": true,
+    "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
+  },
+  {
+    "id": "cron_scheduler",
+    "name": "⏱️ 计划任务与定时调度插件",
+    "version": "2.0.0",
+    "author": "Antigravity",
+    "description": "基于 Cron 表达式与秒级倒计时的后台定时任务与巡检调度中心",
+    "commands": [
+      "/cron",
+      "/schedule"
+    ],
+    "enabled": true,
+    "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
+  },
+  {
+    "id": "multi_agent",
+    "name": "🤖 多 Agent 自动协同开发插件",
+    "version": "1.0.0",
+    "author": "Antigravity",
+    "description": "基于飞书机器人与 antigravity-cli 的多 Agent 自动化需求拆解、分工卡片派发、Git 代码集成插件",
+    "commands": [
+      "/agent_assign",
+      "/multi_agent",
+      "/agent_config"
+    ],
+    "config": {
+      "agent_role": "ARCHITECT",
+      "feishu_webhook_url": "",
+      "git_remote_repo": "",
+      "git_main_branch": "main",
+      "cli_timeout_seconds": 120
+    },
+    "enabled": true,
+    "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
+  },
+  {
+    "id": "notes_manager",
+    "name": "📝 备忘录与随手记插件",
+    "version": "2.0.0",
+    "author": "Antigravity",
+    "description": "随时快速记录、列出与管理个人的随手记、灵感与工作备忘条目",
+    "commands": [
+      "/note",
+      "/notes"
+    ],
+    "enabled": true,
+    "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
+  },
+  {
+    "id": "rpi_gpio_status",
+    "name": "🍓 树莓派 GPIO 状态灯指示插件",
+    "version": "1.0.0",
+    "author": "Antigravity",
+    "description": "通过树莓派 GPIO 引脚控制红绿黄三色 LED 灯，实时展现 AI 任务的就绪、运行中、成功及异常状态",
+    "commands": [
+      "/light",
+      "/led"
+    ],
+    "enabled": true,
+    "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
+  },
+  {
+    "id": "server_health",
+    "name": "🖥️ 服务器巡检插件",
+    "version": "1.0.0",
+    "author": "Antigravity",
+    "description": "实时巡检服务器 CPU 负载、内存占用、磁盘余量及运行时间，并推送飞书交互卡片",
+    "commands": [
+      "/sysinfo",
+      "/health"
+    ],
+    "enabled": true,
+    "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
+  },
+  {
+    "id": "system_updater",
+    "name": "🔄 系统在线热更新插件",
+    "version": "2.0.0",
+    "author": "Antigravity",
+    "description": "检查并拉取 Git 云端最新代码版本，一键自动构建热重启机器人引擎",
+    "commands": [
+      "/update"
+    ],
+    "enabled": true,
+    "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
+  }
+]
