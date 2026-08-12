@@ -769,6 +769,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         return True, user_text
 
     elif first_word in ["/plugin", "/plugins"]:
+        if not is_admin(chat_id):
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "🔒 该命令仅管理员可用。")
+            )
+            return True, user_text
         from plugin_manager import plugin_manager
         args = user_text[len(first_word):].strip()
         if args == "reload":

@@ -59,6 +59,15 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     role = get_role(chat_id, operator_open_id or "")
     if role in ("guest", "pending", "banned"):
         return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "该会话未授权，无法操作。"}})
+
+    # Admin gate for plugin write operations (prevents privilege escalation via card buttons)
+    plugin_write_actions = {
+        "reload_plugins", "update_plugin", "uninstall_plugin",
+        "install_github_repo", "prompt_install_github", "prompt_add_source"
+    }
+    if action_value.get("action") in plugin_write_actions:
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 此操作仅管理员可用！"}})
         
     if action_value.get("action") == "switch_model":
         new_model = action_value.get("model")

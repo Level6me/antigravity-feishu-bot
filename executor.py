@@ -18,15 +18,27 @@ from utils.auth import SCOPE_PROJECT, allow_execution, has_scope, is_admin
 # 增量读取状态：transcript 路径 -> [offset, size]
 _transcript_read_state = {}
 
+# 追踪进程 CPU 时间差值: pid -> (last_check_timestamp, cumulative_cputime_seconds)
+_process_cpu_tracker = {}
+
 def _is_process_cpu_active(pid: int) -> bool:
     if not pid:
         return False
     try:
-        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "%cpu"], text=True, timeout=2).strip()
-        lines = [l.strip() for l in out.split("\n") if l.strip()]
-        if len(lines) >= 2:
-            cpu_val = float(lines[1])
-            return cpu_val > 0.05
+        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "cputimes="], text=True, timeout=2).strip()
+        if out:
+            current_cputime = float(out)
+            now = time.time()
+            if pid in _process_cpu_tracker:
+                last_time, last_cputime = _process_cpu_tracker[pid]
+                time_delta = now - last_time
+                cpu_delta = current_cputime - last_cputime
+                _process_cpu_tracker[pid] = (now, current_cputime)
+                if time_delta > 0:
+                    # 如果这期间 CPU 时间有增加（哪怕 0.1s 以上的实际计算），且占比 > 5%
+                    return (cpu_delta / time_delta) > 0.05
+            else:
+                _process_cpu_tracker[pid] = (now, current_cputime)
     except Exception:
         pass
     return False
@@ -44,7 +56,7 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
     if remaining < 20:
         return
         
-    chunk_size = 90
+    chunk_size = 150
     if remaining / chunk_size > 15:
         chunk_size = int(remaining / 15) + 1
         
@@ -61,7 +73,7 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
             lambda: patch_interactive_card_sdk(bot_reply_msg_id, card),
             label="typewriter patch"
         )
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.4)
 
 def extract_final_response_from_transcript(transcript_path, initial_size=0):
     if not transcript_path or not os.path.exists(transcript_path):
@@ -381,7 +393,7 @@ async def execute_antigravity(
     
     try:
         while process.returncode is None:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
             
             # 尽早提取并同步主会话 ID (处理新创建会话、失效会话重建与 ID 变化)
             if os.path.exists(log_file_path):
@@ -460,7 +472,7 @@ async def execute_antigravity(
                 break
 
             # 渲染进度、全流式打字机或预警卡片
-            desired_patch_interval = 1.0
+            desired_patch_interval = 0.4
             if stall_seconds >= QUIET_WARNING_THRESHOLD:
                 # 超过 3 分钟未更新输出时，推送带有 [继续等待] 与 [叫停任务] 按钮的交互卡片
                 indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
@@ -471,17 +483,17 @@ async def execute_antigravity(
                     clean_partial = partial_text
                 target_len = len(clean_partial)
                 if last_streamed_length < target_len:
-                    last_streamed_length = min(target_len, last_streamed_length + 90)
+                    last_streamed_length = min(target_len, last_streamed_length + 150)
                 display_partial = clean_partial[:last_streamed_length]
                 indicator_card = CardBuilder.build_streaming_indicator(display_partial, action or last_tool_action, user_text, think_seconds)
-                desired_patch_interval = 1.0
+                desired_patch_interval = 0.4
             else:
                 display_action = action or last_tool_action
                 if display_action:
                     indicator_card = CardBuilder.build_tool_indicator(display_action, user_text, downloaded_file_name, download_success, think_seconds)
                 else:
                     indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
-                desired_patch_interval = 1.0
+                desired_patch_interval = 0.4
             
             if time.time() - last_patch_time >= desired_patch_interval:
                 last_patch_time = time.time()

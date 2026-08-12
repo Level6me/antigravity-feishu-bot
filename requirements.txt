@@ -6,3 +6,6 @@ pydantic-settings>=2.0
 aiosqlite>=0.20
 pexpect>=4.9.0
 croniter>=2.0.0
+gpiozero>=2.0
+rpi-lgpio>=0.6
+

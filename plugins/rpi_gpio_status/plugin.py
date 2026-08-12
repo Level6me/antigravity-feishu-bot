@@ -214,7 +214,16 @@ class RpiGpioStatusPlugin(BasePlugin):
 
     async def on_after_ai(self, ai_response_text: str, chat_id: str, session_data: dict) -> str:
         """Hook: AI 任务响应分析 -> 规则 2 / 规则 3"""
-        if any(err_kw in ai_response_text.lower() for err_kw in ["⚠️", "❌", "错误", "失败", "超时", "已被终止", "stopped"]):
+        # 避让正文中普通的"错误/失败"词汇解释，只有真正发生任务失败、超时、卡死强杀时才亮红灯
+        explicit_error_markers = [
+            "⚠️ 任务已检测到卡死",
+            "⚠️ 任务已被终止",
+            "❌ 执行失败",
+            "❌ 运行超时",
+            "⚠️ 任务超时",
+            "❌ 任务出错"
+        ]
+        if any(marker in ai_response_text for marker in explicit_error_markers):
             self.set_state_error()
         else:
             self.set_state_success()
