@@ -750,3 +750,13 @@ async def execute_antigravity(
                         os.remove(log_file_path)
                     except Exception:
                         pass
+
+    MAX_ATTEMPTS = 2
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        res = await _run_single_attempt(attempt)
+        if res["has_reply"] or res["returncode"] == 0 or attempt == MAX_ATTEMPTS:
+            return res["is_error"]
+        log.warning(f"[Executor] Attempt {attempt}/{MAX_ATTEMPTS} failed/stalled without final response for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")
+        await asyncio.sleep(1.0)
+    return True
+
