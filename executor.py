@@ -21,26 +21,53 @@ _transcript_read_state = {}
 # 追踪进程 CPU 时间差值: pid -> (last_check_timestamp, cumulative_cputime_seconds)
 _process_cpu_tracker = {}
 
-def _is_process_cpu_active(pid: int) -> bool:
+def _get_process_group_cpu_seconds(pid: int) -> float:
+    """获取整个进程组（主进程 + 所有子进程/subagent）的累计 CPU 秒数。
+    这样即使主进程在 I/O wait，只要子进程在工作也能检测到活跃。"""
+    if not pid:
+        return 0.0
+    try:
+        pgid = os.getpgid(pid)
+        out = subprocess.check_output(
+            ["ps", "-e", "-o", "pgid=,cputimes="],
+            text=True, timeout=3
+        ).strip()
+        total = 0.0
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                try:
+                    if int(parts[0]) == pgid:
+                        total += float(parts[1])
+                except (ValueError, TypeError):
+                    continue
+        return total
+    except Exception:
+        try:
+            out = subprocess.check_output(
+                ["ps", "-p", str(pid), "-o", "cputimes="],
+                text=True, timeout=2
+            ).strip()
+            return float(out) if out else 0.0
+        except Exception:
+            return 0.0
+
+def _is_process_group_active(pid: int) -> bool:
+    """检测进程组是否有实际 CPU 活动（涵盖所有子进程/subagent）。
+    只要进程组中有任何进程在消耗 CPU（>1% 占比），就认定为活跃。"""
     if not pid:
         return False
-    try:
-        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "cputimes="], text=True, timeout=2).strip()
-        if out:
-            current_cputime = float(out)
-            now = time.time()
-            if pid in _process_cpu_tracker:
-                last_time, last_cputime = _process_cpu_tracker[pid]
-                time_delta = now - last_time
-                cpu_delta = current_cputime - last_cputime
-                _process_cpu_tracker[pid] = (now, current_cputime)
-                if time_delta > 0:
-                    # 如果这期间 CPU 时间有增加（哪怕 0.1s 以上的实际计算），且占比 > 5%
-                    return (cpu_delta / time_delta) > 0.05
-            else:
-                _process_cpu_tracker[pid] = (now, current_cputime)
-    except Exception:
-        pass
+    current_cputime = _get_process_group_cpu_seconds(pid)
+    now = time.time()
+    if pid in _process_cpu_tracker:
+        last_time, last_cputime = _process_cpu_tracker[pid]
+        time_delta = now - last_time
+        cpu_delta = current_cputime - last_cputime
+        _process_cpu_tracker[pid] = (now, current_cputime)
+        if time_delta > 0:
+            return (cpu_delta / time_delta) > 0.01
+    else:
+        _process_cpu_tracker[pid] = (now, current_cputime)
     return False
 
 async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, think_seconds, feishu_call_fn, start_index=0):
@@ -435,7 +462,8 @@ async def execute_antigravity(
             last_log_size = 0
             last_transcript_size = 0
             last_tool_action = ""
-            STALL_TIMEOUT = 120
+            STALL_TIMEOUT = 300
+            STALL_HARD_TIMEOUT = 600
             QUIET_WARNING_THRESHOLD = 45
             
             while process.returncode is None:
@@ -493,22 +521,31 @@ async def execute_antigravity(
                     break
                 
                 if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
-                    log.error(f"[Executor] Process stalled (no Token/log/CPU progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
-                    import signal
-                    try:
-                        pgid = os.getpgid(process.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                    except Exception as ex:
-                        log.error(f"Failed to kill stalled process: {ex}")
-                    
-                    error_card = CardBuilder.build_stall_error_card(user_text, think_seconds, stall_seconds)
-                    if bot_reply_msg_id:
-                        await _feishu_call(
-                            lambda: patch_interactive_card_sdk(bot_reply_msg_id, error_card),
-                            label="stall error card patch"
-                        )
-                    stderr_text = f"⚠️ 任务已检测到卡死并自动终止（连续 {STALL_TIMEOUT // 60} 分钟没有任何新 Token 或日志写入）。"
-                    break
+                    # 检测进程组（含子进程/subagent）是否仍有 CPU 活动
+                    cpu_active = await loop.run_in_executor(
+                        None, lambda: _is_process_group_active(process.pid)
+                    )
+                    # 达到硬上限时无条件终止；未达硬上限但进程组仍活跃则继续等待
+                    if cpu_active and stall_seconds < STALL_HARD_TIMEOUT:
+                        log.info(f"[Executor] No file progress for {stall_seconds}s but process group still CPU-active, extending wait (hard limit {STALL_HARD_TIMEOUT}s)")
+                    else:
+                        reason = "hard timeout" if stall_seconds >= STALL_HARD_TIMEOUT else "no CPU activity"
+                        log.error(f"[Executor] Process stalled ({reason}, no progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
+                        import signal
+                        try:
+                            pgid = os.getpgid(process.pid)
+                            os.killpg(pgid, signal.SIGKILL)
+                        except Exception as ex:
+                            log.error(f"Failed to kill stalled process: {ex}")
+                        
+                        error_card = CardBuilder.build_stall_error_card(user_text, think_seconds, stall_seconds)
+                        if bot_reply_msg_id:
+                            await _feishu_call(
+                                lambda: patch_interactive_card_sdk(bot_reply_msg_id, error_card),
+                                label="stall error card patch"
+                            )
+                        stderr_text = f"⚠️ 任务已检测到卡死并自动终止（连续 {stall_seconds // 60} 分钟没有任何新 Token 或日志写入）。"
+                        break
                 
                 if think_seconds > 43200:
                     log.error(f"[Executor] Process timeout reached (43200s / 12h) for chat {chat_id}, killing process group...")

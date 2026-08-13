@@ -37,8 +37,7 @@ archive_debug/
 *.ogg
 
 # Local agent customizations
-.agents/*
-!.agents/skills/
+.agents/
 .env
 
 # Database and backups
