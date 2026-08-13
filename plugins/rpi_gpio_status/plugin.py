@@ -41,6 +41,7 @@ except Exception:
 class RpiGpioStatusPlugin(BasePlugin):
 
     def initialize(self):
+        global GPIO_AVAILABLE, gpio_mode
         cfg = self.get_config()
         self.pins = cfg.get("gpio_pins", {"red": 22, "yellow": 27, "green": 17})
         self.led_objects = {}
@@ -49,6 +50,9 @@ class RpiGpioStatusPlugin(BasePlugin):
         self._anim_thread = None
         self._stop_anim = False
         self._timer_thread = None
+
+        if not GPIO_AVAILABLE:
+            self._try_auto_configure_dependencies()
 
         if GPIO_AVAILABLE:
             try:
@@ -75,6 +79,85 @@ class RpiGpioStatusPlugin(BasePlugin):
 
         # 1. 启动完成时闪烁绿灯 5 次，然后全灭
         self.on_startup_complete()
+
+    def _try_auto_configure_dependencies(self):
+        """Automatically enable system site packages in pyvenv.cfg if running in a venv on Raspberry Pi."""
+        import sys
+        
+        is_rpi = False
+        try:
+            if os.path.exists("/proc/device-tree/model"):
+                with open("/proc/device-tree/model", "r") as f:
+                    model = f.read().lower()
+                    if "raspberry pi" in model:
+                        is_rpi = True
+            if not is_rpi and os.path.exists("/proc/cpuinfo"):
+                with open("/proc/cpuinfo", "r") as f:
+                    if "raspberry pi" in f.read().lower():
+                        is_rpi = True
+        except Exception:
+            pass
+
+        if not is_rpi:
+            return
+
+        in_venv = sys.prefix != sys.base_prefix
+        if not in_venv:
+            return
+
+        cfg_path = os.path.join(sys.prefix, "pyvenv.cfg")
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                
+                modified = False
+                new_lines = []
+                for line in lines:
+                    if line.strip().startswith("include-system-site-packages"):
+                        parts = line.split("=")
+                        if len(parts) == 2 and "false" in parts[1].lower():
+                            line = f"{parts[0]}= true\n"
+                            modified = True
+                    new_lines.append(line)
+                
+                if modified:
+                    log.info(f"[Plugin:{self.plugin_id}] Auto-enabling system site packages in {cfg_path}")
+                    with open(cfg_path, "w", encoding="utf-8") as f:
+                        f.writelines(new_lines)
+            except Exception as e:
+                log.error(f"[Plugin:{self.plugin_id}] Failed to auto-configure pyvenv.cfg: {e}")
+
+        system_dist_packages = "/usr/lib/python3/dist-packages"
+        if os.path.exists(system_dist_packages) and system_dist_packages not in sys.path:
+            sys.path.append(system_dist_packages)
+            log.info(f"[Plugin:{self.plugin_id}] Dynamically appended system dist-packages to sys.path: {system_dist_packages}")
+
+        global GPIO_AVAILABLE, gpio_mode
+        try:
+            from gpiozero import LED, PWMLED
+            from gpiozero.pins.lgpio import LGPIOFactory
+            import gpiozero
+            gpiozero.Device.pin_factory = LGPIOFactory()
+            GPIO_AVAILABLE = True
+            gpio_mode = "GPIOZERO_LGPIO"
+            log.info(f"[Plugin:{self.plugin_id}] Successfully hot-loaded gpiozero via system site-packages!")
+        except Exception as e1:
+            try:
+                import RPi.GPIO as GPIO
+                globals()['GPIO'] = GPIO
+                GPIO_AVAILABLE = True
+                gpio_mode = "RPI_GPIO"
+                log.info(f"[Plugin:{self.plugin_id}] Successfully hot-loaded RPi.GPIO via system site-packages!")
+            except Exception as e2:
+                try:
+                    import rpi_lgpio as GPIO
+                    globals()['GPIO'] = GPIO
+                    GPIO_AVAILABLE = True
+                    gpio_mode = "RPI_LGPIO"
+                    log.info(f"[Plugin:{self.plugin_id}] Successfully hot-loaded rpi_lgpio via system site-packages!")
+                except Exception as e3:
+                    log.warning(f"[Plugin:{self.plugin_id}] Retry loading GPIO failed: {e1} | {e2} | {e3}")
 
     def _stop_background_effects(self):
         """Stops active breathing/blinking threads safely."""
@@ -214,16 +297,18 @@ class RpiGpioStatusPlugin(BasePlugin):
 
     async def on_after_ai(self, ai_response_text: str, chat_id: str, session_data: dict) -> str:
         """Hook: AI 任务响应分析 -> 规则 2 / 规则 3"""
-        # 避让正文中普通的"错误/失败"词汇解释，只有真正发生任务失败、超时、卡死强杀时才亮红灯
-        explicit_error_markers = [
-            "⚠️ 任务已检测到卡死",
-            "⚠️ 任务已被终止",
-            "❌ 执行失败",
-            "❌ 运行超时",
-            "⚠️ 任务超时",
-            "❌ 任务出错"
-        ]
-        if any(marker in ai_response_text for marker in explicit_error_markers):
+        # 优先读取由执行器写入的管道执行状态标记（表示子进程返回非零退出状态或出错）
+        is_err = session_data.get("last_execution_error", False)
+        
+        # 兼容性兜底：根据文本中的特征（如以报错图标开头或含有异常崩溃堆栈）进行判定
+        if not is_err:
+            stripped = ai_response_text.strip()
+            if stripped.startswith(("❌", "⚠️")):
+                is_err = True
+            elif "traceback (most recent call last):" in stripped.lower():
+                is_err = True
+
+        if is_err:
             self.set_state_error()
         else:
             self.set_state_success()

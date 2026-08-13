@@ -121,6 +121,49 @@ def extract_final_response_from_transcript(transcript_path, initial_size=0):
         log.error(f"Failed to extract final response from transcript: {e}")
     return None
 
+def is_transcript_turn_completed(transcript_path, initial_size=0):
+    """检测当前轮次在 transcript.jsonl 中是否已包含完成状态 (status=='DONE') 的 PLANNER_RESPONSE 且无待执行工具。"""
+    if not transcript_path or not os.path.exists(transcript_path):
+        return False
+    try:
+        with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
+            if initial_size > 0:
+                try:
+                    f.seek(initial_size)
+                except Exception:
+                    pass
+            lines = f.readlines()
+        if not lines:
+            return False
+            
+        turn_lines = []
+        for line in lines:
+            line_str = line.strip()
+            if not line_str:
+                continue
+            try:
+                data = json.loads(line_str)
+            except Exception:
+                continue
+            if data.get("type") == "USER_INPUT":
+                turn_lines = []
+            else:
+                turn_lines.append(data)
+
+        if not turn_lines:
+            return False
+            
+        last_event = turn_lines[-1]
+        if (last_event.get("source") == "MODEL" and 
+            last_event.get("type") == "PLANNER_RESPONSE" and 
+            last_event.get("status") == "DONE"):
+            tool_calls = last_event.get("tool_calls")
+            if not tool_calls or len(tool_calls) == 0:
+                return True
+    except Exception:
+        pass
+    return False
+
 def extract_final_chinese_response(text):
     if not text:
         return ""
@@ -227,76 +270,86 @@ async def execute_antigravity(
     from plugin_manager import plugin_manager
     user_text, session_data = await plugin_manager.dispatch_before_ai(user_text, chat_id, session_data)
 
-    os.makedirs("logs", exist_ok=True)
-    log_file_path = f"logs/agy_log_{uuid.uuid4().hex}.txt"
-    cmd_args = [
-        ANTIGRAVITY_BIN, 
-        "-p", system_instruction + final_prompt, 
-        "--model", session_data["model"],
-        "--print-timeout", "60m",
-        "--log-file", log_file_path
-    ]
-    is_admin_chat = is_admin(chat_id)
-    if DANGEROUSLY_SKIP_PERMISSIONS and is_admin_chat:
-        cmd_args.append("--dangerously-skip-permissions")
-        
-    cwd_dir = None
-    allow_project = is_admin_chat or has_scope(chat_id, SCOPE_PROJECT)
-    if allow_project and session_data.get("project") and session_data["project"] not in ["默认", "Default"]:
-        proj_val = session_data["project"]
-        if os.path.isdir(proj_val):
-            cwd_dir = proj_val
-            cmd_args.extend(["--add-dir", proj_val])
-        else:
-            cmd_args.extend(["--project", proj_val])
-    elif not allow_project:
-        log.info(f"[Executor] Chat {chat_id} has no project scope; using default workspace")
-        
-    if not is_new_conversation:
-        cmd_args.extend(["--conversation", session_data["conversation"]])
-        
-    target_transcript_path = None
-    initial_transcript_size = 0
-    if not is_new_conversation:
-        conv_id = session_data["conversation"]
-        path = get_transcript_path(conv_id)
-        if os.path.exists(path):
-            target_transcript_path = path
-            initial_transcript_size = os.path.getsize(path)
+    MAX_ATTEMPTS = 2
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        os.makedirs("logs", exist_ok=True)
+        log_file_path = f"logs/agy_log_{uuid.uuid4().hex}.txt"
+        cmd_args = [
+            ANTIGRAVITY_BIN, 
+            "-p", system_instruction + final_prompt, 
+            "--model", session_data["model"],
+            "--print-timeout", "60m",
+            "--log-file", log_file_path
+        ]
+        is_admin_chat = is_admin(chat_id)
+        if DANGEROUSLY_SKIP_PERMISSIONS and is_admin_chat:
+            cmd_args.append("--dangerously-skip-permissions")
+            
+        cwd_dir = None
+        allow_project = is_admin_chat or has_scope(chat_id, SCOPE_PROJECT)
+        if allow_project and session_data.get("project") and session_data["project"] not in ["默认", "Default"]:
+            proj_val = session_data["project"]
+            if os.path.isdir(proj_val):
+                cwd_dir = proj_val
+                cmd_args.extend(["--add-dir", proj_val])
+            else:
+                cmd_args.extend(["--project", proj_val])
+        elif not allow_project:
+            log.info(f"[Executor] Chat {chat_id} has no project scope; using default workspace")
+            
+        cur_is_new_conv = (is_new_conversation and attempt == 1) or not session_data.get("conversation")
+        if not cur_is_new_conv and session_data.get("conversation"):
+            cmd_args.extend(["--conversation", session_data["conversation"]])
+            
+        target_transcript_path = None
+        initial_transcript_size = 0
+        if session_data.get("conversation"):
+            conv_id = session_data["conversation"]
+            path = get_transcript_path(conv_id)
+            if os.path.exists(path):
+                target_transcript_path = path
+                initial_transcript_size = os.path.getsize(path)
 
-    custom_env = os.environ.copy()
-    custom_env["GIT_TERMINAL_PROMPT"] = "0"
-    custom_env["DEBIAN_FRONTEND"] = "noninteractive"
-    custom_env["GIT_ASKPASS"] = "echo"
-    custom_env["PYTHONUNBUFFERED"] = "1"
-    custom_env["STDOUT_LINE_BUFFERED"] = "1"
+        custom_env = os.environ.copy()
+        custom_env["GIT_TERMINAL_PROMPT"] = "0"
+        custom_env["DEBIAN_FRONTEND"] = "noninteractive"
+        custom_env["GIT_ASKPASS"] = "echo"
+        custom_env["PYTHONUNBUFFERED"] = "1"
+        custom_env["STDOUT_LINE_BUFFERED"] = "1"
 
-    process = await asyncio.create_subprocess_exec(
-        *cmd_args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
-        preexec_fn=os.setsid,
-        cwd=cwd_dir,
-        env=custom_env
-    )
-    running_processes[chat_id] = process
-    
-    init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text)
-    if bot_reply_msg_id:
-        await _feishu_call(
-            lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card),
-            label="init-card patch"
+        process = await asyncio.create_subprocess_exec(
+            *cmd_args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            preexec_fn=os.setsid,
+            cwd=cwd_dir,
+            env=custom_env
         )
-    else:
-        new_id = await _feishu_call(
-            lambda: send_interactive_card_sdk(message_id, init_card),
-            label="init-card send"
-        )
-        if new_id:
-            bot_reply_msg_id = new_id
+        running_processes[chat_id] = process
+        
+        if attempt == 1:
+            init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text)
         else:
-            log.warning(f"[Executor] Initial typing card send failed for chat {chat_id}; will fall back to sending final card as new message")
+            init_card = CardBuilder.build_typing_indicator(
+                downloaded_file_name, download_success,
+                f"🔄 首次发起因无响应挂死，正在自动为您重新发起第 {attempt}/{MAX_ATTEMPTS} 次重试...\n\n{user_text}"
+            )
+
+        if bot_reply_msg_id:
+            await _feishu_call(
+                lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card),
+                label=f"init-card patch attempt {attempt}"
+            )
+        else:
+            new_id = await _feishu_call(
+                lambda: send_interactive_card_sdk(message_id, init_card),
+                label=f"init-card send attempt {attempt}"
+            )
+            if new_id:
+                bot_reply_msg_id = new_id
+            else:
+                log.warning(f"[Executor] Initial typing card send failed for chat {chat_id}; will fall back to sending final card as new message")
     
     accumulated_text = ""
     stderr_text = ""
@@ -388,8 +441,8 @@ async def execute_antigravity(
     last_stdout_len = 0
     last_log_size = 0
     last_transcript_size = 0
-    STALL_TIMEOUT = 600  # 连续 10 分钟 0 Token / 0 CPU / 0 日志增长判定为真卡死终止
-    QUIET_WARNING_THRESHOLD = 180  # 连续 3 分钟无输出时触发带有交互按钮的预警卡片
+    STALL_TIMEOUT = 120  # 连续 2 分钟无 Token、无日志、无 transcript 增长判定为底层协程死锁卡死终止
+    QUIET_WARNING_THRESHOLD = 45  # 连续 45 秒无新输出时触发带有交互按钮的预警卡片
     
     try:
         while process.returncode is None:
@@ -421,12 +474,15 @@ async def execute_antigravity(
             if process.pid:
                 cpu_active = await loop.run_in_executor(None, lambda: _is_process_cpu_active(process.pid))
             
-            # 活性检测：stdout / 日志 / transcript 有任何字节写入、工具动作变化 或 CPU 正在计算，都算"活跃推进"
-            if (current_stdout_len > last_stdout_len or 
+            # 活性检测：stdout / 日志 / transcript 有任何字节写入 或 工具动作变化，才算“有效推进”
+            # 注意：不能把 cpu_active 作为无限重置 last_progress_time 的唯一依据，防止进程死循环耗尽 CPU
+            has_data_growth = (
+                current_stdout_len > last_stdout_len or 
                 current_log_size > last_log_size or 
                 current_transcript_size > last_transcript_size or 
-                cpu_active or
-                (action and action != last_tool_action)):
+                (action and action != last_tool_action)
+            )
+            if has_data_growth:
                 last_progress_time = time.time()
                 last_stdout_len = current_stdout_len
                 last_log_size = current_log_size
@@ -438,8 +494,26 @@ async def execute_antigravity(
             
             think_seconds = int(time.time() - process_start_time)
             stall_seconds = int(time.time() - last_progress_time)
+
+            # 监测 transcript.jsonl 中本轮对话模型是否已完全生成完毕 (DONE)
+            # 若模型已回答完毕，但底层 CLI 子进程由于内部 Go 协程死锁/网络连接未及时退出，等待 5s 无新数据后自动优雅强杀，防止无休止卡死
+            turn_done = False
+            if t_path and os.path.exists(t_path):
+                turn_done = await loop.run_in_executor(
+                    None,
+                    lambda: is_transcript_turn_completed(t_path, initial_transcript_size)
+                )
+            if turn_done and stall_seconds >= 5:
+                log.info(f"[Executor] Model turn completed in transcript, but process PID {process.pid} hung without exiting. Terminating process group...")
+                import signal
+                try:
+                    pgid = os.getpgid(process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except Exception as ex:
+                    log.error(f"Failed to kill process group after completed turn: {ex}")
+                break
             
-            # 活性超时：连续 10 分钟无 Token、无 CPU、无日志增长，自动安全回收并推带有重试按钮的卡片
+            # 活性超时：无新 Token、无日志增长超限，自动安全回收并推带有重试按钮的卡片
             if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
                 log.error(f"[Executor] Process stalled (no Token/log/CPU progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
                 import signal
@@ -556,11 +630,23 @@ async def execute_antigravity(
         except asyncio.TimeoutError:
             log.warning("stderr_task timed out (possible pipe leak)")
         
-        is_error = False
+        is_error = (process.returncode != 0 and process.returncode is not None)
+        session_data["last_execution_error"] = is_error
 
         # 优先从 transcript.jsonl 中提取干净的最终回复，过滤掉前面的中间思考过程与思维链
         transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
         final_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
+        
+        # 若提取最终回答失败且进程非正常退出（如卡死强杀），但在允许的重试次数范围内，自动发起下一次重试
+        if not final_reply and (process.returncode != 0 and process.returncode is not None) and attempt < MAX_ATTEMPTS:
+            log.warning(f"[Executor] Attempt {attempt}/{MAX_ATTEMPTS} failed/stalled without final response for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")
+            if os.path.exists(log_file_path):
+                try:
+                    os.remove(log_file_path)
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
+            continue
         
         if final_reply:
             reply_text = final_reply
