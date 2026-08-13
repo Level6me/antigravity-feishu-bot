@@ -202,6 +202,7 @@ async def execute_antigravity(
     download_success, running_processes
 ):
     loop = asyncio.get_running_loop()
+    target_transcript_path = None
 
     # Daily execution limit for non-admin chats.
     if not allow_execution(chat_id):
@@ -266,12 +267,11 @@ async def execute_antigravity(
         except Exception as e:
             log.error(f"Failed to sync conversation id from log: {e}")
 
-    # Pipe user_text and session_data through active plugins on_before_ai hook
     from plugin_manager import plugin_manager
     user_text, session_data = await plugin_manager.dispatch_before_ai(user_text, chat_id, session_data)
 
-    MAX_ATTEMPTS = 2
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    async def _run_single_attempt(attempt):
+        nonlocal bot_reply_msg_id, target_transcript_path
         os.makedirs("logs", exist_ok=True)
         log_file_path = f"logs/agy_log_{uuid.uuid4().hex}.txt"
         cmd_args = [
@@ -294,9 +294,7 @@ async def execute_antigravity(
                 cmd_args.extend(["--add-dir", proj_val])
             else:
                 cmd_args.extend(["--project", proj_val])
-        elif not allow_project:
-            log.info(f"[Executor] Chat {chat_id} has no project scope; using default workspace")
-            
+        
         cur_is_new_conv = (is_new_conversation and attempt == 1) or not session_data.get("conversation")
         if not cur_is_new_conv and session_data.get("conversation"):
             cmd_args.extend(["--conversation", session_data["conversation"]])
@@ -317,482 +315,438 @@ async def execute_antigravity(
         custom_env["PYTHONUNBUFFERED"] = "1"
         custom_env["STDOUT_LINE_BUFFERED"] = "1"
 
-        process = await asyncio.create_subprocess_exec(
-            *cmd_args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            preexec_fn=os.setsid,
-            cwd=cwd_dir,
-            env=custom_env
-        )
-        running_processes[chat_id] = process
-        
-        if attempt == 1:
-            init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text)
-        else:
-            init_card = CardBuilder.build_typing_indicator(
-                downloaded_file_name, download_success,
-                f"🔄 首次发起因无响应挂死，正在自动为您重新发起第 {attempt}/{MAX_ATTEMPTS} 次重试...\n\n{user_text}"
-            )
-
-        if bot_reply_msg_id:
-            await _feishu_call(
-                lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card),
-                label=f"init-card patch attempt {attempt}"
-            )
-        else:
-            new_id = await _feishu_call(
-                lambda: send_interactive_card_sdk(message_id, init_card),
-                label=f"init-card send attempt {attempt}"
-            )
-            if new_id:
-                bot_reply_msg_id = new_id
-            else:
-                log.warning(f"[Executor] Initial typing card send failed for chat {chat_id}; will fall back to sending final card as new message")
-    
-    accumulated_text = ""
-    stderr_text = ""
-    
-    async def read_stdout():
-        nonlocal accumulated_text
-        import codecs
-        decoder = codecs.getincrementaldecoder('utf-8')()
-        while True:
-            chunk = await process.stdout.read(64)
-            if not chunk:
-                break
-            accumulated_text += decoder.decode(chunk)
-        accumulated_text += decoder.decode(b'', final=True)
-            
-    async def read_stderr():
-        nonlocal stderr_text
-        import codecs
-        decoder = codecs.getincrementaldecoder('utf-8')()
-        while True:
-            chunk = await process.stderr.read(64)
-            if not chunk:
-                break
-            stderr_text += decoder.decode(chunk)
-        stderr_text += decoder.decode(b'', final=True)
-
-    def get_latest_transcript_file():
-        if session_data.get("conversation"):
-            conv_id = session_data["conversation"]
-            path = get_transcript_path(conv_id)
-            if os.path.exists(path):
-                return path
-        return None
-
-    def fetch_current_action():
-        t_path = target_transcript_path or get_latest_transcript_file()
-        if not t_path or not os.path.exists(t_path):
-            return ""
         try:
-            with open(t_path, 'r', encoding='utf-8', errors='ignore') as f:
-                if initial_transcript_size > 0:
-                    try:
-                        f.seek(initial_transcript_size)
-                    except Exception:
-                        pass
-                lines = f.readlines()
-            if not lines:
-                return ""
-            # 从本轮新增的行中反向查找最新工具动作
-            for line in reversed(lines):
-                line_str = line.strip()
-                if not line_str:
-                    continue
-                try:
-                    data = json.loads(line_str)
-                    if data.get("type") == "USER_INPUT":
-                        break
-                    t_calls = data.get("tool_calls")
-                    if t_calls and isinstance(t_calls, list) and len(t_calls) > 0:
-                        last_call = t_calls[-1]
-                        if isinstance(last_call, dict):
-                            args = last_call.get("args", {})
-                            name = last_call.get("name", "")
-                            act = args.get("toolAction", "") or args.get("toolSummary", "")
-                            if not act and name:
-                                act = f"正在执行 {name}"
-                            if isinstance(act, str) and act.strip():
-                                clean_act = act.replace('"', '').strip()
-                                if clean_act:
-                                    return clean_act
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return ""
-
-    stdout_task = asyncio.create_task(read_stdout())
-    stderr_task = asyncio.create_task(read_stderr())
-    
-    last_update_text = ""
-    last_tool_action = ""
-    last_streamed_length = 0
-    last_patch_time = time.time()
-    current_patch_interval = 1.0
-    process_start_time = time.time()
-    # 活性检测：追踪 stdout + 日志文件增长 + transcript.jsonl 增量 Token + CPU 活性 + 工具动作变化
-    # 如果连续 STALL_TIMEOUT 秒无任何 Token、CPU 计算或日志写入，说明进程真正挂死，进行交互式回收
-    last_progress_time = process_start_time
-    last_stdout_len = 0
-    last_log_size = 0
-    last_transcript_size = 0
-    STALL_TIMEOUT = 120  # 连续 2 分钟无 Token、无日志、无 transcript 增长判定为底层协程死锁卡死终止
-    QUIET_WARNING_THRESHOLD = 45  # 连续 45 秒无新输出时触发带有交互按钮的预警卡片
-    
-    try:
-        while process.returncode is None:
-            await asyncio.sleep(0.3)
-            
-            # 尽早提取并同步主会话 ID (处理新创建会话、失效会话重建与 ID 变化)
-            if os.path.exists(log_file_path):
-                await _sync_conversation_id_from_log(log_file_path)
-            
-            # 实时从 transcript.jsonl 中获取最新的工具执行动作以更新状态指示卡片
-            action = await loop.run_in_executor(None, fetch_current_action)
-            
-            # 检测日志文件与 transcript 文件大小变化
-            current_log_size = os.path.getsize(log_file_path) if os.path.exists(log_file_path) else 0
-            t_path = target_transcript_path or get_latest_transcript_file()
-            current_transcript_size = os.path.getsize(t_path) if (t_path and os.path.exists(t_path)) else 0
-            current_stdout_len = len(accumulated_text)
-            
-            # 实时提取已增量生成的文本（打字机流式输出）
-            partial_text = None
-            if t_path and os.path.exists(t_path):
-                partial_text = await loop.run_in_executor(
-                    None,
-                    lambda: extract_final_response_from_transcript(t_path, initial_transcript_size)
-                )
-
-            # 轮询 CPU 活性
-            cpu_active = False
-            if process.pid:
-                cpu_active = await loop.run_in_executor(None, lambda: _is_process_cpu_active(process.pid))
-            
-            # 活性检测：stdout / 日志 / transcript 有任何字节写入 或 工具动作变化，才算“有效推进”
-            # 注意：不能把 cpu_active 作为无限重置 last_progress_time 的唯一依据，防止进程死循环耗尽 CPU
-            has_data_growth = (
-                current_stdout_len > last_stdout_len or 
-                current_log_size > last_log_size or 
-                current_transcript_size > last_transcript_size or 
-                (action and action != last_tool_action)
+            process = await asyncio.create_subprocess_exec(
+                *cmd_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                preexec_fn=os.setsid,
+                cwd=cwd_dir,
+                env=custom_env
             )
-            if has_data_growth:
-                last_progress_time = time.time()
-                last_stdout_len = current_stdout_len
-                last_log_size = current_log_size
-                last_transcript_size = current_transcript_size
-                if action and action != last_tool_action:
-                    last_tool_action = action
-                    from plugin_manager import plugin_manager
-                    await plugin_manager.dispatch_tool_call(action, {})
+            running_processes[chat_id] = process
             
-            think_seconds = int(time.time() - process_start_time)
-            stall_seconds = int(time.time() - last_progress_time)
-
-            # 监测 transcript.jsonl 中本轮对话模型是否已完全生成完毕 (DONE)
-            # 若模型已回答完毕，但底层 CLI 子进程由于内部 Go 协程死锁/网络连接未及时退出，等待 5s 无新数据后自动优雅强杀，防止无休止卡死
-            turn_done = False
-            if t_path and os.path.exists(t_path):
-                turn_done = await loop.run_in_executor(
-                    None,
-                    lambda: is_transcript_turn_completed(t_path, initial_transcript_size)
-                )
-            if turn_done and stall_seconds >= 5:
-                log.info(f"[Executor] Model turn completed in transcript, but process PID {process.pid} hung without exiting. Terminating process group...")
-                import signal
-                try:
-                    pgid = os.getpgid(process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except Exception as ex:
-                    log.error(f"Failed to kill process group after completed turn: {ex}")
-                break
-            
-            # 活性超时：无新 Token、无日志增长超限，自动安全回收并推带有重试按钮的卡片
-            if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
-                log.error(f"[Executor] Process stalled (no Token/log/CPU progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
-                import signal
-                try:
-                    pgid = os.getpgid(process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except Exception as ex:
-                    log.error(f"Failed to kill stalled process: {ex}")
-                
-                # 发送带有交互操作按钮的最终卡片
-                error_card = CardBuilder.build_stall_error_card(user_text, think_seconds, stall_seconds)
-                if bot_reply_msg_id:
-                    await _feishu_call(
-                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, error_card),
-                        label="stall error card patch"
-                    )
-                stderr_text = f"⚠️ 任务已检测到卡死并自动终止（连续 {STALL_TIMEOUT // 60} 分钟没有任何新 Token 或日志写入）。"
-                break
-            
-            # 全局超时强杀防护 (12小时超长任务防护上限)
-            if think_seconds > 43200:
-                log.error(f"[Executor] Process timeout reached (43200s / 12h) for chat {chat_id}, killing process group...")
-                import signal
-                try:
-                    pgid = os.getpgid(process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except Exception as ex:
-                    log.error(f"Failed to kill timed out process: {ex}")
-                stderr_text = "⚠️ 执行超时 (12小时)：后台超大型任务已达到系统设定的 12 小时最高保护上限。"
-                break
-
-            # 渲染进度、全流式打字机或预警卡片
-            desired_patch_interval = 0.4
-            if stall_seconds >= QUIET_WARNING_THRESHOLD:
-                # 超过 3 分钟未更新输出时，推送带有 [继续等待] 与 [叫停任务] 按钮的交互卡片
-                indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
-                desired_patch_interval = 2.0
-            elif partial_text and len(partial_text.strip()) > 0:
-                clean_partial = re.sub(r'\[CHOICE_CARD\]\s*Q:.*?(?:\[/CHOICE_CARD\]|\Z)', '', partial_text, flags=re.DOTALL | re.IGNORECASE).strip()
-                if not clean_partial:
-                    clean_partial = partial_text
-                target_len = len(clean_partial)
-                if last_streamed_length < target_len:
-                    last_streamed_length = min(target_len, last_streamed_length + 150)
-                display_partial = clean_partial[:last_streamed_length]
-                indicator_card = CardBuilder.build_streaming_indicator(display_partial, action or last_tool_action, user_text, think_seconds)
-                desired_patch_interval = 0.4
+            if attempt == 1:
+                init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text)
             else:
-                display_action = action or last_tool_action
-                if display_action:
-                    indicator_card = CardBuilder.build_tool_indicator(display_action, user_text, downloaded_file_name, download_success, think_seconds)
+                init_card = CardBuilder.build_typing_indicator(
+                    downloaded_file_name, download_success,
+                    f"🔄 首次发起因无响应挂死，正在自动为您重新发起第 {attempt}/2 次重试...\n\n{user_text}"
+                )
+
+            if bot_reply_msg_id:
+                await _feishu_call(
+                    lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card),
+                    label=f"init-card patch attempt {attempt}"
+                )
+            else:
+                new_id = await _feishu_call(
+                    lambda: send_interactive_card_sdk(message_id, init_card),
+                    label=f"init-card send attempt {attempt}"
+                )
+                if new_id:
+                    bot_reply_msg_id = new_id
                 else:
-                    indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
-                desired_patch_interval = 0.4
+                    log.warning(f"[Executor] Initial typing card send failed for chat {chat_id}; will fall back to sending final card as new message")
             
-            if time.time() - last_patch_time >= desired_patch_interval:
-                last_patch_time = time.time()
-                if bot_reply_msg_id:
-                    await _feishu_call(
-                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
-                        label="indicator patch"
-                    )
-                            
-            if stdout_task.done() and stderr_task.done():
-                break
+            accumulated_text = ""
+            stderr_text = ""
+            
+            async def read_stdout():
+                nonlocal accumulated_text
+                import codecs
+                decoder = codecs.getincrementaldecoder('utf-8')()
+                while True:
+                    chunk = await process.stdout.read(64)
+                    if not chunk:
+                        break
+                    accumulated_text += decoder.decode(chunk)
+                accumulated_text += decoder.decode(b'', final=True)
+                    
+            async def read_stderr():
+                nonlocal stderr_text
+                import codecs
+                decoder = codecs.getincrementaldecoder('utf-8')()
+                while True:
+                    chunk = await process.stderr.read(64)
+                    if not chunk:
+                        break
+                    stderr_text += decoder.decode(chunk)
+                stderr_text += decoder.decode(b'', final=True)
 
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            log.warning(f"[Executor] process.wait() timed out for chat {chat_id} (pid {process.pid}) — likely grandchild inherited pipe fd; force-killing process group")
-            import signal
-            try:
-                pgid = os.getpgid(process.pid)
-                os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except Exception as e:
-                log.error(f"Failed to kill process group on wait timeout: {e}")
-            try:
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                log.error(f"[Executor] process.wait() still hung after SIGKILL for chat {chat_id}; abandoning")
-        except Exception as e:
-            log.error(f"Process wait error: {e}")
-            import signal
-            try:
-                pgid = os.getpgid(process.pid)
-                os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                log.warning(f"Process {process.pid} already exited when trying to terminate.")
-            except Exception as e:
-                log.error(f"Failed to kill process group {process.pid}: {e}")
+            def get_latest_transcript_file():
+                if session_data.get("conversation"):
+                    conv_id = session_data["conversation"]
+                    path = get_transcript_path(conv_id)
+                    if os.path.exists(path):
+                        return path
+                return None
+
+            def fetch_current_action():
+                t_path = target_transcript_path or get_latest_transcript_file()
+                if not t_path or not os.path.exists(t_path):
+                    return ""
                 try:
-                    process.kill()
+                    with open(t_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        if initial_transcript_size > 0:
+                            try:
+                                f.seek(initial_transcript_size)
+                            except Exception:
+                                pass
+                        lines = f.readlines()
+                    if not lines:
+                        return ""
+                    for line in reversed(lines):
+                        line_str = line.strip()
+                        if not line_str:
+                            continue
+                        try:
+                            data = json.loads(line_str)
+                            if data.get("type") == "USER_INPUT":
+                                break
+                            t_calls = data.get("tool_calls")
+                            if t_calls and isinstance(t_calls, list) and len(t_calls) > 0:
+                                last_call = t_calls[-1]
+                                if isinstance(last_call, dict):
+                                    args = last_call.get("args", {})
+                                    name = last_call.get("name", "")
+                                    act = args.get("toolAction", "") or args.get("toolSummary", "")
+                                    if not act and name:
+                                        act = f"正在执行 {name}"
+                                    if isinstance(act, str) and act.strip():
+                                        clean_act = act.replace('"', '').strip()
+                                        if clean_act:
+                                            return clean_act
+                        except Exception:
+                            continue
                 except Exception:
                     pass
-        finally:
-            running_processes.pop(chat_id, None)
-            # 子进程退出后显式关闭管道 transport，防止孙进程继承 fd 导致 read_stdout 永远不返回 EOF
-            for pipe in (process.stdout, process.stderr):
-                if pipe is not None:
+                return ""
+
+            stdout_task = asyncio.create_task(read_stdout())
+            stderr_task = asyncio.create_task(read_stderr())
+            
+            last_streamed_length = 0
+            last_patch_time = time.time()
+            process_start_time = time.time()
+            last_progress_time = process_start_time
+            last_stdout_len = 0
+            last_log_size = 0
+            last_transcript_size = 0
+            last_tool_action = ""
+            STALL_TIMEOUT = 120
+            QUIET_WARNING_THRESHOLD = 45
+            
+            while process.returncode is None:
+                await asyncio.sleep(0.3)
+                
+                if os.path.exists(log_file_path):
+                    await _sync_conversation_id_from_log(log_file_path)
+                
+                action = await loop.run_in_executor(None, fetch_current_action)
+                current_log_size = os.path.getsize(log_file_path) if os.path.exists(log_file_path) else 0
+                t_path = target_transcript_path or get_latest_transcript_file()
+                current_transcript_size = os.path.getsize(t_path) if (t_path and os.path.exists(t_path)) else 0
+                current_stdout_len = len(accumulated_text)
+                
+                partial_text = None
+                if t_path and os.path.exists(t_path):
+                    partial_text = await loop.run_in_executor(
+                        None,
+                        lambda: extract_final_response_from_transcript(t_path, initial_transcript_size)
+                    )
+
+                has_data_growth = (
+                    current_stdout_len > last_stdout_len or 
+                    current_log_size > last_log_size or 
+                    current_transcript_size > last_transcript_size or 
+                    (action and action != last_tool_action)
+                )
+                if has_data_growth:
+                    last_progress_time = time.time()
+                    last_stdout_len = current_stdout_len
+                    last_log_size = current_log_size
+                    last_transcript_size = current_transcript_size
+                    if action and action != last_tool_action:
+                        last_tool_action = action
+                        from plugin_manager import plugin_manager
+                        await plugin_manager.dispatch_tool_call(action, {})
+                
+                think_seconds = int(time.time() - process_start_time)
+                stall_seconds = int(time.time() - last_progress_time)
+
+                turn_done = False
+                if t_path and os.path.exists(t_path):
+                    turn_done = await loop.run_in_executor(
+                        None,
+                        lambda: is_transcript_turn_completed(t_path, initial_transcript_size)
+                    )
+                if turn_done and stall_seconds >= 5:
+                    log.info(f"[Executor] Model turn completed in transcript, but process PID {process.pid} hung without exiting. Terminating process group...")
+                    import signal
                     try:
-                        transport = pipe._transport if hasattr(pipe, "_transport") else None
-                        if transport is not None:
-                            transport.close()
+                        pgid = os.getpgid(process.pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    except Exception as ex:
+                        log.error(f"Failed to kill process group after completed turn: {ex}")
+                    break
+                
+                if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
+                    log.error(f"[Executor] Process stalled (no Token/log/CPU progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
+                    import signal
+                    try:
+                        pgid = os.getpgid(process.pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    except Exception as ex:
+                        log.error(f"Failed to kill stalled process: {ex}")
+                    
+                    error_card = CardBuilder.build_stall_error_card(user_text, think_seconds, stall_seconds)
+                    if bot_reply_msg_id:
+                        await _feishu_call(
+                            lambda: patch_interactive_card_sdk(bot_reply_msg_id, error_card),
+                            label="stall error card patch"
+                        )
+                    stderr_text = f"⚠️ 任务已检测到卡死并自动终止（连续 {STALL_TIMEOUT // 60} 分钟没有任何新 Token 或日志写入）。"
+                    break
+                
+                if think_seconds > 43200:
+                    log.error(f"[Executor] Process timeout reached (43200s / 12h) for chat {chat_id}, killing process group...")
+                    import signal
+                    try:
+                        pgid = os.getpgid(process.pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    except Exception as ex:
+                        log.error(f"Failed to kill timed out process: {ex}")
+                    stderr_text = "⚠️ 执行超时 (12小时)：后台超大型任务已达到系统设定的 12 小时最高保护上限。"
+                    break
+
+                desired_patch_interval = 0.4
+                if stall_seconds >= QUIET_WARNING_THRESHOLD:
+                    indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
+                    desired_patch_interval = 2.0
+                elif partial_text and len(partial_text.strip()) > 0:
+                    clean_partial = re.sub(r'\[CHOICE_CARD\]\s*Q:.*?(?:\[/CHOICE_CARD\]|\Z)', '', partial_text, flags=re.DOTALL | re.IGNORECASE).strip()
+                    if not clean_partial:
+                        clean_partial = partial_text
+                    target_len = len(clean_partial)
+                    if last_streamed_length < target_len:
+                        last_streamed_length = min(target_len, last_streamed_length + 150)
+                    display_partial = clean_partial[:last_streamed_length]
+                    indicator_card = CardBuilder.build_streaming_indicator(display_partial, action or last_tool_action, user_text, think_seconds)
+                    desired_patch_interval = 0.4
+                else:
+                    display_action = action or last_tool_action
+                    if display_action:
+                        indicator_card = CardBuilder.build_tool_indicator(display_action, user_text, downloaded_file_name, download_success, think_seconds)
+                    else:
+                        indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
+                    desired_patch_interval = 0.4
+                
+                if time.time() - last_patch_time >= desired_patch_interval:
+                    last_patch_time = time.time()
+                    if bot_reply_msg_id:
+                        await _feishu_call(
+                            lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
+                            label="indicator patch"
+                        )
+                                
+                if stdout_task.done() and stderr_task.done():
+                    break
+
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                log.warning(f"[Executor] process.wait() timed out for chat {chat_id} (pid {process.pid}) — likely grandchild inherited pipe fd; force-killing process group")
+                import signal
+                try:
+                    pgid = os.getpgid(process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except Exception as e:
+                    log.error(f"Failed to kill process group on wait timeout: {e}")
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    log.error(f"[Executor] process.wait() still hung after SIGKILL for chat {chat_id}; abandoning")
+            except Exception as e:
+                log.error(f"Process wait error: {e}")
+                import signal
+                try:
+                    pgid = os.getpgid(process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    log.warning(f"Process {process.pid} already exited when trying to terminate.")
+                except Exception as e:
+                    log.error(f"Failed to kill process group {process.pid}: {e}")
+                    try:
+                        process.kill()
                     except Exception:
                         pass
-        try:
-            await asyncio.wait_for(stdout_task, timeout=2.0)
-        except asyncio.TimeoutError:
-            log.warning("stdout_task timed out (possible pipe leak)")
-        try:
-            await asyncio.wait_for(stderr_task, timeout=2.0)
-        except asyncio.TimeoutError:
-            log.warning("stderr_task timed out (possible pipe leak)")
-        
-        is_error = (process.returncode != 0 and process.returncode is not None)
-        session_data["last_execution_error"] = is_error
-
-        # 优先从 transcript.jsonl 中提取干净的最终回复，过滤掉前面的中间思考过程与思维链
-        transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
-        final_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
-        
-        # 若提取最终回答失败且进程非正常退出（如卡死强杀），但在允许的重试次数范围内，自动发起下一次重试
-        if not final_reply and (process.returncode != 0 and process.returncode is not None) and attempt < MAX_ATTEMPTS:
-            log.warning(f"[Executor] Attempt {attempt}/{MAX_ATTEMPTS} failed/stalled without final response for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")
-            if os.path.exists(log_file_path):
-                try:
-                    os.remove(log_file_path)
-                except Exception:
-                    pass
-            await asyncio.sleep(1.0)
-            continue
-        
-        if final_reply:
-            reply_text = final_reply
-        else:
-            # 降级：如果提取失败，使用原本的 accumulated_text 逻辑进行兜底
-            reply_text = accumulated_text.strip()
-            reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
-            reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
-        
-        # 彻底过滤多轮对话下的任何 English 规划段落，只留存最终中文回答
-        reply_text = extract_final_chinese_response(reply_text)
-
-        # Pipe through active plugins on_after_ai hook
-        from plugin_manager import plugin_manager
-        reply_text = await plugin_manager.dispatch_after_ai(reply_text, chat_id, session_data)
-        
-        # Auto-inject images generated by generate_image tool during this run
-        if transcript_path and os.path.exists(transcript_path):
-            try:
-                with open(transcript_path, 'r', encoding='utf-8') as f:
-                    f.seek(initial_transcript_size)
-                    for line in f.readlines():
+            finally:
+                running_processes.pop(chat_id, None)
+                for pipe in (process.stdout, process.stderr):
+                    if pipe is not None:
                         try:
-                            data = json.loads(line)
-                            if data.get("type") == "GENERATE_IMAGE" or "generate_image" in line:
-                                match = re.search(r'Generated image is saved at (.*?\.(?:jpg|png|jpeg))', data.get("content", ""))
-                                if match:
-                                    img_path = match.group(1)
-                                    if img_path not in reply_text:
-                                        reply_text += f"\n\n![Generated Image]({img_path})"
+                            transport = pipe._transport if hasattr(pipe, "_transport") else None
+                            if transport is not None:
+                                transport.close()
                         except Exception:
                             pass
-            except Exception as e:
-                log.error(f"Failed to extract generated images from transcript: {e}")
-        
-            active_project = session_data.get("project")
-            ws_root = session_data.get("workspace_root")
-            allowed_dirs = [active_project, ws_root]
+            try:
+                await asyncio.wait_for(stdout_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                log.warning("stdout_task timed out (possible pipe leak)")
+            try:
+                await asyncio.wait_for(stderr_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                log.warning("stderr_task timed out (possible pipe leak)")
             
-            await _feishu_call(
-                lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs),
-                timeout=120.0,
-                label="extract_and_upload_resources"
-            )
+            is_error = (process.returncode != 0 and process.returncode is not None)
+            session_data["last_execution_error"] = is_error
+
+            transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
+            final_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
             
-            # 兜底：确保最新 conversation ID 正确写入 session_data
-            if os.path.exists(log_file_path):
-                await _sync_conversation_id_from_log(log_file_path)
+            # 若提取最终回答失败且进程非正常退出（如 API 抖动 EOF、卡死强死、进程崩溃），且在允许重试范围内：
+            # 暂不向飞书推送报错卡片，直接返回 has_reply=False 触发自动重试机制！
+            if not final_reply and (process.returncode != 0 and process.returncode is not None) and attempt < 2:
+                log.warning(f"[Executor] Attempt {attempt} failed without final response (returncode {process.returncode}). Bypassing error card send for auto-retry.")
+                return {"has_reply": False, "returncode": process.returncode, "is_error": True}
             
-            is_error = False
-        if not reply_text:
-            reply_text = stderr_text.strip() or "Sorry, I couldn't generate a response."
-            is_error = True
-        else:
-            # 统计整体 Agent 执行消耗：
-            # 包含最终回复和用户输入
-            approx_tokens = len(user_text) + len(reply_text)
+            if final_reply:
+                reply_text = final_reply
+            else:
+                reply_text = accumulated_text.strip()
+                reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
+                reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
             
-            # 将 Agent 的底层思考和中间工具调用的过程一并计入耗损
+            reply_text = extract_final_chinese_response(reply_text)
+
+            from plugin_manager import plugin_manager
+            reply_text = await plugin_manager.dispatch_after_ai(reply_text, chat_id, session_data)
+            
             if transcript_path and os.path.exists(transcript_path):
                 try:
-                    current_size = os.path.getsize(transcript_path)
-                    added_bytes = max(0, current_size - initial_transcript_size)
-                    # Better heuristic: 1 token ~ 1.5 chars for Chinese, JSON bytes inflated by ~2.5x vs actual tokens
-                    approx_tokens = int((len(user_text) + len(reply_text)) * 1.5 + added_bytes / 2.5)
+                    with open(transcript_path, 'r', encoding='utf-8') as f:
+                        f.seek(initial_transcript_size)
+                        for line in f.readlines():
+                            try:
+                                data = json.loads(line)
+                                if data.get("type") == "GENERATE_IMAGE" or "generate_image" in line:
+                                    match = re.search(r'Generated image is saved at (.*?\.(?:jpg|png|jpeg))', data.get("content", ""))
+                                    if match:
+                                        img_path = match.group(1)
+                                        if img_path not in reply_text:
+                                            reply_text += f"\n\n![Generated Image]({img_path})"
+                            except Exception:
+                                pass
                 except Exception as e:
-                    log.error(f"Failed to calculate transcript token usage: {e}")
-                    
-            stats.record_tokens(approx_tokens)
-    
-        choice_card_data = None
-        if not is_error:
-            choice_pattern = re.compile(r'\[CHOICE_CARD\]\s*Q:\s*(.*?)\n(.*?)\s*\[/CHOICE_CARD\]', re.DOTALL | re.IGNORECASE)
-            match = choice_pattern.search(reply_text)
-            if match:
-                question = match.group(1).strip()
-                options_text = match.group(2).strip()
-                options = [opt.strip()[1:].strip() if opt.strip().startswith('-') else opt.strip() for opt in options_text.split('\n') if opt.strip()]
-                reply_text = choice_pattern.sub('', reply_text).strip()
-                choice_card_data = {
-                    "question": question,
-                    "options": options
-                }
-    
-        if reply_text:
-            log.info(f"[Agent text]: {reply_text[:100]}...")
+                    log.error(f"Failed to extract generated images from transcript: {e}")
             
-        # 再次确保生成卡片前更新 session_data
-        if os.path.exists(log_file_path):
-            await _sync_conversation_id_from_log(log_file_path)
-    
-        if not is_error and bot_reply_msg_id and reply_text:
-            try:
-                safe_start_index = min(last_streamed_length, len(reply_text))
-                await _stream_typewriter_to_feishu(
-                    bot_reply_msg_id, reply_text, user_text, think_seconds, _feishu_call,
-                    start_index=safe_start_index
-                )
-            except Exception as e:
-                log.error(f"[Executor] Typewriter streaming failed: {e}")
-
-        final_card = CardBuilder.build_ai_response(
-            reply_text, 
-            choice_card_data=choice_card_data,
-            current_model=session_data.get('model', 'Default'),
-            current_project=session_data.get('project', '默认'),
-            is_error=is_error,
-            is_streaming=False,
-            session_data=session_data
-        )
-        if bot_reply_msg_id:
-            await asyncio.sleep(0.5)
-            patch_ok = await _feishu_call(
-                lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card),
-                label="final-card patch"
-            )
-            if patch_ok is None:
-                # patch 失败（超时/网络异常）→ 降级为发送纯文本回复，保证用户能看到结果
-                from lark_client import send_reply_sdk
-                fallback_text = reply_text[:2000] if reply_text else "(AI 回复卡片发送失败，请查看工作区获取完整内容)"
+                active_project = session_data.get("project")
+                ws_root = session_data.get("workspace_root")
+                allowed_dirs = [active_project, ws_root]
+                
                 await _feishu_call(
-                    lambda: send_reply_sdk(message_id, fallback_text),
-                    label="final-card text fallback"
+                    lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs),
+                    timeout=120.0,
+                    label="extract_and_upload_resources"
                 )
-        else:
-            if message_id and str(message_id).startswith("om_"):
-                await _feishu_call(
-                    lambda: send_interactive_card_sdk(message_id, final_card),
-                    label="final-card send"
-                )
+                
+                if os.path.exists(log_file_path):
+                    await _sync_conversation_id_from_log(log_file_path)
+                
+                is_error = False
+            if not reply_text:
+                reply_text = stderr_text.strip() or "Sorry, I couldn't generate a response."
+                is_error = True
             else:
-                from lark_client import send_card_to_chat_sdk
-                await _feishu_call(
-                    lambda: send_card_to_chat_sdk(chat_id, final_card),
-                    label="final-card send to chat"
-                )
-            
-        return is_error
-    
-    finally:
-        if os.path.exists(log_file_path):
-            try:
-                # [Last Resort Defense]: 彻底确认主会话 ID 或清除已失效 ID 并同步落盘
+                approx_tokens = len(user_text) + len(reply_text)
+                if transcript_path and os.path.exists(transcript_path):
+                    try:
+                        current_size = os.path.getsize(transcript_path)
+                        added_bytes = max(0, current_size - initial_transcript_size)
+                        approx_tokens = int((len(user_text) + len(reply_text)) * 1.5 + added_bytes / 2.5)
+                    except Exception as e:
+                        log.error(f"Failed to calculate transcript token usage: {e}")
+                        
+                stats.record_tokens(approx_tokens)
+
+            choice_card_data = None
+            if not is_error:
+                choice_pattern = re.compile(r'\[CHOICE_CARD\]\s*Q:\s*(.*?)\n(.*?)\s*\[/CHOICE_CARD\]', re.DOTALL | re.IGNORECASE)
+                match = choice_pattern.search(reply_text)
+                if match:
+                    question = match.group(1).strip()
+                    options_text = match.group(2).strip()
+                    options = [opt.strip()[1:].strip() if opt.strip().startswith('-') else opt.strip() for opt in options_text.split('\n') if opt.strip()]
+                    reply_text = choice_pattern.sub('', reply_text).strip()
+                    choice_card_data = {
+                        "question": question,
+                        "options": options
+                    }
+
+            if reply_text:
+                log.info(f"[Agent text]: {reply_text[:100]}...")
+                
+            if os.path.exists(log_file_path):
                 await _sync_conversation_id_from_log(log_file_path)
-            finally:
+
+            if not is_error and bot_reply_msg_id and reply_text:
                 try:
-                    os.remove(log_file_path)
-                except Exception:
-                    pass
+                    safe_start_index = min(last_streamed_length, len(reply_text))
+                    await _stream_typewriter_to_feishu(
+                        bot_reply_msg_id, reply_text, user_text, think_seconds, _feishu_call,
+                        start_index=safe_start_index
+                    )
+                except Exception as e:
+                    log.error(f"[Executor] Typewriter streaming failed: {e}")
+
+            final_card = CardBuilder.build_ai_response(
+                reply_text, 
+                choice_card_data=choice_card_data,
+                current_model=session_data.get('model', 'Default'),
+                current_project=session_data.get('project', '默认'),
+                is_error=is_error,
+                is_streaming=False,
+                session_data=session_data
+            )
+            if bot_reply_msg_id:
+                await asyncio.sleep(0.5)
+                patch_ok = await _feishu_call(
+                    lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card),
+                    label="final-card patch"
+                )
+                if patch_ok is None:
+                    from lark_client import send_reply_sdk
+                    fallback_text = reply_text[:2000] if reply_text else "(AI 回复卡片发送失败，请查看工作区获取完整内容)"
+                    await _feishu_call(
+                        lambda: send_reply_sdk(message_id, fallback_text),
+                        label="final-card text fallback"
+                    )
+            else:
+                if message_id and str(message_id).startswith("om_"):
+                    await _feishu_call(
+                        lambda: send_interactive_card_sdk(message_id, final_card),
+                        label="final-card send"
+                    )
+                else:
+                    from lark_client import send_card_to_chat_sdk
+                    await _feishu_call(
+                        lambda: send_card_to_chat_sdk(chat_id, final_card),
+                        label="final-card send to chat"
+                    )
+                
+            return {"has_reply": bool(final_reply), "returncode": process.returncode, "is_error": is_error}
+        
+        finally:
+            if os.path.exists(log_file_path):
+                try:
+                    await _sync_conversation_id_from_log(log_file_path)
+                finally:
+                    try:
+                        os.remove(log_file_path)
+                    except Exception:
+                        pass
