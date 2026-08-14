@@ -131,18 +131,22 @@ def extract_final_response_from_transcript(transcript_path, initial_size=0):
             else:
                 turn_lines.append(data)
 
-        responses = []
-        for data in turn_lines:
+        # 倒序提取本轮对话中最后一个真实的最终回答，坚决不拼接中间工具调用或后台 Task 执行产生的过渡日志
+        for data in reversed(turn_lines):
             if data.get("source") == "MODEL" and data.get("type") == "PLANNER_RESPONSE":
                 content = (data.get("content") or "").strip()
-                if content:
-                    clean_text = extract_final_chinese_response(content)
-                    if clean_text:
-                        if not responses or responses[-1] != clean_text:
-                            responses.append(clean_text)
-
-        if responses:
-            return "\n\n".join(responses)
+                if not content:
+                    continue
+                clean_text = extract_final_chinese_response(content)
+                if not clean_text:
+                    continue
+                # 过滤掉明显的中间 Task 完成通知或纯日志片段
+                if (clean_text.startswith('Task "') or 
+                    clean_text.startswith('<task_update') or
+                    clean_text.startswith('The command exited with code') or
+                    'completed with exit code' in clean_text):
+                    continue
+                return clean_text
                         
     except Exception as e:
         log.error(f"Failed to extract final response from transcript: {e}")
@@ -199,7 +203,17 @@ def extract_final_chinese_response(text):
     text = re.sub(r'<(?:thought|thinking|think)>.*?</(?:thought|thinking|think)>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
     text = re.sub(r'^<(?:thought|thinking|think)>.*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
     
-    # 2. 移除开头的常见英文规划与描述前缀 (例如 "I will...", "Sure, I will...", "Let me...", "Here is...", "I need to...")
+    # 2. 移除 Task 执行日志 (例如 Task "timeout 15s bash ..." completed with exit code 0. Output: ...)
+    text = re.sub(r'Task\s+"[^"]*"\s+(?:completed|finished)\s+with\s+exit\s+code\s+\d+.*?(?:Output:\s*.*?)?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'<task_update\b.*?</task_update>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    # 3. 移除终端原始退出状态及控制台片段 (例如 The command exited with code 0. Output: ...)
+    text = re.sub(r'The command exited with code \d+\.?\s*(?:Output:\s*.*?)?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'Warning: Permanently added [^\n]+\n*', '', text, flags=re.IGNORECASE).strip()
+    text = re.sub(r'From https://github\.com/[^\n]+\n*', '', text, flags=re.IGNORECASE).strip()
+
+    # 4. 移除开头的常见英文规划与描述前缀 (例如 "I will...", "Sure, I will...", "Let me...", "Here is...", "I need to...")
     text = re.sub(
         r'^(?:I\s+will|Sure,?\s+I\s+will|Let\s+me|Here\s+is|I\s+need\s+to|Based\s+on)\s+.*?\n\n',
         '',
@@ -207,7 +221,7 @@ def extract_final_chinese_response(text):
         flags=re.IGNORECASE | re.DOTALL
     ).strip()
 
-    # 3. 移除单行英文申明 (例如 "I will respond in Simplified Chinese.", "Sure, I will analyze the codebase in Chinese.")
+    # 5. 移除单行英文申明 (例如 "I will respond in Simplified Chinese.", "Sure, I will analyze the codebase in Chinese.")
     text = re.sub(
         r'^(?:I\s+will|Sure,?\s+I\s+will|Let\s+me)\s+(?:report|summarize|explain|respond|write|reply|communicate|answer|check|analyze)\b.+?(?:in\s+(?:Simplified\s+)?Chinese|below)\.?\s*',
         '',
@@ -215,10 +229,13 @@ def extract_final_chinese_response(text):
         flags=re.IGNORECASE | re.DOTALL
     ).strip()
 
-    # 4. 移除包含 Thinking Process, Thought:, Plan:, Thinking: 等小标题的说明段落
+    # 6. 移除包含 Thinking Process, Thought:, Plan:, Thinking: 等小标题的说明段落
     text = re.sub(r'(?:\*\*|\#\#?\s*)?(?:Thinking Process|Thought|Thinking|Plan|Reasoning)(?:\*\*|:)?.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
 
-    # 5. 清理残留的动态思考占位符
+    # 7. 移除内部消息包装 (例如 [Message] timestamp=... content=...)
+    text = re.sub(r'\[Message\]\s+timestamp=.*?content=.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL).strip()
+
+    # 8. 清理残留的动态思考占位符
     text = re.sub(r'\*\(\s*(?:🧠|🔍|⚙️|💡|🚀)?\s*正在.*?\)\*', '', text).strip()
 
     return text
