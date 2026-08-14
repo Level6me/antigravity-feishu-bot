@@ -166,7 +166,7 @@ def build_stall_warning_card(user_prompt, think_seconds, stall_seconds):
                         "tag": "button",
                         "text": {"tag": "plain_text", "content": "🟢 继续静默等待"},
                         "type": "primary",
-                        "value": {"action": "user_choice", "choice": "继续等待", "label": "继续静默等待"}
+                        "value": {"action": "extend_wait"}
                     },
                     {
                         "tag": "button",
