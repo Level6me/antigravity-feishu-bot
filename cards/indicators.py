@@ -147,7 +147,7 @@ def build_streaming_indicator(partial_text, tool_action=None, user_text="", thin
 
 
 def build_stall_warning_card(user_prompt, think_seconds, stall_seconds):
-    mins = stall_seconds // 60
+    wait_time_desc = f"{stall_seconds // 60} 分钟" if stall_seconds >= 60 else f"{stall_seconds} 秒"
     return {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -157,7 +157,7 @@ def build_stall_warning_card(user_prompt, think_seconds, stall_seconds):
         "elements": [
             {
                 "tag": "markdown",
-                "content": f"模型已思考 **{think_seconds} 秒**（静默生成等待已达 **{mins} 分钟**）。\n\n*模型 API 正在云端进行思维链推理或长数据检索，后台守护机制正常工作中，已为您自动延长等待时间。*"
+                "content": f"模型已持续运行 **{think_seconds} 秒**（当前静默等待已达 **{wait_time_desc}**）。\n\n*模型 API 正在云端进行深度推理、复杂任务规划或多工具检索，后台守护机制正常工作中，已为您自动延长等待时间。*"
             },
             {
                 "tag": "action",

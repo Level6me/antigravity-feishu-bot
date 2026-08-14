@@ -7,6 +7,7 @@ running_processes = {}
 chat_queues = {}
 chat_workers = {}
 chat_media_batches = {}
+extended_wait_chats = {}
 
 _feishu_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="feishu_pool")
 

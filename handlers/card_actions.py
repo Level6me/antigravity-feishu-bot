@@ -130,7 +130,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         
     elif action_value.get("action") == "extend_wait":
         log.info(f"User requested extend_wait in chat {chat_id}")
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已确认继续等待，后台保持执行并已延长超时保护。"}})
+        app_state.extended_wait_chats[chat_id] = time.time() + 300
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已确认继续等待，后台保持执行并已延长 5 分钟等待。"}})
         
     elif action_value.get("action") == "browse_dir":
         target_path = action_value.get("path")

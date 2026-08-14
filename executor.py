@@ -458,16 +458,20 @@ async def execute_antigravity(
             last_patch_time = time.time()
             process_start_time = time.time()
             last_progress_time = process_start_time
+            last_cpu_check_time = 0
+            is_cpu_busy = False
             last_stdout_len = 0
             last_log_size = 0
             last_transcript_size = 0
             last_tool_action = ""
             STALL_TIMEOUT = 300
             STALL_HARD_TIMEOUT = 600
-            QUIET_WARNING_THRESHOLD = 45
+            BASE_QUIET_WARNING_THRESHOLD = 120
+            TOOL_QUIET_WARNING_THRESHOLD = 180
             
             while process.returncode is None:
                 await asyncio.sleep(0.3)
+                now = time.time()
                 
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
@@ -485,6 +489,15 @@ async def execute_antigravity(
                         lambda: extract_final_response_from_transcript(t_path, initial_transcript_size)
                     )
 
+                # 每 2 秒检测一次进程组 CPU 活跃度，若正在计算则重置停滞计时
+                if now - last_cpu_check_time >= 2.0:
+                    last_cpu_check_time = now
+                    is_cpu_busy = await loop.run_in_executor(
+                        None, lambda: _is_process_group_active(process.pid)
+                    )
+                    if is_cpu_busy:
+                        last_progress_time = now
+
                 has_data_growth = (
                     current_stdout_len > last_stdout_len or 
                     current_log_size > last_log_size or 
@@ -492,7 +505,7 @@ async def execute_antigravity(
                     (action and action != last_tool_action)
                 )
                 if has_data_growth:
-                    last_progress_time = time.time()
+                    last_progress_time = now
                     last_stdout_len = current_stdout_len
                     last_log_size = current_log_size
                     last_transcript_size = current_transcript_size
@@ -501,8 +514,8 @@ async def execute_antigravity(
                         from plugin_manager import plugin_manager
                         await plugin_manager.dispatch_tool_call(action, {})
                 
-                think_seconds = int(time.time() - process_start_time)
-                stall_seconds = int(time.time() - last_progress_time)
+                think_seconds = int(now - process_start_time)
+                stall_seconds = int(now - last_progress_time)
 
                 turn_done = False
                 if t_path and os.path.exists(t_path):
@@ -522,7 +535,7 @@ async def execute_antigravity(
                 
                 if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
                     # 检测进程组（含子进程/subagent）是否仍有 CPU 活动
-                    cpu_active = await loop.run_in_executor(
+                    cpu_active = is_cpu_busy or await loop.run_in_executor(
                         None, lambda: _is_process_group_active(process.pid)
                     )
                     # 达到硬上限时无条件终止；未达硬上限但进程组仍活跃则继续等待
@@ -558,11 +571,15 @@ async def execute_antigravity(
                     stderr_text = "⚠️ 执行超时 (12小时)：后台超大型任务已达到系统设定的 12 小时最高保护上限。"
                     break
 
+                # 动态静默告警阈值计算：工具执行时放宽到 180s，用户点击继续等待时顺延 300s
+                has_active_tool = bool(action or last_tool_action)
+                effective_warning_threshold = TOOL_QUIET_WARNING_THRESHOLD if has_active_tool else BASE_QUIET_WARNING_THRESHOLD
+                extend_until = app_state.extended_wait_chats.get(chat_id, 0)
+                if now < extend_until:
+                    effective_warning_threshold += 300
+
                 desired_patch_interval = 0.4
-                if stall_seconds >= QUIET_WARNING_THRESHOLD:
-                    indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
-                    desired_patch_interval = 2.0
-                elif partial_text and len(partial_text.strip()) > 0:
+                if partial_text and len(partial_text.strip()) > 0:
                     clean_partial = re.sub(r'\[CHOICE_CARD\]\s*Q:.*?(?:\[/CHOICE_CARD\]|\Z)', '', partial_text, flags=re.DOTALL | re.IGNORECASE).strip()
                     if not clean_partial:
                         clean_partial = partial_text
@@ -572,6 +589,9 @@ async def execute_antigravity(
                     display_partial = clean_partial[:last_streamed_length]
                     indicator_card = CardBuilder.build_streaming_indicator(display_partial, action or last_tool_action, user_text, think_seconds)
                     desired_patch_interval = 0.4
+                elif stall_seconds >= effective_warning_threshold and not is_cpu_busy:
+                    indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
+                    desired_patch_interval = 2.0
                 else:
                     display_action = action or last_tool_action
                     if display_action:
@@ -623,6 +643,7 @@ async def execute_antigravity(
                         pass
             finally:
                 running_processes.pop(chat_id, None)
+                app_state.extended_wait_chats.pop(chat_id, None)
                 for pipe in (process.stdout, process.stderr):
                     if pipe is not None:
                         try:
