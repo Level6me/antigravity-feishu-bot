@@ -131,8 +131,9 @@ def extract_final_response_from_transcript(transcript_path, initial_size=0):
             else:
                 turn_lines.append(data)
 
-        # 倒序提取本轮对话中最后一个真实的最终回答，坚决不拼接中间工具调用或后台 Task 执行产生的过渡日志
-        for data in reversed(turn_lines):
+        # 收集本轮对话中所有有效的模型文本回复
+        valid_candidates = []
+        for data in turn_lines:
             if data.get("source") == "MODEL" and data.get("type") == "PLANNER_RESPONSE":
                 content = (data.get("content") or "").strip()
                 if not content:
@@ -140,13 +141,41 @@ def extract_final_response_from_transcript(transcript_path, initial_size=0):
                 clean_text = extract_final_chinese_response(content)
                 if not clean_text:
                     continue
-                # 过滤掉明显的中间 Task 完成通知或纯日志片段
+                # 过滤掉明显的纯中间 Task 完成通知或纯控制台日志
                 if (clean_text.startswith('Task "') or 
                     clean_text.startswith('<task_update') or
                     clean_text.startswith('The command exited with code') or
                     'completed with exit code' in clean_text):
                     continue
-                return clean_text
+                
+                # 避免相邻重复
+                if not valid_candidates or valid_candidates[-1] != clean_text:
+                    valid_candidates.append(clean_text)
+
+        if not valid_candidates:
+            return None
+
+        if len(valid_candidates) == 1:
+            return valid_candidates[0]
+
+        # 如果有多条候选：智能保留最详尽完整的实质性解答，防止被系统通知触发的简短单句确认覆盖
+        last_cand = valid_candidates[-1]
+        
+        # 若最后一条已经是详尽回答（>= 80 字符或包含换行/列表），检查是否需要与前面段落合并
+        if len(last_cand) >= 80 or '\n' in last_cand:
+            prev_cand = valid_candidates[-2]
+            if len(prev_cand) > 100 and prev_cand not in last_cand:
+                return f"{prev_cand}\n\n{last_cand}"
+            return last_cand
+        else:
+            # 最后一条只是极简收尾确认（< 80 字符），向前寻找最详尽的实质解答
+            detailed_cands = [c for c in valid_candidates if len(c) > len(last_cand) and len(c) >= 60]
+            if detailed_cands:
+                best_detailed = detailed_cands[-1]
+                if last_cand not in best_detailed:
+                    return f"{best_detailed}\n\n{last_cand}"
+                return best_detailed
+            return last_cand
                         
     except Exception as e:
         log.error(f"Failed to extract final response from transcript: {e}")
