@@ -316,22 +316,27 @@ async def execute_antigravity(
         try:
             with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
                 log_content = f.read()
-            conv_not_found = "not found" in log_content and "conversation" in log_content
-            match = re.search(r'(?:Created|found|Resuming|Loaded) conversation ([0-9a-fA-F-]+)', log_content)
+            match = re.search(
+                r'(?:Created|found|resuming|Loaded|Streaming|Forwarding user message to|Sending user message to|conversation[=:\s]+|conversationID=)\s*(?:conversation\s+)?["\'\s]*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})',
+                log_content,
+                re.IGNORECASE
+            )
             if match:
                 new_conv_id = match.group(1)
                 if session_data.get("conversation") != new_conv_id:
                     session_data["conversation"] = new_conv_id
                     try:
                         await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=3.0)
+                        log.info(f"[Executor] Synced and persisted conversation ID {new_conv_id} for chat {chat_id}")
                     except (asyncio.TimeoutError, Exception) as e:
                         log.error(f"save_session_async timed out or failed: {e}")
                 if not target_transcript_path:
                     path = get_transcript_path(new_conv_id)
                     if os.path.exists(path):
                         target_transcript_path = path
-            elif conv_not_found:
+            elif re.search(r'Warning:\s*conversation\s+["\']?[0-9a-fA-F-]+["\']?\s+not\s+found', log_content, re.IGNORECASE):
                 if session_data.get("conversation") != "":
+                    log.warning(f"[Executor] Conversation {session_data.get('conversation')} not found in agy store, resetting.")
                     session_data["conversation"] = ""
                     try:
                         await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=3.0)
@@ -454,6 +459,19 @@ async def execute_antigravity(
                     path = get_transcript_path(conv_id)
                     if os.path.exists(path):
                         return path
+                brain_dir = get_brain_dir()
+                if os.path.exists(brain_dir):
+                    try:
+                        for entry in os.listdir(brain_dir):
+                            entry_path = os.path.join(brain_dir, entry)
+                            if os.path.isdir(entry_path) and len(entry) == 36:
+                                fp = os.path.join(entry_path, ".system_generated", "logs", "transcript.jsonl")
+                                if os.path.exists(fp):
+                                    mtime = os.path.getmtime(fp)
+                                    if mtime >= process_start_time - 2:
+                                        return fp
+                    except Exception:
+                        pass
                 return None
 
             def fetch_current_action():
