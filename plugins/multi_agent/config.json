@@ -1,0 +1,7 @@
+{
+  "agent_role": "ARCHITECT",
+  "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/xxx",
+  "git_remote_repo": "git@github.com:your-org/your-repo.git",
+  "git_main_branch": "main",
+  "cli_timeout_seconds": 120
+}

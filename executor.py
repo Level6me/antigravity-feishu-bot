@@ -5,7 +5,7 @@ import json
 import uuid
 import re
 import subprocess
-from config import ANTIGRAVITY_BIN, DANGEROUSLY_SKIP_PERMISSIONS, get_brain_dir, get_transcript_path
+from config import ANTIGRAVITY_BIN, DANGEROUSLY_SKIP_PERMISSIONS, get_brain_dir, get_transcript_path, BASE_DIR
 from logger import log
 from card_builder import CardBuilder
 from lark_client import patch_interactive_card_sdk, send_interactive_card_sdk, api_client
@@ -340,18 +340,17 @@ async def execute_antigravity(
                     session_data["conversation"] = ""
                     try:
                         await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=3.0)
+                        log.info(f"[Executor] Conversation not found in log, reset conversation ID for chat {chat_id}")
                     except (asyncio.TimeoutError, Exception) as e:
                         log.error(f"save_session_async timed out or failed: {e}")
         except Exception as e:
             log.error(f"Failed to sync conversation id from log: {e}")
 
-    from plugin_manager import plugin_manager
-    user_text, session_data = await plugin_manager.dispatch_before_ai(user_text, chat_id, session_data)
-
     async def _run_single_attempt(attempt):
         nonlocal bot_reply_msg_id, target_transcript_path
-        os.makedirs("logs", exist_ok=True)
-        log_file_path = f"logs/agy_log_{uuid.uuid4().hex}.txt"
+        logs_dir = os.path.abspath(os.path.join(BASE_DIR, "logs"))
+        os.makedirs(logs_dir, exist_ok=True)
+        log_file_path = os.path.join(logs_dir, f"agy_log_{uuid.uuid4().hex}.txt")
         cmd_args = [
             ANTIGRAVITY_BIN, 
             "-p", system_instruction + final_prompt, 

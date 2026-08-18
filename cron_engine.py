@@ -157,7 +157,7 @@ class CronEngine:
             from config import get_transcript_path
             from executor import extract_final_response_from_transcript
             
-            conv_id = session_data.get("conversation_id", "")
+            conv_id = session_data.get("conversation", "") or session_data.get("conversation_id", "")
             transcript_path = get_transcript_path(conv_id) if conv_id else None
             
             extracted = extract_final_response_from_transcript(transcript_path) if (transcript_path and os.path.exists(transcript_path)) else None

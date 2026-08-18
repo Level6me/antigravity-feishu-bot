@@ -1,0 +1,20 @@
+{
+  "id": "multi_agent",
+  "name": "🤖 多 Agent 自动协同开发插件",
+  "version": "1.0.0",
+  "author": "Antigravity",
+  "description": "基于飞书机器人与 antigravity-cli 的多 Agent 自动化需求拆解、分工卡片派发、Git 代码集成插件",
+  "commands": [
+    "/agent_assign",
+    "/multi_agent",
+    "/agent_config"
+  ],
+  "config": {
+    "agent_role": "ARCHITECT",
+    "feishu_webhook_url": "",
+    "git_remote_repo": "",
+    "git_main_branch": "main",
+    "cli_timeout_seconds": 120
+  },
+  "enabled": true
+}

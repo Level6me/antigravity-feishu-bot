@@ -43,6 +43,8 @@ archive_debug/
 # Database and backups
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 *.bak
 GiteeClient/
 *.err

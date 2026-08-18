@@ -113,6 +113,10 @@ async def _process_single_task(chat_id, task):
         await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, warn_card))
         return
 
+    # Run plugin on_before_ai hooks
+    from plugin_manager import plugin_manager
+    user_text, session_data = await plugin_manager.dispatch_before_ai(user_text, chat_id, session_data)
+
     # Inject protocol into prompt
     current_proj = session_data.get("project", "默认")
     system_instruction = (
