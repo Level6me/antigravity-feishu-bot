@@ -563,7 +563,6 @@ async def execute_antigravity(
 
                 has_data_growth = (
                     current_stdout_len > last_stdout_len or 
-                    current_log_size > last_log_size or 
                     current_transcript_size > last_transcript_size or 
                     (action and action != last_tool_action)
                 )
