@@ -151,7 +151,13 @@ async def _process_single_task(chat_id, task):
         "[System Execution & Safety Guardrails]\n"
         "1. 【全指令强制超时保护】：使用 `run_command` 工具执行任何 Shell 命令行（如 find, grep, pip, git, npm, python 等）时，必须在前缀显式包裹 `timeout <秒数>` 超时保护（例如：`timeout 30s find . -name '*.py'` 或 `timeout 60s pip install ...`），严禁执行任何未加 `timeout` 限制的命令。\n"
         "2. 【受限递归与大目录避让】：严禁在系统全盘（`/`）、根目录、用户主目录（`~`）或依赖目录（`venv`, `.venv`, `node_modules`, `.git`）中执行无限制的大范围递归搜索。搜索文件时必须使用精确路径、限定搜索深度（如 `find . -maxdepth 3`）并排除第三方依赖包目录。\n"
-        "3. 【严禁自杀式重启自身服务】：严禁通过命令执行 `pm2 restart feishu-bot`、`pkill -f feishu_bot` 或任何重启/杀死当前机器人自身进程的操作！如修改了插件代码，插件支持热重载（通过 `/plugin reload`），严禁中断当前会话进程。\n\n"
+        "3. 【严禁自杀式重启自身服务】：严禁通过命令执行 `pm2 restart feishu-bot`、`pkill -f feishu_bot` 或任何重启/杀死当前机器人自身进程的操作！如修改了插件代码，插件支持热重载（通过 `/plugin reload`），严禁中断当前会话进程。\n"
+        "4. 【交互式选项卡片规范】：当你的回答需要向用户提供多个方案/选项供选择、确认操作或询问用户意图时，必须在回答的末尾附带 `[CHOICE_CARD]` 标签生成可点击按钮，格式如下：\n"
+        "[CHOICE_CARD]\n"
+        "Q: 请选择您希望采用的方案：\n"
+        "- 方案 1: 简短描述\n"
+        "- 方案 2: 简短描述\n"
+        "[/CHOICE_CARD]\n\n"
     )
     
     # 注入该项目专属 Prompt

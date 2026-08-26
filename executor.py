@@ -269,6 +269,110 @@ def extract_final_chinese_response(text):
 
     return text
 
+def extract_choice_card_data(reply_text, transcript_path=None, initial_transcript_size=0):
+    """
+    Extract interactive choice options from:
+    1. Explicit [CHOICE_CARD] Q: ... \n - opt1 \n - opt2 [/CHOICE_CARD] tags
+    2. Antigravity 'ask_question' tool calls in transcript.jsonl
+    3. Intelligent heuristic extraction for solution patterns (e.g. 方案一/方案二, 方案 1/方案 2, 选项 A/选项 B)
+    Returns: (cleaned_reply_text, choice_card_dict_or_None)
+    """
+    if not reply_text:
+        return reply_text, None
+
+    # 1. 显式 [CHOICE_CARD] 标签优先匹配
+    choice_pattern = re.compile(r'\[CHOICE_CARD\]\s*Q:\s*(.*?)\n(.*?)\s*\[/CHOICE_CARD\]', re.DOTALL | re.IGNORECASE)
+    match = choice_pattern.search(reply_text)
+    if match:
+        question = match.group(1).strip()
+        options_text = match.group(2).strip()
+        options = [
+            opt.strip()[1:].strip() if opt.strip().startswith(('-', '•', '*')) else opt.strip() 
+            for opt in options_text.split('\n') if opt.strip()
+        ]
+        clean_text = choice_pattern.sub('', reply_text).strip()
+        if options:
+            return clean_text, {
+                "question": question or "请选择：",
+                "options": options
+            }
+
+    # 2. 从 transcript.jsonl 中捕获 ask_question 工具调用
+    if transcript_path and os.path.exists(transcript_path):
+        try:
+            with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
+                if initial_transcript_size > 0:
+                    try:
+                        f.seek(initial_transcript_size)
+                    except Exception:
+                        pass
+                lines = f.readlines()
+            for line in reversed(lines):
+                line_str = line.strip()
+                if not line_str:
+                    continue
+                try:
+                    data = json.loads(line_str)
+                except Exception:
+                    continue
+                if data.get("type") == "USER_INPUT":
+                    break
+                tool_calls = data.get("tool_calls") or []
+                for tc in tool_calls:
+                    if isinstance(tc, dict) and tc.get("name") == "ask_question":
+                        args = tc.get("args", {})
+                        questions = args.get("questions", [])
+                        if questions and isinstance(questions, list):
+                            first_q = questions[0]
+                            q_text = first_q.get("question", "请选择：")
+                            opts = first_q.get("options", [])
+                            if opts:
+                                return reply_text, {
+                                    "question": q_text,
+                                    "options": [str(o) for o in opts]
+                                }
+        except Exception as e:
+            log.debug(f"Failed to extract ask_question from transcript: {e}")
+
+    # 3. 智能启发式探测：方案/选项列表抽取
+    heuristic_options = []
+    lines = reply_text.split('\n')
+    for line in lines:
+        stripped = line.strip()
+        # 匹配标题行或重点列表，例如：
+        # "### 方案一：采用外部独立网关"
+        # "### 方案 1: 热重载插件"
+        # "1. **方案一（推荐）**：使用插件热重载"
+        # "1. **方案 1**：修改配置"
+        # "• **选项 A**：保留现状"
+        m = re.match(
+            r'^(?:[#*`\s\d.、•-]*)(方案\s*[一二三四五六七八九十0-9A-Za-z]+|选项\s*[A-Za-z0-9一二三四五]+)(?:（[^）]+）|\([^\)]+\))?[:：.、\s]+(.*)$',
+            stripped
+        )
+        if m:
+            prefix = m.group(1).strip()
+            detail = m.group(2).strip().replace('*', '').replace('`', '').strip()
+            # 过滤超长说明段落，只保留简要核心
+            if len(detail) > 80:
+                detail = detail[:80] + "..."
+            opt_title = f"{prefix}: {detail}" if detail else prefix
+            if opt_title not in heuristic_options:
+                heuristic_options.append(opt_title)
+
+    if 2 <= len(heuristic_options) <= 6:
+        has_question_or_choice_intent = any(kw in reply_text for kw in [
+            "请选择", "哪种方案", "哪个方案", "如何选择", "选择哪种", "建议采用", "可供选择",
+            "方案一", "方案二", "方案 1", "方案 2", "您希望", "你希望", "选择如下", "以下方案",
+            "方案选择", "采用哪种", "点击下方", "可选择"
+        ])
+        if has_question_or_choice_intent:
+            return reply_text, {
+                "question": "🎯 请选择您希望采用的方案：",
+                "options": heuristic_options
+            }
+
+    return reply_text, None
+
 async def execute_antigravity(
     chat_id, user_text, message_id, bot_reply_msg_id, session_data, 
     is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
@@ -809,17 +913,11 @@ async def execute_antigravity(
 
             choice_card_data = None
             if not is_error:
-                choice_pattern = re.compile(r'\[CHOICE_CARD\]\s*Q:\s*(.*?)\n(.*?)\s*\[/CHOICE_CARD\]', re.DOTALL | re.IGNORECASE)
-                match = choice_pattern.search(reply_text)
-                if match:
-                    question = match.group(1).strip()
-                    options_text = match.group(2).strip()
-                    options = [opt.strip()[1:].strip() if opt.strip().startswith('-') else opt.strip() for opt in options_text.split('\n') if opt.strip()]
-                    reply_text = choice_pattern.sub('', reply_text).strip()
-                    choice_card_data = {
-                        "question": question,
-                        "options": options
-                    }
+                reply_text, choice_card_data = extract_choice_card_data(
+                    reply_text,
+                    transcript_path=transcript_path,
+                    initial_transcript_size=initial_transcript_size
+                )
 
             if reply_text:
                 log.info(f"[Agent text]: {reply_text[:100]}...")

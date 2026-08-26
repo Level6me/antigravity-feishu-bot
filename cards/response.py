@@ -36,14 +36,14 @@ def build_ai_response(reply_text, choice_card_data=None, current_model="Default"
         is_long_options = any(len(opt) > 6 for opt in choice_card_data["options"])
         
         for i, opt in enumerate(choice_card_data["options"][:10]):
-            prefix_match = re.match(r'^([a-zA-Z0-9\u4e00-\u9fa5]+)[:：.、]\s*(.*)$', opt)
+            prefix_match = re.match(r'^([a-zA-Z0-9\u4e00-\u9fa5\s]+)[:：.、]\s*(.*)$', opt)
             
             if prefix_match:
                 prefix = prefix_match.group(1).strip()
                 rest_text = prefix_match.group(2).strip()
                 if len(prefix) == 1 and prefix.encode('utf-8').isalpha():
                     btn_label = f"选项 {prefix}"
-                elif len(prefix) <= 4:
+                elif len(prefix) <= 6:
                     btn_label = prefix
                 else:
                     btn_label = f"选项 {i+1}"
