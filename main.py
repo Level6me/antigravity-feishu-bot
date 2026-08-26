@@ -199,19 +199,45 @@ async def main():
 
 async def restore_pending_tasks():
     """Re-queue tasks persisted in SQLite after a restart/crash.
-    Tasks whose message was already processed (dedup table) are dropped."""
-    from database import delete_pending_task, is_message_seen, load_pending_tasks
+    Interrupted tasks will be resumed with retry protection."""
+    from database import delete_pending_task, save_pending_task, load_pending_tasks
     from handlers.pipeline import process_chat_queue
+    from card_builder import CardBuilder
+    from lark_client import send_interactive_card_sdk, patch_interactive_card_sdk
 
     tasks = load_pending_tasks()
     if not tasks:
         return
 
     recovered = {}
+    loop = asyncio.get_running_loop()
+
     for chat_id, task, created_at in tasks:
-        if is_message_seen(task.get("message_id", "")):
+        retry_count = task.get("retry_count", 0)
+        message_id = task.get("message_id", "")
+        bot_reply_msg_id = task.get("bot_reply_msg_id")
+
+        if retry_count >= 2:
+            # 连续多次重启仍然失败的任务，丢弃以防崩溃循环，并发送友好卡片通知
             delete_pending_task(chat_id, created_at)
+            log.warning(f"[restore] Task for chat {chat_id} (msg {message_id}) exceeded max retry count ({retry_count}), dropping.")
+            err_card = CardBuilder.build_ai_response(
+                "⚠️ **任务未能恢复**\n\n该任务在执行过程中导致服务异常重启超过上限，系统已自动保护并终止该任务。如需继续请重新发送指令。",
+                is_error=True
+            )
+            try:
+                if bot_reply_msg_id:
+                    await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, err_card))
+                elif message_id:
+                    await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, err_card))
+            except Exception as e:
+                log.error(f"[restore] Failed to send abort notification: {e}")
             continue
+
+        # 标记为断点恢复任务，递增重试计数并持久化
+        task["retry_count"] = retry_count + 1
+        task["resumed"] = True
+        save_pending_task(chat_id, task)
         recovered.setdefault(chat_id, []).append(task)
 
     total = 0
@@ -224,7 +250,7 @@ async def restore_pending_tasks():
         if chat_id not in app_state.chat_workers or app_state.chat_workers[chat_id].done():
             app_state.chat_workers[chat_id] = asyncio.create_task(process_chat_queue(chat_id))
 
-    log.info(f"[restore] recovered {total} pending tasks across {len(recovered)} chats")
+    log.info(f"[restore] recovered {total} pending tasks across {len(recovered)} chats for automatic resumption")
 
 
 def cleanup(signum, frame):

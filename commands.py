@@ -449,6 +449,13 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         has_worker = chat_workers and chat_id in chat_workers and not chat_workers[chat_id].done()
         
         if has_running or has_worker or cleared:
+            # Clear pending tasks in DB for this chat
+            try:
+                from database import clear_pending_tasks_for_chat
+                clear_pending_tasks_for_chat(chat_id)
+            except Exception:
+                pass
+
             # Kill the subprocess
             try:
                 if chat_id in running_processes:

@@ -401,6 +401,20 @@ def delete_pending_task(chat_id: str, created_at):
         conn.close()
 
 
+def clear_pending_tasks_for_chat(chat_id: str):
+    if not chat_id:
+        return
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM pending_tasks WHERE chat_id = ?', (chat_id,))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
 def load_pending_tasks():
     conn = get_db()
     try:

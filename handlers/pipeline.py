@@ -71,20 +71,36 @@ async def _process_single_task(chat_id, task):
         
     downloaded_file_name = None
     download_success = True
-    bot_reply_msg_id = None
+    bot_reply_msg_id = task.get("bot_reply_msg_id")
+    is_resumed = bool(task.get("resumed"))
 
     if message_type == "text":
         user_text = raw_text
     elif message_type == "image":
-        user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_image_message(loop, message_id, content_json, content_raw)
+        if is_resumed:
+            user_text = raw_text
+        else:
+            user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_image_message(loop, message_id, content_json, content_raw)
     elif message_type == "post":
-        user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_post_message(loop, message_id, content_json)
+        if is_resumed:
+            user_text = raw_text
+        else:
+            user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_post_message(loop, message_id, content_json)
     elif message_type == "link":
-        user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_link_message(content_json)
+        if is_resumed:
+            user_text = raw_text
+        else:
+            user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_link_message(content_json)
     elif message_type in ["file", "audio", "media"]:
-        user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_file_audio_media_message(loop, message_id, message_type, content_json)
+        if is_resumed:
+            user_text = raw_text
+        else:
+            user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_file_audio_media_message(loop, message_id, message_type, content_json)
     elif message_type == "batch_media":
-        user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_batch_media_message(loop, message_id, content_json)
+        if is_resumed:
+            user_text = raw_text
+        else:
+            user_text, downloaded_file_name, download_success, bot_reply_msg_id = await _process_batch_media_message(loop, message_id, content_json)
     else:
         user_text = f"[暂不支持的消息类型: {message_type}]"
 
@@ -134,7 +150,8 @@ async def _process_single_task(chat_id, task):
     system_instruction += (
         "[System Execution & Safety Guardrails]\n"
         "1. 【全指令强制超时保护】：使用 `run_command` 工具执行任何 Shell 命令行（如 find, grep, pip, git, npm, python 等）时，必须在前缀显式包裹 `timeout <秒数>` 超时保护（例如：`timeout 30s find . -name '*.py'` 或 `timeout 60s pip install ...`），严禁执行任何未加 `timeout` 限制的命令。\n"
-        "2. 【受限递归与大目录避让】：严禁在系统全盘（`/`）、根目录、用户主目录（`~`）或依赖目录（`venv`, `.venv`, `node_modules`, `.git`）中执行无限制的大范围递归搜索。搜索文件时必须使用精确路径、限定搜索深度（如 `find . -maxdepth 3`）并排除第三方依赖包目录。\n\n"
+        "2. 【受限递归与大目录避让】：严禁在系统全盘（`/`）、根目录、用户主目录（`~`）或依赖目录（`venv`, `.venv`, `node_modules`, `.git`）中执行无限制的大范围递归搜索。搜索文件时必须使用精确路径、限定搜索深度（如 `find . -maxdepth 3`）并排除第三方依赖包目录。\n"
+        "3. 【严禁自杀式重启自身服务】：严禁通过命令执行 `pm2 restart feishu-bot`、`pkill -f feishu_bot` 或任何重启/杀死当前机器人自身进程的操作！如修改了插件代码，插件支持热重载（通过 `/plugin reload`），严禁中断当前会话进程。\n\n"
     )
     
     # 注入该项目专属 Prompt
@@ -169,7 +186,7 @@ async def _process_single_task(chat_id, task):
             execute_antigravity(
                 chat_id, user_text, message_id, bot_reply_msg_id, session_data, 
                 is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
-                download_success, running_processes
+                download_success, running_processes, is_resumed=is_resumed, task_meta=task
             ),
             timeout=43200.0
         )

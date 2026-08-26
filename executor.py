@@ -272,7 +272,7 @@ def extract_final_chinese_response(text):
 async def execute_antigravity(
     chat_id, user_text, message_id, bot_reply_msg_id, session_data, 
     is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
-    download_success, running_processes
+    download_success, running_processes, is_resumed=False, task_meta=None
 ):
     loop = asyncio.get_running_loop()
     target_transcript_path = None
@@ -405,7 +405,13 @@ async def execute_antigravity(
             running_processes[chat_id] = process
             
             if attempt == 1:
-                init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text)
+                if is_resumed:
+                    init_card = CardBuilder.build_typing_indicator(
+                        downloaded_file_name, download_success,
+                        f"🔄 检测到服务刚完成重启，正在自动继续执行未完成的任务...\n\n{user_text}"
+                    )
+                else:
+                    init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text)
             else:
                 init_card = CardBuilder.build_typing_indicator(
                     downloaded_file_name, download_success,
@@ -424,6 +430,13 @@ async def execute_antigravity(
                 )
                 if new_id:
                     bot_reply_msg_id = new_id
+                    if task_meta is not None:
+                        task_meta["bot_reply_msg_id"] = new_id
+                        try:
+                            from database import save_pending_task
+                            save_pending_task(chat_id, task_meta)
+                        except Exception:
+                            pass
                 else:
                     log.warning(f"[Executor] Initial typing card send failed for chat {chat_id}; will fall back to sending final card as new message")
             
