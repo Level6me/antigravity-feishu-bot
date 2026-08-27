@@ -64,3 +64,4 @@ github_deploy_key*
 .idea/
 .vscode/
 *.swp
+.update_pending.json

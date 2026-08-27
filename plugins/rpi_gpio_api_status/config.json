@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "api_url": "http://127.0.0.1:8080",
+  "api_token": "",
+  "auto_indicator_enabled": true,
+  "success_duration_sec": 300
+}

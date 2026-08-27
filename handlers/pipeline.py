@@ -132,6 +132,9 @@ async def _process_single_task(chat_id, task):
     # Run plugin on_before_ai hooks
     from plugin_manager import plugin_manager
     user_text, session_data = await plugin_manager.dispatch_before_ai(user_text, chat_id, session_data)
+    if not user_text or not user_text.strip():
+        log.info(f"Message in chat {chat_id} was intercepted and consumed by plugin hook. Skipping AI execution.")
+        return
 
     # Inject protocol into prompt
     current_proj = session_data.get("project", "默认")

@@ -182,7 +182,7 @@ def extract_final_response_from_transcript(transcript_path, initial_size=0):
     return None
 
 def is_transcript_turn_completed(transcript_path, initial_size=0):
-    """检测当前轮次在 transcript.jsonl 中是否已包含完成状态 (status=='DONE') 的 PLANNER_RESPONSE 且无待执行工具。"""
+    """检测当前轮次在 transcript.jsonl 中是否已包含完成状态 (status=='DONE') 的 PLANNER_RESPONSE 且无待执行的后台任务/子代理。"""
     if not transcript_path or not os.path.exists(transcript_path):
         return False
     try:
@@ -213,6 +213,27 @@ def is_transcript_turn_completed(transcript_path, initial_size=0):
         if not turn_lines:
             return False
             
+        # 1. 检查是否存在未完成的 Background Tasks
+        started_tasks = set()
+        finished_tasks = set()
+        for event in turn_lines:
+            content = event.get("content") or ""
+            if "Tool is running as a background task with task id:" in content or "task id:" in content:
+                for m in re.finditer(r'task id:\s*([^\s\n]+)', content):
+                    started_tasks.add(m.group(1).strip())
+            if 'Task id "' in content and "finished with result" in content:
+                for m in re.finditer(r'Task id\s*["\']([^"\']+)["\']\s+finished with result', content):
+                    finished_tasks.add(m.group(1).strip())
+            elif 'Task id "' in content and ("completed" in content or "failed" in content or "cancelled" in content):
+                for m in re.finditer(r'Task id\s*["\']([^"\']+)["\']\s+(?:completed|failed|cancelled)', content):
+                    finished_tasks.add(m.group(1).strip())
+
+        # 存在尚未返回结果的后台任务，说明 Agent 处于异步等待唤醒状态，绝不能判定为轮次结束
+        pending_tasks = started_tasks - finished_tasks
+        if pending_tasks:
+            return False
+
+        # 2. 检查最后一条事件是否为真正完成的最终回答
         last_event = turn_lines[-1]
         if (last_event.get("source") == "MODEL" and 
             last_event.get("type") == "PLANNER_RESPONSE" and 
@@ -220,8 +241,8 @@ def is_transcript_turn_completed(transcript_path, initial_size=0):
             tool_calls = last_event.get("tool_calls")
             if not tool_calls or len(tool_calls) == 0:
                 return True
-    except Exception:
-        pass
+    except Exception as e:
+        log.error(f"is_transcript_turn_completed error: {e}")
     return False
 
 def extract_final_chinese_response(text):
@@ -702,8 +723,8 @@ async def execute_antigravity(
                         None,
                         lambda: is_transcript_turn_completed(t_path, initial_transcript_size)
                     )
-                if turn_done and stall_seconds >= 5:
-                    log.info(f"[Executor] Model turn completed in transcript, but process PID {process.pid} hung without exiting. Terminating process group...")
+                if turn_done and stall_seconds >= 30:
+                    log.info(f"[Executor] Model turn fully completed in transcript, but process PID {process.pid} lingered without exiting for {stall_seconds}s. Terminating process group...")
                     import signal
                     try:
                         pgid = os.getpgid(process.pid)

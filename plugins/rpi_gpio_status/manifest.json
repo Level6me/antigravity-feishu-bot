@@ -1,9 +1,9 @@
 {
   "id": "rpi_gpio_status",
-  "name": "🍓 树莓派 GPIO 状态灯指示插件",
+  "name": "🍓 树莓派 GPIO 状态灯指示 (物理直驱版)",
   "version": "1.0.0",
   "author": "Antigravity",
-  "description": "通过树莓派 GPIO 引脚控制红绿黄三色 LED 灯，实时展现 AI 任务的就绪、运行中、成功及异常状态",
-  "commands": ["/light", "/led"],
-  "enabled": true
+  "description": "通过树莓派底层 GPIO 硬件直接驱动控制红绿黄三色 LED 灯",
+  "commands": ["/gpio_led", "/rpi_gpio"],
+  "enabled": false
 }

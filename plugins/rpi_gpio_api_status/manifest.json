@@ -1,0 +1,9 @@
+{
+  "id": "rpi_gpio_api_status",
+  "name": "🍓 树莓派 GPIO 状态灯指示 (API 网关版)",
+  "version": "2.0.0",
+  "author": "Antigravity",
+  "description": "基于 pi_led_api 集中式 HTTP 网关控制红绿黄三色 LED，实时联动 AI 思考、工具调用与任务完成状态，并提供飞书交互卡片",
+  "commands": ["/led", "/light"],
+  "enabled": true
+}

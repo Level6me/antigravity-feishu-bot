@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "hardware_mode": "auto",
   "gpio_pins": {
     "red": 22,
