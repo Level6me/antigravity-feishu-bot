@@ -6,12 +6,9 @@ import time
 from typing import Optional, List, Dict, Any
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-# 统一使用主机器人数据目录，保证 CLI、Daemon 与 Feishu Bot 访问同一份任务库
-BOT_DATA_DIR = "/home/jiang/github/antigravity-feishu-bot/plugin_data/cron_scheduler"
-LOCAL_DATA_DIR = os.path.abspath(os.path.join(PLUGIN_DIR, "..", "..", "plugin_data", "cron_scheduler"))
-DATA_DIR = BOT_DATA_DIR if os.path.exists(os.path.dirname(BOT_DATA_DIR)) else LOCAL_DATA_DIR
-os.makedirs(DATA_DIR, exist_ok=True)
-DEFAULT_DB_PATH = os.path.join(DATA_DIR, "scheduler.db")
+MAIN_BOT_DB = "/home/jiang/github/antigravity-feishu-bot/antigravity_bot.db"
+LOCAL_FALLBACK_DB = os.path.abspath(os.path.join(PLUGIN_DIR, "..", "..", "antigravity_bot.db"))
+DEFAULT_DB_PATH = MAIN_BOT_DB if os.path.exists(MAIN_BOT_DB) else LOCAL_FALLBACK_DB
 
 
 def get_db(db_path: str = None) -> sqlite3.Connection:
@@ -52,19 +49,19 @@ def init_db(db_path: str = None):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tasks_active ON cron_tasks (is_active, next_run_at);')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tasks_chat ON cron_tasks (chat_id);')
 
-        # 任务执行日志审计表
+        # 任务执行日志审计表 (兼容 main bot 与 daemon 审计结构)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS cron_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id VARCHAR(64) NOT NULL,
-                task_name VARCHAR(128) NOT NULL,
-                status VARCHAR(32) NOT NULL,
-                result TEXT,
+                task_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                output TEXT DEFAULT '',
+                error_msg TEXT DEFAULT '',
                 duration_ms INTEGER DEFAULT 0,
-                created_at INTEGER NOT NULL
+                executed_at INTEGER DEFAULT 0
             );
         ''')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_task ON cron_logs (task_id, created_at DESC);')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_task ON cron_logs (task_id, executed_at DESC);')
         conn.commit()
     finally:
         conn.close()
@@ -215,9 +212,9 @@ def record_log(task_id: str, task_name: str, status: str, result: str, duration_
     try:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO cron_logs (task_id, task_name, status, result, duration_ms, created_at)
+            INSERT INTO cron_logs (task_id, status, output, error_msg, duration_ms, executed_at)
             VALUES (?, ?, ?, ?, ?, ?)
-        ''', (task_id, task_name, status, result, duration_ms, now))
+        ''', (task_id, status, result if status == "success" else "", result if status != "success" else "", duration_ms, now))
         conn.commit()
         return True
     finally:
@@ -229,9 +226,9 @@ def get_recent_logs(task_id: Optional[str] = None, limit: int = 20, db_path: str
     try:
         cursor = conn.cursor()
         if task_id:
-            cursor.execute('SELECT * FROM cron_logs WHERE task_id = ? ORDER BY created_at DESC LIMIT ?', (task_id, limit))
+            cursor.execute('SELECT * FROM cron_logs WHERE task_id = ? ORDER BY executed_at DESC LIMIT ?', (task_id, limit))
         else:
-            cursor.execute('SELECT * FROM cron_logs ORDER BY created_at DESC LIMIT ?', (limit,))
+            cursor.execute('SELECT * FROM cron_logs ORDER BY executed_at DESC LIMIT ?', (limit,))
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
     finally:
