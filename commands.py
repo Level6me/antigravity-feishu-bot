@@ -767,13 +767,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         card_content = CardBuilder.build_model_panel(available_models, session_data.get('model', 'Default'))
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
         return True, user_text
-        
-    elif user_text.startswith("/cron") or user_text.startswith("/schedule"):
-        from database import get_all_cron_tasks
-        tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
-        cron_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, cron_card))
-        return True, user_text
 
     elif first_word in ["/plugin", "/plugins"]:
         if not is_admin(chat_id):

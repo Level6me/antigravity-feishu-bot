@@ -1,49 +1,67 @@
-# ⏱️ 计划任务与定时调度插件 (`cron_scheduler`)
+# ⏱️ 计划任务与后台常驻调度中心 (Cron Scheduler v3.0)
 
-`cron_scheduler` 是负责飞书机器人后台定时任务、周期巡检与精准倒计时提醒的核心调度插件。
-
----
-
-## 📌 功能特性
-
-- **多模式调度**：支持标准 5 字段 Cron 表达式（如 `0 9 * * *` 每天早9点）以及秒级倒计时任务；
-- **图形化任务看板**：交互式 Tab 卡片查看个人任务与系统周期任务；
-- **开关与手动触发**：支持在飞书卡片上一键切换任务开启/禁用状态，或点击 **`▶ 立即执行`** 触发测试；
-- **持久化存储**：任务状态与数据写入 SQLite 数据库，服务重启后自动恢复计划。
+> 基于独立 PM2 守护引擎的高精度秒级倒计时、Cron 周期调度与 AI/运维系统级巡检中心。
 
 ---
 
-## ⚙️ 指令与使用方法
+## 🌟 核心特性
 
-| 斜杠指令 | 参数 | 描述 | 示例 |
-| :--- | :--- | :--- | :--- |
-| `/cron` | 无 | 打开计划任务管理与巡检调度看板 | `/cron` |
-| `/schedule` | 无 | `/cron` 指令的别名快捷方式 | `/schedule` |
+- **🎯 自然语言秒级意图识别**：在飞书对话中直接发送 `一分钟后提醒我喝水`、`每天早上9点提醒站会`、`每隔10分钟巡检服务器`，毫秒级直接创建并反馈确认卡片。
+- **⚡ 全功能 Slash 指令**：支持 `/cron`、`/cron add`、`/cron list`、`/cron del`、`/cron run`、`/cron on/off`。
+- **🛡️ 独立 PM2 守护进程 (`daemon.py`)**：秒级精准轮询调度，与主机器人完全解耦，不卡顿主事件循环，重启自动恢复计时。
+- **🖥️ 多维执行器体系**：
+  - `reminder`：消息提醒（喝水、站会、会议、待办）。
+  - `shell`：Linux 系统脚本执行（磁盘清理、服务备份、Docker 容器检查）。
+  - `ai_agent`：AI 深度巡检报告。
+  - `hardware_led`：树莓派 GPIO/LED 硬件状态联动。
+- **📊 审计与日志记录**：完整记录每次任务触发时间、执行耗时、成功/失败状态与输出内容。
 
 ---
 
-## 📋 插件配置与清单 (`manifest.json`)
+## 📂 项目结构
 
-```json
-{
-  "id": "cron_scheduler",
-  "name": "⏱️ 计划任务与定时调度插件",
-  "version": "2.0.0",
-  "author": "Antigravity",
-  "description": "基于 Cron 表达式与秒级倒计时的后台定时任务与巡检调度中心",
-  "commands": [
-    "/cron",
-    "/schedule"
-  ],
-  "enabled": true
-}
+```text
+plugins/cron_scheduler/
+├── manifest.json         # 插件元数据 (v3.0.0)
+├── config.json           # 插件与 Daemon 配置
+├── plugin.py             # 飞书消息管道前端交互组件
+├── daemon.py             # 独立常驻调度守护进程 (可由 PM2 纳管)
+├── scheduler.py          # 自然语言时间解析与 Croniter 计算引擎
+├── executors.py          # 多维任务执行器 (提醒/Shell/AI/硬件)
+├── database.py           # SQLite 持久化存储与日志审计
+└── README.md             # 使用说明文档
 ```
 
 ---
 
-## 🛠️ 卡片交互回调动作
+## 🚀 启动与 PM2 守护配置
 
-- `switch_cron_tab`: 切换个人任务 / 系统巡检任务选项卡
-- `toggle_cron_active`: 开关启用或暂停指定定时任务
-- `delete_cron_task`: 物理安全删除指定定时任务
-- `run_cron_now`: 手动立刻触发一次任务执行
+在终端中将 `daemon.py` 注册为 PM2 常驻守护服务：
+
+```bash
+# 启动守护进程
+pm2 start /home/jiang/github/feishu-bot-plugin/plugins/cron_scheduler/daemon.py --name feishu-cron-daemon --interpreter python3
+
+# 查看运行状态与日志
+pm2 status
+pm2 logs feishu-cron-daemon
+```
+
+---
+
+## 💬 常用指令与自然语言示例
+
+### 1. 自然语言直接设定（推荐）
+- `一分钟后提醒我喝水`
+- `10分钟后检查系统磁盘空间`
+- `半小时后提醒我出门`
+- `每天早上9点提醒我站会`
+- `每天23:30检查数据备份`
+- `每隔10分钟巡检一次服务器`
+
+### 2. 命令行精确管理
+- `/cron` 或 `/cron list`：查看计划任务面板与状态卡片。
+- `/cron add 每日日报 | 0 18 * * * | 汇总今日提交并输出报告`：标准 3 段式添加。
+- `/cron del <task_id>`：删除指定计划任务。
+- `/cron run <task_id>`：手动立即触发一次执行。
+- `/cron on <task_id>` / `/cron off <task_id>`：启用或暂停任务。

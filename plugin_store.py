@@ -149,48 +149,95 @@ def _install_plugin_requirements(target_dir: str):
             log.error(f"[PluginStore] Failed to install requirements for {target_dir}: {e}")
 
 
+def _restart_plugin_daemon_if_needed(target_dir: str):
+    """If plugin manifest specifies a daemon_script or config specifies daemon_name, reload its PM2 service."""
+    manifest_path = os.path.join(target_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        return
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        daemon_script = manifest.get("daemon_script")
+        plugin_id = manifest.get("id", "")
+        if daemon_script or plugin_id == "cron_scheduler":
+            daemon_name = "feishu-cron-daemon" if plugin_id == "cron_scheduler" else f"feishu-{plugin_id.replace('_', '-')}-daemon"
+            subprocess.Popen(["pm2", "restart", daemon_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log.warning(f"[PluginStore] Failed to restart daemon for {target_dir}: {e}")
+
+
 def update_plugin(plugin_id: str) -> tuple[bool, str]:
-    """Pull latest code for an installed git-based plugin."""
+    """Pull latest code for an installed git-based plugin or sync from official monorepo."""
     target_dir = os.path.join(PLUGINS_DIR, plugin_id)
     if not os.path.exists(target_dir):
         return False, f"插件 `{plugin_id}` 不存在。"
 
     git_dir = os.path.join(target_dir, ".git")
-    if not os.path.exists(git_dir):
-        return False, f"插件 `{plugin_id}` 不是由 Git 仓库安装，无法通过 Git 更新。"
+    if os.path.exists(git_dir):
+        custom_env = os.environ.copy()
+        custom_env["GIT_TERMINAL_PROMPT"] = "0"
 
-    custom_env = os.environ.copy()
-    custom_env["GIT_TERMINAL_PROMPT"] = "0"
-
-    try:
-        res = subprocess.run(
-            ["git", "pull", "origin", "main"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            cwd=target_dir,
-            env=custom_env
-        )
-        if res.returncode != 0:
+        try:
             res = subprocess.run(
-                ["git", "pull"],
+                ["git", "pull", "origin", "main"],
                 capture_output=True,
                 text=True,
                 timeout=20,
                 cwd=target_dir,
                 env=custom_env
             )
+            if res.returncode != 0:
+                res = subprocess.run(
+                    ["git", "pull"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    cwd=target_dir,
+                    env=custom_env
+                )
 
-        if res.returncode == 0:
+            if res.returncode == 0:
+                _install_plugin_requirements(target_dir)
+                _restart_plugin_daemon_if_needed(target_dir)
+                return True, f"插件 `{plugin_id}` 代码同步更新完成！\n`{res.stdout.strip()}`"
+            else:
+                return False, f"更新失败: {res.stderr.strip()}"
+
+        except subprocess.TimeoutExpired:
+            return False, "Git 更新拉取超时 (20s)。"
+        except Exception as e:
+            return False, f"更新异常: {e}"
+
+    # 检查本地官方插件仓库源 /home/jiang/github/feishu-bot-plugin
+    official_repo_dir = "/home/jiang/github/feishu-bot-plugin"
+    official_plugin_dir = os.path.join(official_repo_dir, "plugins", plugin_id)
+    if os.path.exists(official_plugin_dir):
+        pull_info = ""
+        try:
+            custom_env = os.environ.copy()
+            custom_env["GIT_TERMINAL_PROMPT"] = "0"
+            pull_res = subprocess.run(
+                ["git", "pull", "--no-rebase"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=official_repo_dir,
+                env=custom_env
+            )
+            if pull_res.returncode == 0 and pull_res.stdout.strip():
+                pull_info = f"\nGit 状态: `{pull_res.stdout.strip()}`"
+        except Exception:
+            pass
+
+        try:
+            shutil.copytree(official_plugin_dir, target_dir, dirs_exist_ok=True)
             _install_plugin_requirements(target_dir)
-            return True, f"插件 `{plugin_id}` 代码同步更新完成！\n`{res.stdout.strip()}`"
-        else:
-            return False, f"更新失败: {res.stderr.strip()}"
+            _restart_plugin_daemon_if_needed(target_dir)
+            return True, f"插件 `{plugin_id}` 已成功从官方插件仓库同步至最新版本！{pull_info}"
+        except Exception as e:
+            return False, f"从官方插件仓库同步失败: {e}"
 
-    except subprocess.TimeoutExpired:
-        return False, "Git 更新拉取超时 (20s)。"
-    except Exception as e:
-        return False, f"更新异常: {e}"
+    return False, f"插件 `{plugin_id}` 不是由独立 Git 仓库安装，且未在官方插件中心找到对应源码。"
 
 
 def uninstall_plugin(plugin_id: str) -> tuple[bool, str]:
