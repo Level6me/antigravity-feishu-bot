@@ -65,7 +65,55 @@ def parse_schedule_intent(text: str) -> Optional[Dict[str, Any]]:
         "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10
     }
 
-    # 1. 相对倒计时: "半小时后 / 半个钟后"
+    # 1.0 明天/后天这个时候: "明天这个时候提醒我喝水", "后天此时提醒我"
+    m_tmr_now = re.search(r"(明天|后天|大后天)\s*(这个时候|此时|现在|同一时间)\s*(提醒我|叫我|帮我|执行|做|去)?\s*(.*)", text)
+    if m_tmr_now:
+        day_str, _, _, raw_act = m_tmr_now.groups()
+        days = 1 if day_str == "明天" else (2 if day_str == "后天" else 3)
+        sec = days * 86400
+        act = clean_action_text(raw_act) or f"{day_str}定时提醒"
+        prompt = f"时间到：提醒用户{act}" if ("提醒" not in act and "巡检" not in act and "检查" not in act) else act
+        return {
+            "task_type": "delay",
+            "action_type": "reminder",
+            "cron_expr": f"{sec}s",
+            "name": f"{day_str}提醒{act}" if not act.startswith(day_str) else act,
+            "prompt": prompt
+        }
+
+    # 1.0.1 明天/后天具体时间点: "明天早上9点", "明天下午3点半", "明天23:30", "后天上午10点"
+    m_future_day = re.search(r"(明天|后天|大后天)\s*(早上|上午|中午|下午|晚上|夜里)?\s*(\d{1,2}|[一二两三四五六七八九十]+)\s*([点|时|:：])\s*(\d{1,2}|半)?(分)?\s*(提醒我|叫我|帮我|执行|做)?\s*(.*)", text)
+    if m_future_day:
+        from datetime import datetime, timedelta
+        day_str, period, hour_str, sep, min_str, _, _, raw_act = m_future_day.groups()
+        days = 1 if day_str == "明天" else (2 if day_str == "后天" else 3)
+        hour = int(hour_str) if hour_str.isdigit() else cn_num.get(hour_str, 9)
+        if period in ["下午", "晚上", "夜里"] and hour < 12:
+            hour += 12
+        elif period == "中午" and hour < 11:
+            hour += 12
+
+        minute = 0
+        if min_str == "半":
+            minute = 30
+        elif min_str and min_str.isdigit():
+            minute = int(min_str)
+
+        now = datetime.now()
+        target_date = (now + timedelta(days=days)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+        delay_sec = max(10, int((target_date - now).total_seconds()))
+
+        act = clean_action_text(raw_act) or f"{day_str}{hour:02d}:{minute:02d}定时任务"
+        prompt = f"时间到：提醒用户{act}" if ("提醒" not in act and "巡检" not in act and "检查" not in act) else act
+        return {
+            "task_type": "delay",
+            "action_type": "reminder",
+            "cron_expr": f"{delay_sec}s",
+            "name": f"{day_str}{act}" if not act.startswith(day_str) else act,
+            "prompt": prompt
+        }
+
+    # 1.1 相对倒计时: "半小时后 / 半个钟后"
     m_half = re.search(r"半(个?小时|个?钟头)后\s*(提醒我|叫我|帮我|执行|做|去)?\s*(.*)", text)
     if m_half:
         raw_act = m_half.group(3).strip()
@@ -79,7 +127,7 @@ def parse_schedule_intent(text: str) -> Optional[Dict[str, Any]]:
             "prompt": prompt
         }
 
-    # 1.1 相对倒计时: 数字+单位后 (e.g. 1分钟后, 一分钟后, 10秒后, 2小时后, 1天后)
+    # 1.2 相对倒计时: 数字+单位后 (e.g. 1分钟后, 一分钟后, 10秒后, 2小时后, 1天后)
     m_delay = re.search(r"([0-9零一二两三四五六七八九十]+)\s*(个?半?小时|个?钟头|分钟|分|秒钟|秒|天|周)后\s*(提醒我|叫我|帮我|执行|做|去)?\s*(.*)", text)
     if m_delay:
         num_str, unit_str, _, raw_act = m_delay.groups()
