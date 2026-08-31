@@ -107,7 +107,17 @@ class PluginManager:
                     return True, user_text
             except Exception as e:
                 log.error(f"[PluginManager] Error executing command '{first_word}' in plugin '{plugin.plugin_id}': {e}", exc_info=True)
-        return False, user_text
+    async def dispatch_message(self, user_text: str, message_id: str, chat_id: str, session_data: dict) -> bool:
+        """Pipe incoming user_text through on_message hooks of all active plugins.
+        If any plugin returns True, the message is considered handled (intercepted)."""
+        for pid, plugin in self.plugins.items():
+            if plugin.enabled:
+                try:
+                    if await plugin.on_message(chat_id, user_text, message_id, session_data):
+                        return True
+                except Exception as e:
+                    log.error(f"[PluginManager] Error in plugin '{pid}' on_message: {e}", exc_info=True)
+        return False
 
     async def dispatch_card_action(self, action: str, value: dict, chat_id: str, card_message_id: str) -> bool:
         """Dispatch card action button events to all loaded plugins."""

@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "api_url": "http://127.0.0.1:8080",
-  "api_token": "",
+  "api_token": "tok_98456ea9826d816b7a8198303823aa2f",
   "auto_indicator_enabled": true,
   "success_duration_sec": 300
 }

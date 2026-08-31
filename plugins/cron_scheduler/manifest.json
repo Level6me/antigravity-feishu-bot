@@ -1,9 +1,10 @@
 {
   "id": "cron_scheduler",
-  "name": "⏱️ 计划任务与定时调度插件",
-  "version": "2.0.0",
+  "name": "⏱️ 计划任务与后台常驻调度中心",
+  "version": "3.0.0",
   "author": "Antigravity",
-  "description": "基于 Cron 表达式与秒级倒计时的后台定时任务与巡检调度中心",
+  "description": "基于独立 PM2 守护引擎的高精度秒级倒计时、Cron 周期调度与 AI/运维巡检中心",
   "commands": ["/cron", "/schedule"],
+  "daemon_script": "daemon.py",
   "enabled": true
 }

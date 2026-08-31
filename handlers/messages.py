@@ -84,6 +84,12 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         if override_text:
             raw_text = override_text
 
+    # Check plugin on_message intercept hooks (e.g. natural language schedule intent)
+    from plugin_manager import plugin_manager
+    if await plugin_manager.dispatch_message(cleaned_text, message_id, chat_id, session_data):
+        stats.record_success()
+        return
+
     # 辅助任务分发函数
     async def dispatch_task(c_id, msg_id, m_type, c_json, c_raw, r_text):
         if c_id not in chat_queues:

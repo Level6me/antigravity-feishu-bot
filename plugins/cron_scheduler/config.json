@@ -1,0 +1,9 @@
+{
+  "daemon_name": "feishu-cron-daemon",
+  "check_interval_seconds": 1,
+  "max_parallel_tasks": 5,
+  "default_category": "user",
+  "notify_on_start": true,
+  "notify_on_complete": true,
+  "led_api_endpoint": "http://127.0.0.1:8080"
+}
