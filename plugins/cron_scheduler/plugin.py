@@ -257,8 +257,16 @@ class CronSchedulerPlugin(BasePlugin):
 
         # 1. 查看任务总面板
         if not args_clean or args_clean in ["list", "panel", "ls"]:
-            tasks = get_all_tasks(chat_id)
-            card = build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
+            try:
+                from database import get_all_cron_tasks
+                tasks = get_all_cron_tasks(chat_id)
+            except Exception:
+                tasks = get_all_tasks(chat_id)
+            try:
+                from cards.cron import build_cron_panel_card as build_main_card
+                card = build_main_card(tasks, active_tab="user", session_data=session_data)
+            except Exception:
+                card = build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
             self.send_reply_card(message_id, card)
             return True
 
