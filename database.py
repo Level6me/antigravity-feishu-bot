@@ -6,7 +6,8 @@ import asyncio
 import aiosqlite
 from logger import log
 
-DB_FILE = "antigravity_bot.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "antigravity_bot.db")
 
 def get_db():
     conn = sqlite3.connect(DB_FILE)
@@ -444,7 +445,7 @@ def get_all_cron_tasks(chat_id=None):
     try:
         cursor = conn.cursor()
         if chat_id:
-            cursor.execute('SELECT * FROM cron_tasks WHERE chat_id = ? ORDER BY created_at DESC', (chat_id,))
+            cursor.execute('SELECT * FROM cron_tasks WHERE chat_id = ? OR chat_id = "" OR chat_id IS NULL OR category IN ("system", "maintenance") ORDER BY created_at DESC', (chat_id,))
         else:
             cursor.execute('SELECT * FROM cron_tasks ORDER BY created_at DESC')
         rows = cursor.fetchall()
