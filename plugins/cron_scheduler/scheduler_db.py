@@ -6,8 +6,10 @@ import time
 from typing import Optional, List, Dict, Any
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-# 默认存储在插件自身私有数据目录中，也可以回退至当前目录
-DATA_DIR = os.path.abspath(os.path.join(PLUGIN_DIR, "..", "..", "plugin_data", "cron_scheduler"))
+# 统一使用主机器人数据目录，保证 CLI、Daemon 与 Feishu Bot 访问同一份任务库
+BOT_DATA_DIR = "/home/jiang/github/antigravity-feishu-bot/plugin_data/cron_scheduler"
+LOCAL_DATA_DIR = os.path.abspath(os.path.join(PLUGIN_DIR, "..", "..", "plugin_data", "cron_scheduler"))
+DATA_DIR = BOT_DATA_DIR if os.path.exists(os.path.dirname(BOT_DATA_DIR)) else LOCAL_DATA_DIR
 os.makedirs(DATA_DIR, exist_ok=True)
 DEFAULT_DB_PATH = os.path.join(DATA_DIR, "scheduler.db")
 
@@ -137,7 +139,11 @@ def get_all_tasks(chat_id: Optional[str] = None, db_path: str = None) -> List[Di
     try:
         cursor = conn.cursor()
         if chat_id:
-            cursor.execute('SELECT * FROM cron_tasks WHERE chat_id = ? ORDER BY created_at DESC', (chat_id,))
+            cursor.execute('''
+                SELECT * FROM cron_tasks 
+                WHERE chat_id = ? OR chat_id = "" OR chat_id IS NULL OR category IN ("system", "maintenance") 
+                ORDER BY created_at DESC
+            ''', (chat_id,))
         else:
             cursor.execute('SELECT * FROM cron_tasks ORDER BY created_at DESC')
         rows = cursor.fetchall()
