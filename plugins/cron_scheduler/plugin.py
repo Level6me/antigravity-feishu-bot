@@ -248,6 +248,40 @@ class CronSchedulerPlugin(BasePlugin):
         init_db()
         log.info(f"[Plugin:{self.plugin_id}] Cron Scheduler Plugin v3.0 initialized with standalone daemon engine.")
 
+    async def on_before_ai(self, user_text: str, chat_id: str, session_data: dict) -> tuple[str, dict]:
+        """Hook called right before user_text is passed to AI model.
+        Intercepts natural language schedule intent, registers task, and prevents AI execution."""
+        intent = parse_schedule_intent(user_text)
+        if not intent:
+            return user_text, session_data
+
+        log.info(f"[Plugin:{self.plugin_id}] on_before_ai: Natural Language Schedule Intent matched: {intent}")
+        now_ts = int(time.time())
+        next_run = compute_next_run(intent["cron_expr"], intent["task_type"], now_ts)
+
+        task_id = f"task_usr_{now_ts}"
+        task_data = {
+            "id": task_id,
+            "chat_id": chat_id,
+            "category": "user",
+            "name": intent["name"],
+            "task_type": intent["task_type"],
+            "action_type": intent.get("action_type", "reminder"),
+            "cron_expr": intent["cron_expr"],
+            "prompt": intent["prompt"],
+            "project_path": session_data.get("project", ""),
+            "is_active": True,
+            "created_by": chat_id,
+            "created_at": now_ts,
+            "next_run_at": next_run,
+            "run_count": 0
+        }
+
+        save_task(task_data)
+        created_card = build_cron_created_card(task_data)
+        send_card_to_chat_sdk(chat_id, created_card)
+        return "", session_data
+
     async def on_message(self, chat_id: str, user_text: str, message_id: str, session_data: dict) -> bool:
         """自然语言消息拦截：毫秒级识别时间意图并注册任务"""
         intent = parse_schedule_intent(user_text)
