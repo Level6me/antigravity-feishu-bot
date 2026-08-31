@@ -11,8 +11,8 @@ def _format_timestamp(ts):
     return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
 
 def build_cron_panel_card(tasks, active_tab="user", session_data=None):
-    user_tasks = [t for t in tasks if t.get('category') == 'user']
-    sys_tasks = [t for t in tasks if t.get('category') == 'system']
+    user_tasks = [t for t in tasks if t.get('category') in ['user', None, '', 'default']]
+    sys_tasks = [t for t in tasks if t.get('category') in ['system', 'maintenance']]
     
     displayed_tasks = user_tasks if active_tab == 'user' else sys_tasks
     

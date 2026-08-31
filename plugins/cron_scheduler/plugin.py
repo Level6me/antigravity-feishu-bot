@@ -43,7 +43,7 @@ def format_ts(ts: Optional[int]) -> str:
 
 def build_cron_panel_card(tasks: List[Dict[str, Any]], active_tab: str = "user", session_data: dict = None) -> dict:
     """构建计划任务总控中心交互卡片"""
-    user_tasks = [t for t in tasks if t.get("category") == "user"]
+    user_tasks = [t for t in tasks if t.get("category") in ["user", None, "", "default"]]
     sys_tasks = [t for t in tasks if t.get("category") in ["system", "maintenance"]]
     displayed_tasks = user_tasks if active_tab == "user" else sys_tasks
 
