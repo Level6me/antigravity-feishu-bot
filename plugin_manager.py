@@ -91,7 +91,10 @@ class PluginManager:
             log.error(f"[PluginManager] Failed to load plugin from {p_dir}: {e}", exc_info=True)
 
     def reload_plugins(self):
-        """Reload all plugins dynamically."""
+        """Reload all plugins dynamically with deep module cache cleanup."""
+        to_del = [k for k in list(sys.modules.keys()) if k.startswith("bot_plugin_") or k in ["scheduler_db", "scheduler", "executors", "cards.cron"]]
+        for k in to_del:
+            sys.modules.pop(k, None)
         self.load_all_plugins()
 
     async def dispatch_command(self, user_text: str, message_id: str, chat_id: str, session_data: dict) -> tuple[bool, str]:
