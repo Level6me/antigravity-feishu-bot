@@ -161,6 +161,11 @@ async def _process_single_task(chat_id, task):
         "- 方案 1: 简短描述\n"
         "- 方案 2: 简短描述\n"
         "[/CHOICE_CARD]\n\n"
+        "5. 【计划任务调度能力 (AI Cron Scheduler)】：系统已配备专属后台常驻守护引擎 (feishu-cron-daemon)。当你分析出用户有定时提醒、倒计时、周期性巡检或长任务阶段汇报需求时（例如：'一分钟后提醒我喝水'、'明天这个时候提醒我'、'每天早上9点巡检服务器'、'等我写完代码20分钟后提醒我测试'），严禁仅口头回复，必须使用 run_command 工具执行 CLI 将任务持久化注册到守护引擎中：\n"
+        f"   • 倒计时示例：timeout 10s python3 /home/jiang/github/feishu-bot-plugin/plugins/cron_scheduler/cli.py add --name \"喝水提醒\" --delay-seconds 60 --prompt \"时间到：该喝水休息一下啦！💧\" --chat-id \"{chat_id}\" --action-type reminder\n"
+        f"   • 周期示例：timeout 10s python3 /home/jiang/github/feishu-bot-plugin/plugins/cron_scheduler/cli.py add --name \"每日站会\" --cron \"0 9 * * 1-5\" --prompt \"该参加每日站会啦\" --chat-id \"{chat_id}\" --action-type reminder\n"
+        f"   • 运维脚本示例：timeout 10s python3 /home/jiang/github/feishu-bot-plugin/plugins/cron_scheduler/cli.py add --name \"夜间磁盘巡检\" --cron \"0 3 * * *\" --action-type shell --command \"df -h\" --chat-id \"{chat_id}\"\n"
+        "   任务注册成功后，后台守护引擎将接管 7x24 小时精准计时并在到点时自动向飞书推送卡片。\n\n"
     )
     
     # 注入该项目专属 Prompt
