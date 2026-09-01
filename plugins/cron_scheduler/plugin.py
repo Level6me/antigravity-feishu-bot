@@ -288,8 +288,10 @@ class CronSchedulerPlugin(BasePlugin):
             except Exception:
                 tasks = get_all_tasks(chat_id)
             try:
-                from cards.cron import build_cron_panel_card as build_main_card
-                card = build_main_card(tasks, active_tab="user", session_data=session_data)
+                import importlib
+                import cards.cron as _c_cron
+                importlib.reload(_c_cron)
+                card = _c_cron.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
             except Exception:
                 card = build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
             self.send_reply_card(message_id, card)

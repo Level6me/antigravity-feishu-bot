@@ -92,6 +92,12 @@ class PluginManager:
 
     def reload_plugins(self):
         """Reload all plugins dynamically with deep module cache cleanup."""
+        import importlib
+        try:
+            import cards.cron as _c_cron
+            importlib.reload(_c_cron)
+        except Exception:
+            pass
         to_del = [k for k in list(sys.modules.keys()) if k.startswith("bot_plugin_") or k in ["scheduler_db", "scheduler", "executors", "cards.cron"]]
         for k in to_del:
             sys.modules.pop(k, None)

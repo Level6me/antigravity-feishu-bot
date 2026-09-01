@@ -44,10 +44,25 @@ class CardBuilder:
     build_user_panel_card = staticmethod(auth.build_user_panel_card)
     build_rate_limit_card = staticmethod(auth.build_rate_limit_card)
 
-    build_cron_panel_card = staticmethod(cron.build_cron_panel_card)
-    build_cron_start_card = staticmethod(cron.build_cron_start_card)
-    build_cron_execution_card = staticmethod(cron.build_cron_execution_card)
-    build_cron_created_card = staticmethod(cron.build_cron_created_card)
+    @staticmethod
+    def build_cron_panel_card(*args, **kwargs):
+        import cards.cron as _cron
+        return _cron.build_cron_panel_card(*args, **kwargs)
+
+    @staticmethod
+    def build_cron_start_card(*args, **kwargs):
+        import cards.cron as _cron
+        return _cron.build_cron_start_card(*args, **kwargs)
+
+    @staticmethod
+    def build_cron_execution_card(*args, **kwargs):
+        import cards.cron as _cron
+        return _cron.build_cron_execution_card(*args, **kwargs)
+
+    @staticmethod
+    def build_cron_created_card(*args, **kwargs):
+        import cards.cron as _cron
+        return _cron.build_cron_created_card(*args, **kwargs)
 
     build_plugin_panel_card = staticmethod(plugin.build_plugin_panel_card)
 
