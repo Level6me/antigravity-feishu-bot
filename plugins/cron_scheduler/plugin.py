@@ -41,6 +41,39 @@ def format_ts(ts: Optional[int]) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def format_relative_ts(ts: Optional[int]) -> str:
+    if not ts or ts <= 0:
+        return "尚未设定"
+    now_ts = int(time.time())
+    diff = ts - now_ts
+    readable_date = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    
+    if diff <= 0:
+        rel = "即将触发"
+    elif diff < 60:
+        rel = f"{diff} 秒后"
+    elif diff < 3600:
+        rel = f"{diff // 60} 分钟后"
+    elif diff < 86400:
+        hours = diff // 3600
+        mins = (diff % 3600) // 60
+        rel = f"{hours} 小时 {mins} 分后" if mins > 0 else f"{hours} 小时后"
+    else:
+        days = diff // 86400
+        hours = (diff % 86400) // 3600
+        rel = f"{days} 天 {hours} 小时后" if hours > 0 else f"{days} 天后"
+        
+    return f"{rel} ({readable_date})"
+
+
+BADGE_MAP = {
+    "reminder": "💬【消息提醒】",
+    "shell": "🖥️【Shell脚本】",
+    "ai_agent": "🧠【AI巡检】",
+    "hardware_led": "💡【硬件联动】"
+}
+
+
 def build_cron_panel_card(tasks: List[Dict[str, Any]], active_tab: str = "user", session_data: dict = None) -> dict:
     """构建计划任务总控中心交互卡片"""
     user_tasks = [t for t in tasks if t.get("category") in ["user", None, "", "default"]]
@@ -92,28 +125,20 @@ def build_cron_panel_card(tasks: List[Dict[str, Any]], active_tab: str = "user",
             t_id = t.get("id")
             is_active = bool(t.get("is_active", 1))
             status_icon = "🟢 启用中" if is_active else "🔴 已暂停"
-            cron_expr = t.get("cron_expr", "")
-            task_type_str = "标准 Cron" if t.get("task_type") == "cron" else "延迟倒计时"
-            
-            action_type_map = {
-                "reminder": "💬 消息提醒",
-                "shell": "🖥️ Shell 脚本",
-                "ai_agent": "🧠 AI 巡检",
-                "hardware_led": "💡 硬件联动"
-            }
-            act_str = action_type_map.get(t.get("action_type"), "通用任务")
+            action_type = t.get("action_type", "reminder")
+            badge = BADGE_MAP.get(action_type, "💬【消息提醒】")
+            t_name = t.get("name", "未命名任务")
 
             last_run = format_ts(t.get("last_run_at"))
-            next_run = format_ts(t.get("next_run_at"))
-            prompt_preview = t.get("prompt", "")
-            if len(prompt_preview) > 50:
-                prompt_preview = prompt_preview[:50] + "..."
+            next_run_str = format_relative_ts(t.get("next_run_at"))
+            prompt_preview = t.get("prompt", "") or t.get("command", "")
+            if len(prompt_preview) > 75:
+                prompt_preview = prompt_preview[:75] + "..."
 
-            task_md = f"**{t.get('name', '未命名任务')}** (`{t_id}`) | **{status_icon}**\n" \
-                      f"• **任务类型**：{act_str} | **触发规则**：`{cron_expr}` ({task_type_str})\n" \
-                      f"• **执行内容**：`{prompt_preview}`\n" \
-                      f"• **累计运行**：{t.get('run_count', 0)} 次 | **上次触发**：{last_run}\n" \
-                      f"• **下次预计触发**：`{next_run}`"
+            task_md = f"**{badge} {t_name}**  {status_icon}\n" \
+                      f"⏰ **触发设定**：{next_run_str}\n" \
+                      f"💡 **执行内容**：{prompt_preview}\n" \
+                      f"📊 **任务审计**：累计运行 **{t.get('run_count', 0)}** 次 · 上次：{last_run} (`#{t_id}`)"
 
             elements.append({"tag": "markdown", "content": task_md})
 
