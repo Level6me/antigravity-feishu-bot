@@ -47,6 +47,10 @@ try:
         logger.info("Lark OAPI Client initialized successfully.")
     else:
         logger.warning("APP_ID / APP_SECRET is empty in config, notifications will run in dry-run mode.")
+except Exception as e:
+    logger.error(f"Failed to initialize Lark Client: {e}")
+
+
 async def send_card_to_feishu(chat_id: str, card_dict: dict) -> bool:
     """向指定飞书会话推送交互卡片"""
     target_chat = chat_id
