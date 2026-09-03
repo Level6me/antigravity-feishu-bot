@@ -147,6 +147,8 @@ def _get_session_lock(chat_id: str) -> asyncio.Lock:
             _session_locks[chat_id] = lock
         return lock
 
+from config import DEFAULT_MODEL
+
 async def get_session_async(chat_id):
     async with _get_session_lock(chat_id):
         async with aiosqlite.connect(DB_FILE) as db:
@@ -155,10 +157,10 @@ async def get_session_async(chat_id):
                 row = await cursor.fetchone()
                 if row:
                     data = json.loads(row['data'])
-                    if data.get('model') == 'Gemini 3.5 Flash':
-                        data['model'] = 'Gemini 3.5 Flash (Medium)'
+                    if not data.get('model') or data.get('model') in ['Gemini 3.5 Flash', 'Gemini 3.5 Flash (Medium)']:
+                        data['model'] = DEFAULT_MODEL
                     return data
-                return {"conversation": "", "model": "Gemini 3.5 Flash (Medium)", "role": "无", "project": "默认"}
+                return {"conversation": "", "model": DEFAULT_MODEL, "role": "无", "project": "默认"}
 
 async def save_session_async(chat_id, data):
     async with _get_session_lock(chat_id):
@@ -188,8 +190,8 @@ def load_sessions():
     sessions = {}
     for row in rows:
         data = json.loads(row['data'])
-        if data.get('model') == 'Gemini 3.5 Flash':
-            data['model'] = 'Gemini 3.5 Flash (Medium)'
+        if not data.get('model') or data.get('model') in ['Gemini 3.5 Flash', 'Gemini 3.5 Flash (Medium)']:
+            data['model'] = DEFAULT_MODEL
         sessions[row['chat_id']] = data
     return sessions
 
@@ -207,10 +209,10 @@ def get_session_sync(chat_id):
         row = cursor.fetchone()
     if row:
         data = json.loads(row['data'])
-        if data.get('model') == 'Gemini 3.5 Flash':
-            data['model'] = 'Gemini 3.5 Flash (Medium)'
+        if not data.get('model') or data.get('model') in ['Gemini 3.5 Flash', 'Gemini 3.5 Flash (Medium)']:
+            data['model'] = DEFAULT_MODEL
         return data
-    return {"conversation": "", "model": "Gemini 3.5 Flash (Medium)", "role": "无", "project": "默认"}
+    return {"conversation": "", "model": DEFAULT_MODEL, "role": "无", "project": "默认"}
 
 def save_session_sync(chat_id, data):
     with get_db() as conn:

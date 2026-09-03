@@ -26,7 +26,7 @@ def _parse_model_entry(entry_str):
 
 def build_model_panel(available_models, current_model):
     parsed_models = []
-    for item in available_models[:12]:
+    for item in available_models:
         m_id, m_label = _parse_model_entry(item)
         if m_id:
             parsed_models.append((m_id, m_label))
