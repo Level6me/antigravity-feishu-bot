@@ -771,7 +771,12 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         
         available_models = [line.strip() for line in models_output.split('\n') if line.strip()]
         if not available_models:
-            available_models = ["Gemini 3.5 Flash (Medium)", "Claude Sonnet 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
+            available_models = [
+                "gemini-3.7-flash-low Gemini 3.7 Flash (Low)",
+                "gemini-3.8-flash-high Gemini 3.8 Flash (High)",
+                "claude-sonnet-4-6 Claude Sonnet 4.6 (Thinking)",
+                "gpt-oss-120b-medium GPT-OSS 120B (Medium)"
+            ]
             
         card_content = CardBuilder.build_model_panel(available_models, session_data.get('model', 'Default'))
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))

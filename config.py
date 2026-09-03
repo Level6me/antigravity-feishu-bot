@@ -32,6 +32,9 @@ class Settings(BaseSettings):
         description="Root dir of antigravity-cli data (default: ~/.gemini/antigravity-cli)",
     )
 
+    # Optional default model configuration
+    default_model: str = Field(default="gemini-3.7-flash-low", alias="DEFAULT_MODEL")
+
     model_config = SettingsConfigDict(
         env_file=os.path.join(BASE_DIR, ".env"),
         env_file_encoding="utf-8",
@@ -43,6 +46,7 @@ class Settings(BaseSettings):
 settings = Settings()
 
 APP_ID = settings.feishu_app_id or settings.app_id
+DEFAULT_MODEL = settings.default_model or "gemini-3.7-flash-low"
 APP_SECRET = settings.feishu_app_secret or settings.app_secret
 
 SESSION_FILE = os.path.join(BASE_DIR, "chat_sessions.json")
