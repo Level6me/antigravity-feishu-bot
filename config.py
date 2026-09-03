@@ -127,8 +127,8 @@ def find_antigravity_bin() -> Optional[str]:
 ANTIGRAVITY_BIN = find_antigravity_bin()
 
 # --- Versioning Configuration ---
-BASE_VERSION_PREFIX = "v2.0."
-VERSION_START_COMMIT = 247  # Used to calculate patch number (commit_count - start_commit)
+BASE_VERSION_PREFIX = "v3.0."
+VERSION_START_COMMIT = 307  # Used to calculate patch number (commit_count - start_commit)
 
 # --- Whitelist & Permission Configuration ---
 ALLOWED_USERS = [uid.strip() for uid in settings.allowed_users.split(",") if uid.strip()]
