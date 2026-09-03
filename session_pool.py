@@ -157,6 +157,23 @@ class SessionPool:
             self._sessions[chat_id] = sess
         return sess
 
+    def update_conversation_id(self, chat_id: str, conversation_id: str):
+        """Sync runtime assigned conversation ID into memory to maintain persistent session continuity."""
+        if not chat_id or not conversation_id:
+            return
+        sess = self._sessions.get(chat_id)
+        if sess:
+            sess.conversation_id = conversation_id
+
+    async def prewarm(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = ""):
+        """Asynchronously pre-spawns a warm process in the background so next message has 0s start latency."""
+        try:
+            sess = self.get_or_create(chat_id, model, project_dir, conversation_id)
+            if not sess.is_alive():
+                await sess.start()
+        except Exception as e:
+            log.warning(f"[SessionPool] Prewarm failed for chat {chat_id}: {e}")
+
     async def reset_session(self, chat_id: str):
         """Close and purge a chat's session."""
         sess = self._sessions.pop(chat_id, None)
@@ -164,3 +181,4 @@ class SessionPool:
             await sess.close()
 
 session_pool = SessionPool()
+

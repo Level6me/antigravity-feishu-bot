@@ -80,8 +80,8 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
         return
         
     remaining = total_len - start_index
-    # 若剩余字符较少，无需再分段等待，直接一次性 patch 完成
-    if remaining <= 200:
+    # 若剩余字符较少或已完整生成，直接一次性 patch 完成
+    if remaining <= 400:
         card = CardBuilder.build_streaming_indicator(full_text, tool_action=None, user_text=user_text, think_seconds=think_seconds)
         await feishu_call_fn(
             lambda: patch_interactive_card_sdk(bot_reply_msg_id, card),
@@ -89,7 +89,7 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
         )
         return
         
-    chunk_size = 300
+    chunk_size = 500
     current_len = start_index
     while current_len < total_len:
         current_len += chunk_size
@@ -104,7 +104,7 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
             label="typewriter patch"
         )
         if current_len < total_len:
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.05)
 
 def parse_transcript_turn(transcript_path, initial_size=0):
     """
@@ -583,15 +583,18 @@ async def execute_antigravity(
                             event_type = event_data.get("event")
                             if event_type == "init":
                                 conv_id = event_data.get("conversation_id")
-                                if conv_id and session_data.get("conversation") != conv_id:
-                                    session_data["conversation"] = conv_id
-                                    try:
-                                        await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
-                                    except Exception:
-                                        pass
-                                    path = get_transcript_path(conv_id)
-                                    if os.path.exists(path):
-                                        target_transcript_path = path
+                                if conv_id:
+                                    from session_pool import session_pool
+                                    session_pool.update_conversation_id(chat_id, conv_id)
+                                    if session_data.get("conversation") != conv_id:
+                                        session_data["conversation"] = conv_id
+                                        try:
+                                            await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                                        except Exception:
+                                            pass
+                                        path = get_transcript_path(conv_id)
+                                        if os.path.exists(path):
+                                            target_transcript_path = path
                             elif event_type == "step_update":
                                 step_up = event_data.get("step_update", {})
                                 step_t = step_up.get("step_type")
