@@ -595,6 +595,8 @@ async def execute_antigravity(
                                         path = get_transcript_path(conv_id)
                                         if os.path.exists(path):
                                             target_transcript_path = path
+                                            if initial_transcript_size == 0:
+                                                initial_transcript_size = os.path.getsize(path)
                             elif event_type == "step_update":
                                 step_up = event_data.get("step_update", {})
                                 step_t = step_up.get("step_type")
@@ -870,8 +872,11 @@ async def execute_antigravity(
 
             transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
 
+            # 优先从本轮直接实时接收到的流式文本 / 最终 result 中提取回答，完全避免读取到历史轮次的 transcript
             if stream_result_response and stream_result_response.strip():
                 final_reply = stream_result_response.strip()
+            elif accumulated_text and accumulated_text.strip():
+                final_reply = accumulated_text.strip()
             else:
                 final_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
             
@@ -881,15 +886,9 @@ async def execute_antigravity(
                 log.warning(f"[Executor] Attempt {attempt} failed without final response (returncode {process.returncode}). Bypassing error card send for auto-retry.")
                 return {"has_reply": False, "returncode": process.returncode, "is_error": True}
             
-            if final_reply:
-                reply_text = final_reply
-            elif stream_result_response:
-                reply_text = stream_result_response
-            else:
-                reply_text = accumulated_text.strip()
-                reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
-                reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
-            
+            reply_text = final_reply or accumulated_text.strip() or ""
+            reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
+            reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
             reply_text = extract_final_chinese_response(reply_text)
 
             from plugin_manager import plugin_manager
