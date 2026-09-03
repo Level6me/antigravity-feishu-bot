@@ -107,20 +107,41 @@ async def _process_single_task(chat_id, task):
     if not user_text:
         return
 
-    # 方案二：安全沙箱前置命令高危扫描过滤
-    dangerous_patterns = [
-        r"\brm\s+-rf\b",
-        r"\bchmod\s+-(R\s+)?777\b",
-        r"\bdd\s+if=\b",
-        r"\bmkfs\b",
-        r"\bshutdown\b",
-        r"\breboot\b",
-        r"\bpoweroff\b",
-        r":\(\){\s*:\s*\|\s*:\s*&\s*}\s*;\s*:"
+    # 安全沙箱：仅拦截具有明确直接执行意图的高危 shell 命令字符串
+    # 规则：匹配的关键词必须不在代码块、引号、或"帮我写/如何"等意图引导词后面
+    # 目标：拦截"直接执行 rm -rf" 但放行 "帮我写 rm -rf 相关脚本" / "rm -rf 是什么"
+    _text_for_check = user_text
+    # 移除 markdown 代码块内容，避免用户粘贴代码被误判
+    _text_for_check = re.sub(r'```.*?```', '', _text_for_check, flags=re.DOTALL)
+    _text_for_check = re.sub(r'`[^`]+`', '', _text_for_check)
+    
+    # 检测是否明显为请求 AI 生成/分析/解释的上下文（此时放行）
+    _intent_safe_prefixes = [
+        "帮我写", "帮我做", "写个", "写一个", "写一段", "分析", "解释", "是什么", "什么是",
+        "如何", "怎么", "为什么", "问题", "报错", "脚本", "代码", "示例", "举个例子",
+        "怎样", "讲解", "介绍", "说明"
     ]
+    _has_safe_intent = any(kw in user_text[:80] for kw in _intent_safe_prefixes)
+    
+    dangerous_patterns = [
+        r"\brm\s+-rf\s+/",              # rm -rf / (只拦截针对根目录或绝对路径的)
+        r"\brm\s+-rf\s+\*",             # rm -rf * (通配符全删)
+        r"\bdd\s+if=\s*/dev/",          # dd if=/dev/... (直接写块设备)
+        r"\bmkfs\s*\.",                  # mkfs.xxx (格式化文件系统)
+        r":\(\){\s*:\s*\|\s*:\s*&\s*}\s*;\s*:",  # fork bomb
+        r"\bchmod\s+-R\s+777\s+/",      # chmod -R 777 根目录
+    ]
+    # 关机/重启类：仅在没有安全意图上下文时才拦截
+    if not _has_safe_intent:
+        dangerous_patterns += [
+            r"\bshutdown\s+-[hrP]",     # shutdown -h/-r/-P (直接带参数的关机指令)
+            r"\bpoweroff\b",
+            r"\breboot\b",
+        ]
+    
     is_dangerous = False
     for pattern in dangerous_patterns:
-        if re.search(pattern, user_text, re.IGNORECASE):
+        if re.search(pattern, _text_for_check, re.IGNORECASE):
             is_dangerous = True
             break
             
@@ -136,45 +157,46 @@ async def _process_single_task(chat_id, task):
         log.info(f"Message in chat {chat_id} was intercepted and consumed by plugin hook. Skipping AI execution.")
         return
 
+    # 智能意图路由 (Fast Chat vs Deep Agent)
+    is_complex_agent = False
+    agent_keywords = [
+        "代码", "写代码", "改代码", "重构", "修复", "debug", "bug", "报错", 
+        "运行", "执行", "部署", "重启", "编译", "终端", "命令", "脚本", "bash", 
+        "shell", "git", "curl", "npm", "pip", "python", "文件", "创建文件", "读文件", 
+        "搜索", "排查", "项目", "skill", "mcp", "定时", "提醒我", "倒计时", "cron",
+        "选项", "选择"
+    ]
+    if any(kw in user_text.lower() for kw in agent_keywords) or session_data.get("mode") == "agent":
+        is_complex_agent = True
+
     # Inject protocol into prompt
     current_proj = session_data.get("project", "默认")
     system_instruction = (
         "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
         "Any English text in the response must be limited to code syntax or technical names only. "
-        "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles (such as 'I will...', 'Let me...'). "
+        "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles. "
         "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
     )
 
+    if is_complex_agent:
+        # 复杂工程任务：注入全套安全防护与项目上下文
+        system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
+        system_instruction += (
+            "[System Execution & Safety Guardrails]\n"
+            "1. 【全指令强制超时保护】：使用 `run_command` 工具执行命令时必须前缀 `timeout <秒数>`。\n"
+            "2. 【受限递归与大目录避让】：严禁在系统全盘或依赖目录中执行无限制的大范围递归搜索。\n"
+            "3. 【严禁自杀式重启自身服务】：严禁执行重启当前飞书机器人自身进程的操作。\n"
+            "4. 【计划任务调度能力】：当用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
+        )
+        project_prompts = session_data.get("project_prompts", {})
+        if current_proj in project_prompts and project_prompts[current_proj]:
+            proj_prompt_text = project_prompts[current_proj]
+            system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
 
-    # 注入当前活跃项目环境参数
-    system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n- All file reads, writes, and analysis commands you execute should target this active workspace directory.\n\n"
-    
-    # 注入系统级防死锁与防护策略 (System Protection Guardrails)
-    system_instruction += (
-        "[System Execution & Safety Guardrails]\n"
-        "1. 【全指令强制超时保护】：使用 `run_command` 工具执行任何 Shell 命令行（如 find, grep, pip, git, npm, python 等）时，必须在前缀显式包裹 `timeout <秒数>` 超时保护（例如：`timeout 30s find . -name '*.py'` 或 `timeout 60s pip install ...`），严禁执行任何未加 `timeout` 限制的命令。\n"
-        "2. 【受限递归与大目录避让】：严禁在系统全盘（`/`）、根目录、用户主目录（`~`）或依赖目录（`venv`, `.venv`, `node_modules`, `.git`）中执行无限制的大范围递归搜索。搜索文件时必须使用精确路径、限定搜索深度（如 `find . -maxdepth 3`）并排除第三方依赖包目录。\n"
-        "3. 【严禁自杀式重启自身服务】：严禁通过命令执行 `pm2 restart feishu-bot`、`pkill -f feishu_bot` 或任何重启/杀死当前机器人自身进程的操作！如修改了插件代码，插件支持热重载（通过 `/plugin reload`），严禁中断当前会话进程。\n"
-        "4. 【交互式选项卡片规范】：当你的回答需要向用户提供多个方案/选项供选择、确认操作或询问用户意图时，必须在回答的末尾附带 `[CHOICE_CARD]` 标签生成可点击按钮，格式如下：\n"
-        "[CHOICE_CARD]\n"
-        "Q: 请选择您希望采用的方案：\n"
-        "- 方案 1: 简短描述\n"
-        "- 方案 2: 简短描述\n"
-        "[/CHOICE_CARD]\n\n"
-        "5. 【计划任务调度能力 (AI Cron Scheduler)】：系统已配备专属后台常驻守护引擎 (feishu-cron-daemon)。当你分析出用户有定时提醒、倒计时、周期性巡检或长任务阶段汇报需求时（例如：'一分钟后提醒我喝水'、'明天这个时候提醒我'、'每天早上9点巡检服务器'、'等我写完代码20分钟后提醒我测试'），严禁仅口头回复，必须使用 run_command 工具执行 CLI 将任务持久化注册到守护引擎中：\n"
-        f"   • 倒计时示例：timeout 10s python3 /home/jiang/github/feishu-bot-plugin/plugins/cron_scheduler/cli.py add --name \"喝水提醒\" --delay-seconds 60 --prompt \"时间到：该喝水休息一下啦！💧\" --chat-id \"{chat_id}\" --action-type reminder\n"
-        f"   • 周期示例：timeout 10s python3 /home/jiang/github/feishu-bot-plugin/plugins/cron_scheduler/cli.py add --name \"每日站会\" --cron \"0 9 * * 1-5\" --prompt \"该参加每日站会啦\" --chat-id \"{chat_id}\" --action-type reminder\n"
-        f"   • 运维脚本示例：timeout 10s python3 /home/jiang/github/feishu-bot-plugin/plugins/cron_scheduler/cli.py add --name \"夜间磁盘巡检\" --cron \"0 3 * * *\" --action-type shell --command \"df -h\" --chat-id \"{chat_id}\"\n"
-        "   任务注册成功后，后台守护引擎将接管 7x24 小时精准计时并在到点时自动向飞书推送卡片。\n\n"
-    )
-    
-    # 注入该项目专属 Prompt
-    project_prompts = session_data.get("project_prompts", {})
-    if current_proj in project_prompts and project_prompts[current_proj]:
-        proj_prompt_text = project_prompts[current_proj]
-        system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
-
-
+    # 注入长期记忆上下文（由 ai_memory 插件提取）
+    mem_ctx = session_data.get("memory_context")
+    if mem_ctx:
+        system_instruction += f"[User Long-Term Memory / 用户长期偏好与记忆]\n{mem_ctx}\n\n"
 
     # 注入用户备忘录 Notes
     notes = session_data.get("notes", [])
@@ -189,7 +211,7 @@ async def _process_single_task(chat_id, task):
         memories = await get_profile_async(chat_id)
         if memories:
             memory_block = "\n".join([f"- {m}" for m in memories])
-            final_prompt = f"[System Context: Please strictly follow the user's permanent preferences below:]\n{memory_block}\n\n[User's Message:]\n{user_text}"
+            final_prompt = f"[System Context: User preferences:]\n{memory_block}\n\n[User's Message:]\n{user_text}"
             
     # Delegate execution to executor
     # 43200s (12小时) 总超时兜底：支持长达数小时至十几小时的超大型自动化工程任务

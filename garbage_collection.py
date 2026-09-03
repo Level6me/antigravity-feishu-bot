@@ -3,8 +3,9 @@ import time
 import sqlite3
 import asyncio
 from logger import log
+from config import BASE_DIR
 
-BACKUP_DIR = "backups"
+BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 BACKUP_KEEP = 7
 
 
@@ -49,7 +50,7 @@ async def garbage_collector(interval_seconds=3600, max_age_seconds=86400):
     :param interval_seconds: How often to run the cleanup (default 1 hour).
     :param max_age_seconds: Files older than this will be deleted (default 24 hours).
     """
-    directories_to_clean = ["downloads", "logs"]
+    directories_to_clean = [os.path.join(BASE_DIR, "downloads"), os.path.join(BASE_DIR, "logs")]
     
     while True:
         try:
@@ -74,7 +75,7 @@ async def garbage_collector(interval_seconds=3600, max_age_seconds=86400):
                                     log.error(f"[GC] Error deleting {filepath}: {e}")
             
             # Clean legacy files in the root directory (for backward compatibility)
-            root_dir = "."
+            root_dir = BASE_DIR
             for filename in os.listdir(root_dir):
                 if filename.startswith("img_") or filename.startswith("file_v3_") or filename.startswith("agy_log_") or filename.startswith("audio_") or filename.startswith("video_"):
                     filepath = os.path.join(root_dir, filename)
@@ -88,7 +89,7 @@ async def garbage_collector(interval_seconds=3600, max_age_seconds=86400):
                                 log.error(f"[GC] Error deleting legacy file {filepath}: {e}")
 
             # Clean scratch directory (files older than 7 days = 604800s)
-            scratch_dir = "scratch"
+            scratch_dir = os.path.join(BASE_DIR, "scratch")
             scratch_max_age = 7 * 86400
             if os.path.exists(scratch_dir):
                 for filename in os.listdir(scratch_dir):

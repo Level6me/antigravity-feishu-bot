@@ -146,7 +146,9 @@ def _probe_lsp(port):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, context=_ssl_context(), timeout=5) as response:
+        # Local LSP on 127.0.0.1 uses a self-signed cert; bypass local verification
+        local_ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, context=local_ctx, timeout=3) as response:
             data = json.loads(response.read().decode())
             if "response" in data and "groups" in data["response"]:
                 return data

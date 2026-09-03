@@ -15,7 +15,7 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
 
-MAIN_BOT_DIR = "/home/jiang/github/antigravity-feishu-bot"
+MAIN_BOT_DIR = os.path.abspath(os.path.join(PLUGIN_DIR, "..", ".."))
 if MAIN_BOT_DIR not in sys.path:
     sys.path.append(MAIN_BOT_DIR)
 
@@ -25,7 +25,8 @@ from scheduler_db import (
     update_task_run,
     update_task_status,
     record_log,
-    get_task
+    get_task,
+    claim_task
 )
 from scheduler import compute_next_run
 from executors import execute_task
@@ -149,6 +150,13 @@ class CronDaemon:
                         continue
 
                     if now_ts >= next_run:
+                        tentative_next = compute_next_run(task["cron_expr"], task.get("task_type", "cron"), now_ts)
+                        if task.get("task_type") == "delay":
+                            tentative_next = 0
+
+                        if not claim_task(task_id, now_ts, tentative_next):
+                            continue
+
                         self._running_tasks.add(task_id)
                         asyncio.create_task(self.run_task_wrapper(task))
 

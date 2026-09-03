@@ -97,6 +97,17 @@ class CronEngine:
                         continue
                     
                     if now >= next_run:
+                        tentative_next = compute_next_run(task['cron_expr'], task.get('task_type', 'cron'), now)
+                        if task.get('task_type') == 'delay':
+                            tentative_next = 0
+                        
+                        from database import claim_cron_task
+                        claimed = await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: claim_cron_task(task_id, now, tentative_next)
+                        )
+                        if not claimed:
+                            continue
+
                         self._running_tasks.add(task_id)
                         asyncio.create_task(self._run_task_wrapper(task))
             
@@ -111,90 +122,99 @@ class CronEngine:
         task_id = task['id']
         chat_id = task['chat_id']
         start_time = time.time()
+        action_type = task.get("action_type", "reminder")
+        name = task.get("name", "定时任务")
+        prompt = task.get("prompt", "")
         
-        log.info(f"[CronEngine] Triggering scheduled task '{task.get('name')}' ({task_id}) for chat {chat_id}")
-        
-        # 1. Send Start Interactive Card
-        start_card = CardBuilder.build_cron_start_card(task)
-        await asyncio.get_running_loop().run_in_executor(
-            None, lambda: send_card_to_chat_sdk(chat_id, start_card)
-        )
+        log.info(f"[CronEngine] Triggering scheduled task '{name}' ({task_id}, type={action_type}) for chat {chat_id}")
         
         result_text = ""
         is_error = False
         
         try:
-            # 2. Prepare Session Context
-            session_data = await get_session_async(chat_id)
-            if task.get('project_path'):
-                session_data['project'] = task['project_path']
-            
-            prompt = task.get('prompt', '')
-            
-            # Import execute_antigravity dynamically to avoid circular dependencies
-            from executor import execute_antigravity
-            import app_state
-            
-            # Execute Agent task
-            # Generate dummy message_id for cron run
-            dummy_msg_id = f"cron_msg_{task_id}_{int(start_time)}"
-            
-            await execute_antigravity(
-                chat_id=chat_id,
-                user_text=prompt,
-                message_id=dummy_msg_id,
-                bot_reply_msg_id=None,
-                session_data=session_data,
-                is_new_conversation=False,
-                system_instruction="你是由 Cron 引擎调度的自动化定时任务。请按照用户预设的 Prompt 准确执行，并生成详尽专业的结构化分析报告。",
-                final_prompt=prompt,
-                downloaded_file_name=None,
-                download_success=False,
-                running_processes=app_state.running_processes
-            )
-            
-            # Get latest transcript result
-            from config import get_transcript_path
-            from executor import extract_final_response_from_transcript
-            
-            conv_id = session_data.get("conversation", "") or session_data.get("conversation_id", "")
-            transcript_path = get_transcript_path(conv_id) if conv_id else None
-            
-            extracted = extract_final_response_from_transcript(transcript_path) if (transcript_path and os.path.exists(transcript_path)) else None
-            result_text = extracted or "任务已成功触发执行完成。"
+            if action_type == "reminder":
+                # 纯提醒任务：直接发送提醒卡片，秒级直达且避免大模型冷启动与 Token 消耗
+                from plugins.cron_scheduler.executors import build_reminder_card
+                reminder_card = build_reminder_card(task)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_card_to_chat_sdk(chat_id, reminder_card)
+                )
+                result_text = f"提醒已准时送达飞书：{prompt}"
+            elif action_type == "shell":
+                from plugins.cron_scheduler.executors import execute_task
+                is_success, res_str, _ = await execute_task(task, send_card_to_chat_sdk)
+                is_error = not is_success
+                result_text = res_str
+            else:
+                # 1. Send Start Interactive Card
+                start_card = CardBuilder.build_cron_start_card(task)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_card_to_chat_sdk(chat_id, start_card)
+                )
+
+                # 2. Prepare Session Context
+                session_data = await get_session_async(chat_id)
+                if task.get('project_path'):
+                    session_data['project'] = task['project_path']
+                
+                # Import execute_antigravity dynamically to avoid circular dependencies
+                from executor import execute_antigravity
+                import app_state
+                
+                # Execute Agent task with empty message_id to send directly to chat
+                # execute_antigravity 内部已完整发送 start_card + typing indicator + final_card
+                # cron_engine 不再重复推送 result_card，避免用户收到两张卡片
+                await execute_antigravity(
+                    chat_id=chat_id,
+                    user_text=prompt,
+                    message_id="",
+                    bot_reply_msg_id=None,
+                    session_data=session_data,
+                    is_new_conversation=False,
+                    system_instruction="你是由 Cron 引擎调度的自动化定时任务。请按照用户预设的 Prompt 准确执行，并生成详尽专业的结构化分析报告。",
+                    final_prompt=prompt,
+                    downloaded_file_name=None,
+                    download_success=False,
+                    running_processes=app_state.running_processes
+                )
+                
+                # 仅提取 transcript 内容用于日志记录，不重复推送卡片
+                from config import get_transcript_path
+                from executor import extract_final_response_from_transcript
+                
+                conv_id = session_data.get("conversation", "") or session_data.get("conversation_id", "")
+                transcript_path = get_transcript_path(conv_id) if conv_id else None
+                
+                extracted = extract_final_response_from_transcript(transcript_path) if (transcript_path and os.path.exists(transcript_path)) else None
+                result_text = extracted or "任务已成功触发执行完成。"
             
         except Exception as e:
             is_error = True
             result_text = f"定时任务执行过程中遇到异常: {str(e)}"
             log.error(f"[CronEngine] Task {task_id} failed: {e}")
-        
-        duration_ms = int((time.time() - start_time) * 1000)
-        
-        # 3. Record Execution Log & Update Next Run Time
-        now_ts = int(time.time())
-        next_run = compute_next_run(task['cron_expr'], task.get('task_type', 'cron'), now_ts)
-        
-        # If it's a one-shot delay task, deactivate after single execution
-        if task.get('task_type') == 'delay':
-            from database import update_cron_task_status
-            await asyncio.get_running_loop().run_in_executor(
-                None, lambda: update_cron_task_status(task_id, False)
-            )
-        
-        await asyncio.get_running_loop().run_in_executor(
-            None, lambda: update_cron_task_run(task_id, now_ts, next_run)
-        )
-        await asyncio.get_running_loop().run_in_executor(
-            None, lambda: record_cron_log(task_id, "failed" if is_error else "success", result_text, "", duration_ms)
-        )
-        
-        # 4. Send Execution Result Card
-        result_card = CardBuilder.build_cron_execution_card(task, result_text, is_error=is_error, duration_ms=duration_ms)
-        await asyncio.get_running_loop().run_in_executor(
-            None, lambda: send_card_to_chat_sdk(chat_id, result_card)
-        )
-        
-        self._running_tasks.remove(task_id)
+        finally:
+            try:
+                duration_ms = int((time.time() - start_time) * 1000)
+                now_ts = int(time.time())
+                next_run = compute_next_run(task['cron_expr'], task.get('task_type', 'cron'), now_ts)
+                
+                # If it's a one-shot delay task, deactivate after single execution
+                if task.get('task_type') == 'delay':
+                    from database import update_cron_task_status
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: update_cron_task_status(task_id, False)
+                    )
+                
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: update_cron_task_run(task_id, now_ts, next_run)
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: record_cron_log(task_id, "failed" if is_error else "success", result_text, "", duration_ms)
+                )
+            except Exception as ex:
+                log.error(f"[CronEngine] Error in finally state update: {ex}")
+            finally:
+                self._running_tasks.discard(task_id)
 
 
 # Global singleton instance

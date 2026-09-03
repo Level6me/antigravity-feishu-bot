@@ -483,6 +483,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
     elif user_text.startswith("/clear"):
         session_data["conversation"] = ""
         await save_session_async(chat_id, session_data)
+        try:
+            from session_pool import session_pool
+            await session_pool.reset_session(chat_id)
+        except Exception:
+            pass
         reply_text = "🔄 上下文已清空，开启新对话！"
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text

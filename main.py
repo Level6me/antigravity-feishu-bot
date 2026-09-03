@@ -108,10 +108,6 @@ async def main():
     app_state.main_loop = asyncio.get_running_loop()
     log.info("Starting Lark WS Client...")
 
-async def main():
-    app_state.main_loop = asyncio.get_running_loop()
-    log.info("Starting Lark WS Client...")
-
     # Send post-update notification if applicable
     try:
         from database import get_and_clear_pending_update_notice
