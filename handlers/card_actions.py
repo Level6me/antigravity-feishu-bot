@@ -80,6 +80,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 session_data["model"] = new_model
                 await save_session_async(chat_id, session_data)
                 log.info(f"Switched model to {new_model} in chat {chat_id}")
+                try:
+                    from session_pool import session_pool
+                    proj_val = session_data.get("project")
+                    cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
+                    conv_id = session_data.get("conversation", "")
+                    asyncio.create_task(session_pool.prewarm(chat_id, new_model, cwd_dir, conversation_id=conv_id))
+                except Exception:
+                    pass
                 res_card = CardBuilder.build_model_switch_result_card(new_model, old_model)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, res_card))
                 return res_card
@@ -164,6 +172,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 session_data["recent_projects"] = recent[:5]
                 
                 await save_session_async(chat_id, session_data)
+                try:
+                    from session_pool import session_pool
+                    model_to_warm = session_data.get("model", "Default")
+                    cwd_dir = target_path if (target_path and os.path.isdir(target_path) and target_path not in ["默认", "Default"]) else None
+                    conv_id = session_data.get("conversation", "")
+                    asyncio.create_task(session_pool.prewarm(chat_id, model_to_warm, cwd_dir, conversation_id=conv_id))
+                except Exception:
+                    pass
                 
                 success_text = (
                     f"📂 **工作区项目切换成功！**\n\n"

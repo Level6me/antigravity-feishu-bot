@@ -486,6 +486,10 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         try:
             from session_pool import session_pool
             await session_pool.reset_session(chat_id)
+            model_to_warm = session_data.get("model", "Default")
+            proj_val = session_data.get("project")
+            cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
+            asyncio.create_task(session_pool.prewarm(chat_id, model_to_warm, cwd_dir, conversation_id=""))
         except Exception:
             pass
         reply_text = "🔄 上下文已清空，开启新对话！"
