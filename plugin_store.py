@@ -208,8 +208,8 @@ def update_plugin(plugin_id: str) -> tuple[bool, str]:
         except Exception as e:
             return False, f"更新异常: {e}"
 
-    # 检查本地官方插件仓库源 /home/jiang/github/feishu-bot-plugin
-    official_repo_dir = "/home/jiang/github/feishu-bot-plugin"
+    # 检查本地官方插件仓库源
+    official_repo_dir = os.environ.get("FEISHU_BOT_PLUGIN_DIR") or os.path.abspath(os.path.join(BASE_DIR, "..", "feishu-bot-plugin"))
     official_plugin_dir = os.path.join(official_repo_dir, "plugins", plugin_id)
     if os.path.exists(official_plugin_dir):
         pull_info = ""

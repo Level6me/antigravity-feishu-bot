@@ -42,6 +42,7 @@ class NotesManagerPlugin(BasePlugin):
                     session_data["notes"] = notes
                     await save_session_async(chat_id, session_data)
                     new_card = CardBuilder.build_note_list_card(notes)
-                    patch_interactive_card_sdk(card_message_id, new_card)
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             return True
         return False

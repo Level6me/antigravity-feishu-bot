@@ -118,6 +118,8 @@ class ServerHealthPlugin(BasePlugin):
         if action == "refresh_server_health":
             card = self.build_health_card()
             from lark_client import patch_interactive_card_sdk
-            patch_interactive_card_sdk(card_message_id, card)
+            import asyncio
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, card))
             return True
         return False

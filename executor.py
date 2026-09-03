@@ -71,7 +71,7 @@ def _is_process_group_active(pid: int) -> bool:
     return False
 
 async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, think_seconds, feishu_call_fn, start_index=0):
-    """Smoothly stream full_text onto Feishu interactive card at 2x Fast Speed (~450 chars/sec) with ▌ cursor."""
+    """Fast stream full_text onto Feishu interactive card without artificial delay."""
     if not bot_reply_msg_id or not full_text:
         return
         
@@ -80,13 +80,16 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
         return
         
     remaining = total_len - start_index
-    if remaining < 20:
+    # 若剩余字符较少，无需再分段等待，直接一次性 patch 完成
+    if remaining <= 200:
+        card = CardBuilder.build_streaming_indicator(full_text, tool_action=None, user_text=user_text, think_seconds=think_seconds)
+        await feishu_call_fn(
+            lambda: patch_interactive_card_sdk(bot_reply_msg_id, card),
+            label="typewriter patch fast"
+        )
         return
         
-    chunk_size = 150
-    if remaining / chunk_size > 15:
-        chunk_size = int(remaining / 15) + 1
-        
+    chunk_size = 300
     current_len = start_index
     while current_len < total_len:
         current_len += chunk_size
@@ -100,11 +103,16 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
             lambda: patch_interactive_card_sdk(bot_reply_msg_id, card),
             label="typewriter patch"
         )
-        await asyncio.sleep(0.4)
+        if current_len < total_len:
+            await asyncio.sleep(0.15)
 
-def extract_final_response_from_transcript(transcript_path, initial_size=0):
+def parse_transcript_turn(transcript_path, initial_size=0):
+    """
+    解析本轮对话在 transcript.jsonl 中的状态。
+    返回: (turn_lines, pending_tasks, is_turn_done)
+    """
     if not transcript_path or not os.path.exists(transcript_path):
-        return None
+        return ([], set(), False)
     try:
         with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
             if initial_size > 0:
@@ -114,88 +122,8 @@ def extract_final_response_from_transcript(transcript_path, initial_size=0):
                     pass
             lines = f.readlines()
         if not lines:
-            return None
-            
-        # 收集本轮对话中 Model 输出的所有文本回复（按时间顺序顺序拼接，防止中间大篇幅报告被最后一句简短回复丢弃）
-        turn_lines = []
-        for line in lines:
-            line_str = line.strip()
-            if not line_str:
-                continue
-            try:
-                data = json.loads(line_str)
-            except Exception:
-                continue
-            if data.get("type") == "USER_INPUT":
-                turn_lines = []
-            else:
-                turn_lines.append(data)
+            return ([], set(), False)
 
-        # 收集本轮对话中所有有效的模型文本回复
-        valid_candidates = []
-        for data in turn_lines:
-            if data.get("source") == "MODEL" and data.get("type") == "PLANNER_RESPONSE":
-                content = (data.get("content") or "").strip()
-                if not content:
-                    continue
-                clean_text = extract_final_chinese_response(content)
-                if not clean_text:
-                    continue
-                # 过滤掉明显的纯中间 Task 完成通知或纯控制台日志
-                if (clean_text.startswith('Task "') or 
-                    clean_text.startswith('<task_update') or
-                    clean_text.startswith('The command exited with code') or
-                    'completed with exit code' in clean_text):
-                    continue
-                
-                # 避免相邻重复
-                if not valid_candidates or valid_candidates[-1] != clean_text:
-                    valid_candidates.append(clean_text)
-
-        if not valid_candidates:
-            return None
-
-        if len(valid_candidates) == 1:
-            return valid_candidates[0]
-
-        # 如果有多条候选：智能保留最详尽完整的实质性解答，防止被系统通知触发的简短单句确认覆盖
-        last_cand = valid_candidates[-1]
-        
-        # 若最后一条已经是详尽回答（>= 80 字符或包含换行/列表），检查是否需要与前面段落合并
-        if len(last_cand) >= 80 or '\n' in last_cand:
-            prev_cand = valid_candidates[-2]
-            if len(prev_cand) > 100 and prev_cand not in last_cand:
-                return f"{prev_cand}\n\n{last_cand}"
-            return last_cand
-        else:
-            # 最后一条只是极简收尾确认（< 80 字符），向前寻找最详尽的实质解答
-            detailed_cands = [c for c in valid_candidates if len(c) > len(last_cand) and len(c) >= 60]
-            if detailed_cands:
-                best_detailed = detailed_cands[-1]
-                if last_cand not in best_detailed:
-                    return f"{best_detailed}\n\n{last_cand}"
-                return best_detailed
-            return last_cand
-                        
-    except Exception as e:
-        log.error(f"Failed to extract final response from transcript: {e}")
-    return None
-
-def is_transcript_turn_completed(transcript_path, initial_size=0):
-    """检测当前轮次在 transcript.jsonl 中是否已包含完成状态 (status=='DONE') 的 PLANNER_RESPONSE 且无待执行的后台任务/子代理。"""
-    if not transcript_path or not os.path.exists(transcript_path):
-        return False
-    try:
-        with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
-            if initial_size > 0:
-                try:
-                    f.seek(initial_size)
-                except Exception:
-                    pass
-            lines = f.readlines()
-        if not lines:
-            return False
-            
         turn_lines = []
         for line in lines:
             line_str = line.strip()
@@ -211,9 +139,9 @@ def is_transcript_turn_completed(transcript_path, initial_size=0):
                 turn_lines.append(data)
 
         if not turn_lines:
-            return False
-            
-        # 1. 检查是否存在未完成的 Background Tasks
+            return ([], set(), False)
+
+        # 检查 Background Tasks 状态
         started_tasks = set()
         finished_tasks = set()
         for event in turn_lines:
@@ -228,22 +156,77 @@ def is_transcript_turn_completed(transcript_path, initial_size=0):
                 for m in re.finditer(r'Task id\s*["\']([^"\']+)["\']\s+(?:completed|failed|cancelled)', content):
                     finished_tasks.add(m.group(1).strip())
 
-        # 存在尚未返回结果的后台任务，说明 Agent 处于异步等待唤醒状态，绝不能判定为轮次结束
         pending_tasks = started_tasks - finished_tasks
         if pending_tasks:
-            return False
+            return (turn_lines, pending_tasks, False)
 
-        # 2. 检查最后一条事件是否为真正完成的最终回答
+        # 检查最后一条事件是否已标记完成
         last_event = turn_lines[-1]
+        is_done = False
         if (last_event.get("source") == "MODEL" and 
             last_event.get("type") == "PLANNER_RESPONSE" and 
             last_event.get("status") == "DONE"):
             tool_calls = last_event.get("tool_calls")
             if not tool_calls or len(tool_calls) == 0:
-                return True
+                is_done = True
+
+        return (turn_lines, pending_tasks, is_done)
     except Exception as e:
-        log.error(f"is_transcript_turn_completed error: {e}")
-    return False
+        log.error(f"parse_transcript_turn error: {e}")
+        return ([], set(), False)
+
+def extract_final_response_from_turn_lines(turn_lines):
+    if not turn_lines:
+        return None
+    try:
+        valid_candidates = []
+        for data in turn_lines:
+            if data.get("source") == "MODEL" and data.get("type") == "PLANNER_RESPONSE":
+                content = (data.get("content") or "").strip()
+                if not content:
+                    continue
+                clean_text = extract_final_chinese_response(content)
+                if not clean_text:
+                    continue
+                if (clean_text.startswith('Task "') or 
+                    clean_text.startswith('<task_update') or
+                    clean_text.startswith('The command exited with code') or
+                    'completed with exit code' in clean_text):
+                    continue
+                if not valid_candidates or valid_candidates[-1] != clean_text:
+                    valid_candidates.append(clean_text)
+
+        if not valid_candidates:
+            return None
+
+        if len(valid_candidates) == 1:
+            return valid_candidates[0]
+
+        last_cand = valid_candidates[-1]
+        if len(last_cand) >= 80 or '\n' in last_cand:
+            prev_cand = valid_candidates[-2]
+            if len(prev_cand) > 100 and prev_cand not in last_cand:
+                return f"{prev_cand}\n\n{last_cand}"
+            return last_cand
+        else:
+            detailed_cands = [c for c in valid_candidates if len(c) > len(last_cand) and len(c) >= 60]
+            if detailed_cands:
+                best_detailed = detailed_cands[-1]
+                if last_cand not in best_detailed:
+                    return f"{best_detailed}\n\n{last_cand}"
+                return best_detailed
+            return last_cand
+    except Exception as e:
+        log.error(f"extract_final_response_from_turn_lines error: {e}")
+        return None
+
+def extract_final_response_from_transcript(transcript_path, initial_size=0):
+    turn_lines, _, _ = parse_transcript_turn(transcript_path, initial_size)
+    return extract_final_response_from_turn_lines(turn_lines)
+
+def is_transcript_turn_completed(transcript_path, initial_size=0):
+    _, _, is_done = parse_transcript_turn(transcript_path, initial_size)
+    return is_done
 
 def extract_final_chinese_response(text):
     if not text:
@@ -479,6 +462,7 @@ async def execute_antigravity(
         cmd_args = [
             ANTIGRAVITY_BIN, 
             "-p", system_instruction + final_prompt, 
+            "--output-format", "stream-json",
             "--model", session_data["model"],
             "--print-timeout", "60m",
             "--log-file", log_file_path
@@ -517,16 +501,18 @@ async def execute_antigravity(
         custom_env["PYTHONUNBUFFERED"] = "1"
         custom_env["STDOUT_LINE_BUFFERED"] = "1"
 
+        sess_locked = False
+        stdout_task = None
+        stderr_task = None
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
-                preexec_fn=os.setsid,
-                cwd=cwd_dir,
-                env=custom_env
-            )
+            from session_pool import session_pool
+            conv_id_to_resume = session_data.get("conversation", "") if not is_new_conversation else ""
+            sess = session_pool.get_or_create(chat_id, session_data["model"], cwd_dir, conversation_id=conv_id_to_resume)
+            await sess.lock.acquire()
+            sess_locked = True
+            if not sess.is_alive():
+                await sess.start()
+            process = sess.process
             running_processes[chat_id] = process
             
             if attempt == 1:
@@ -565,19 +551,80 @@ async def execute_antigravity(
                 else:
                     log.warning(f"[Executor] Initial typing card send failed for chat {chat_id}; will fall back to sending final card as new message")
             
+            # Send prompt to persistent process stdin
+            prompt_payload = json.dumps({"event": "user", "message": {"content": system_instruction + final_prompt}}) + "\n"
+            process.stdin.write(prompt_payload.encode("utf-8"))
+            await process.stdin.drain()
+
             accumulated_text = ""
             stderr_text = ""
+            stream_result_response = None
+            stream_action = ""
+            stream_is_done = False
             
             async def read_stdout():
-                nonlocal accumulated_text
+                nonlocal accumulated_text, stream_result_response, stream_action, stream_is_done, target_transcript_path
                 import codecs
                 decoder = codecs.getincrementaldecoder('utf-8')()
+                line_buffer = ""
                 while True:
                     chunk = await process.stdout.read(64)
                     if not chunk:
                         break
-                    accumulated_text += decoder.decode(chunk)
-                accumulated_text += decoder.decode(b'', final=True)
+                    text_chunk = decoder.decode(chunk)
+                    line_buffer += text_chunk
+                    while "\n" in line_buffer:
+                        line, line_buffer = line_buffer.split("\n", 1)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event_data = json.loads(line)
+                            event_type = event_data.get("event")
+                            if event_type == "init":
+                                conv_id = event_data.get("conversation_id")
+                                if conv_id and session_data.get("conversation") != conv_id:
+                                    session_data["conversation"] = conv_id
+                                    try:
+                                        await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                                    except Exception:
+                                        pass
+                                    path = get_transcript_path(conv_id)
+                                    if os.path.exists(path):
+                                        target_transcript_path = path
+                            elif event_type == "step_update":
+                                step_up = event_data.get("step_update", {})
+                                step_t = step_up.get("step_type")
+                                if step_t == "agent_response":
+                                    delta = step_up.get("text_delta")
+                                    if delta:
+                                        accumulated_text += delta
+                                elif step_t == "tool":
+                                    t_name = step_up.get("tool_name") or ""
+                                    t_info = step_up.get("tool_info", {})
+                                    t_params = t_info.get("parameters", {}) if isinstance(t_info, dict) else {}
+                                    act_desc = t_params.get("toolAction") or t_params.get("toolSummary") or t_params.get("CommandLine") or t_name
+                                    if act_desc:
+                                        stream_action = f"正在执行 {act_desc}" if not act_desc.startswith("正在") else act_desc
+                            elif event_type == "result":
+                                res_obj = event_data.get("result", {})
+                                if res_obj.get("status") == "SUCCESS":
+                                    stream_result_response = res_obj.get("response")
+                                    stream_is_done = True
+                                    return
+                        except Exception:
+                            accumulated_text += line + "\n"
+
+                line_buffer += decoder.decode(b'', final=True)
+                if line_buffer.strip():
+                    try:
+                        event_data = json.loads(line_buffer.strip())
+                        if event_data.get("event") == "result":
+                            res_obj = event_data.get("result", {})
+                            stream_result_response = res_obj.get("response")
+                            stream_is_done = True
+                    except Exception:
+                        pass
                     
             async def read_stderr():
                 nonlocal stderr_text
@@ -612,6 +659,8 @@ async def execute_antigravity(
                 return None
 
             def fetch_current_action():
+                if stream_action:
+                    return stream_action
                 t_path = target_transcript_path or get_latest_transcript_file()
                 if not t_path or not os.path.exists(t_path):
                     return ""
@@ -684,7 +733,9 @@ async def execute_antigravity(
                 current_stdout_len = len(accumulated_text)
                 
                 partial_text = None
-                if t_path and os.path.exists(t_path):
+                if accumulated_text and accumulated_text.strip():
+                    partial_text = extract_final_chinese_response(accumulated_text.strip())
+                elif t_path and os.path.exists(t_path):
                     partial_text = await loop.run_in_executor(
                         None,
                         lambda: extract_final_response_from_transcript(t_path, initial_transcript_size)
@@ -717,20 +768,14 @@ async def execute_antigravity(
                 think_seconds = int(now - process_start_time)
                 stall_seconds = int(now - last_progress_time)
 
-                turn_done = False
-                if t_path and os.path.exists(t_path):
+                turn_done = stream_is_done
+                if not turn_done and t_path and os.path.exists(t_path):
                     turn_done = await loop.run_in_executor(
                         None,
                         lambda: is_transcript_turn_completed(t_path, initial_transcript_size)
                     )
-                if turn_done and stall_seconds >= 30:
-                    log.info(f"[Executor] Model turn fully completed in transcript, but process PID {process.pid} lingered without exiting for {stall_seconds}s. Terminating process group...")
-                    import signal
-                    try:
-                        pgid = os.getpgid(process.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                    except Exception as ex:
-                        log.error(f"Failed to kill process group after completed turn: {ex}")
+                if turn_done:
+                    log.info(f"[Executor] Model turn completed. Terminating wait loop early to deliver response immediately...")
                     break
                 
                 if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
@@ -808,64 +853,24 @@ async def execute_antigravity(
                             label="indicator patch"
                         )
                                 
-                if stdout_task.done() and stderr_task.done():
+                if stdout_task.done() or stream_is_done:
                     break
 
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                log.warning(f"[Executor] process.wait() timed out for chat {chat_id} (pid {process.pid}) — likely grandchild inherited pipe fd; force-killing process group")
-                import signal
-                try:
-                    pgid = os.getpgid(process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                except Exception as e:
-                    log.error(f"Failed to kill process group on wait timeout: {e}")
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    log.error(f"[Executor] process.wait() still hung after SIGKILL for chat {chat_id}; abandoning")
-            except Exception as e:
-                log.error(f"Process wait error: {e}")
-                import signal
-                try:
-                    pgid = os.getpgid(process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except ProcessLookupError:
-                    log.warning(f"Process {process.pid} already exited when trying to terminate.")
-                except Exception as e:
-                    log.error(f"Failed to kill process group {process.pid}: {e}")
-                    try:
-                        process.kill()
-                    except Exception:
-                        pass
-            finally:
-                running_processes.pop(chat_id, None)
-                app_state.extended_wait_chats.pop(chat_id, None)
-                for pipe in (process.stdout, process.stderr):
-                    if pipe is not None:
-                        try:
-                            transport = pipe._transport if hasattr(pipe, "_transport") else None
-                            if transport is not None:
-                                transport.close()
-                        except Exception:
-                            pass
-            try:
-                await asyncio.wait_for(stdout_task, timeout=2.0)
-            except asyncio.TimeoutError:
-                log.warning("stdout_task timed out (possible pipe leak)")
-            try:
-                await asyncio.wait_for(stderr_task, timeout=2.0)
-            except asyncio.TimeoutError:
-                log.warning("stderr_task timed out (possible pipe leak)")
+            # Turn is completed: cancel reader tasks to prevent StreamReader collisions on next turn
+            for reader_t in [stdout_task, stderr_task]:
+                if not reader_t.done():
+                    reader_t.cancel()
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             
             is_error = (process.returncode != 0 and process.returncode is not None)
             session_data["last_execution_error"] = is_error
 
             transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
-            final_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
+
+            if stream_result_response and stream_result_response.strip():
+                final_reply = stream_result_response.strip()
+            else:
+                final_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
             
             # 若提取最终回答失败且进程非正常退出（如 API 抖动 EOF、卡死强死、进程崩溃），且在允许重试范围内：
             # 暂不向飞书推送报错卡片，直接返回 has_reply=False 触发自动重试机制！
@@ -875,6 +880,8 @@ async def execute_antigravity(
             
             if final_reply:
                 reply_text = final_reply
+            elif stream_result_response:
+                reply_text = stream_result_response
             else:
                 reply_text = accumulated_text.strip()
                 reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
@@ -966,7 +973,6 @@ async def execute_antigravity(
                 session_data=session_data
             )
             if bot_reply_msg_id:
-                await asyncio.sleep(0.5)
                 patch_ok = await _feishu_call(
                     lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card),
                     label="final-card patch"
@@ -994,6 +1000,14 @@ async def execute_antigravity(
             return {"has_reply": bool(final_reply), "returncode": process.returncode, "is_error": is_error}
         
         finally:
+            # 确保 reader tasks 被取消并等待结束，防止下轮请求产生 "read operation already in progress"
+            _tasks_to_cancel = [t for t in [stdout_task, stderr_task] if t is not None and not t.done()]
+            for _t in _tasks_to_cancel:
+                _t.cancel()
+            if _tasks_to_cancel:
+                await asyncio.gather(*_tasks_to_cancel, return_exceptions=True)
+            if sess_locked and 'sess' in dir() and sess.lock.locked():
+                sess.lock.release()
             if os.path.exists(log_file_path):
                 try:
                     await _sync_conversation_id_from_log(log_file_path)

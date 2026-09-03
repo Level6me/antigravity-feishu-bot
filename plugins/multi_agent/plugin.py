@@ -7,6 +7,7 @@ import subprocess
 from datetime import datetime
 from plugin_base import BasePlugin
 from logger import log
+from config import ANTIGRAVITY_BIN, find_antigravity_bin
 
 
 class MultiAgentPlugin(BasePlugin):
@@ -85,12 +86,12 @@ class MultiAgentPlugin(BasePlugin):
         # ----------------------------------------------------
         if clean_text.startswith("/agent_config"):
             config_card = self.build_panel_config_card(chat_id)
-            self.send_reply_card(session_data.get("message_id", ""), config_card)
+            self.send_card(chat_id, config_card)
             return "", session_data
 
         elif clean_text.startswith("/multi_agent"):
             status_card = await self.build_status_card(chat_id)
-            self.send_reply_card(session_data.get("message_id", ""), status_card)
+            self.send_card(chat_id, status_card)
             return "", session_data
 
         # 【特性2确认】：私聊环境强制静默，拒绝触发任何多 Agent 协同流程
@@ -125,6 +126,7 @@ class MultiAgentPlugin(BasePlugin):
 
                 # 传入 chat_id 进行独立群级的拆解派发
                 asyncio.create_task(self.async_architect_analyze_and_dispatch(project_id, req_content, chat_id))
+                return "", session_data
 
         # ----------------------------------------------------
         # 场景 B: bot_b / bot_c (WORKER) 收到派发指令自动执行
@@ -133,6 +135,7 @@ class MultiAgentPlugin(BasePlugin):
             if "[TASK_ASSIGN]" in clean_text and f"target:{self.role}" in clean_text:
                 log.info(f"[Plugin:{self.plugin_id}] 🎯 [{self.role}] 被 Bot A 在群 [{chat_id}] 内正确 @ 提及并捕获专属任务！")
                 asyncio.create_task(self.async_run_worker_cli(clean_text, chat_id))
+                return "", session_data
 
         return user_text, session_data
 
@@ -205,7 +208,8 @@ class MultiAgentPlugin(BasePlugin):
 
             new_card = self.build_panel_config_card(chat_id)
             from lark_client import patch_interactive_card_sdk
-            patch_interactive_card_sdk(card_message_id, new_card)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             return True
 
         return False
@@ -220,12 +224,13 @@ class MultiAgentPlugin(BasePlugin):
             f"已知群聊包含成员 Bot：{', '.join(bot_members)}。\n"
             f"用户需求为：{requirement}。请自动分配前端与后端开发任务。"
         )
-        cmd = f"timeout {self.cli_timeout}s antigravity --prompt \"{prompt}\""
+        bin_path = ANTIGRAVITY_BIN or find_antigravity_bin() or "agy"
+        cmd_args = ["timeout", f"{self.cli_timeout}s", bin_path, "-p", prompt]
         
-        log.info(f"[Plugin:{self.plugin_id}] [Bot A] 开始对群 [{chat_id}] 进行 CLI 架构分析: {cmd}")
+        log.info(f"[Plugin:{self.plugin_id}] [Bot A] 开始对群 [{chat_id}] 进行 CLI 架构分析")
         try:
-            process = await asyncio.create_subprocess_shell(
-                cmd,
+            process = await asyncio.create_subprocess_exec(
+                *cmd_args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -245,12 +250,13 @@ class MultiAgentPlugin(BasePlugin):
 
     async def async_run_worker_cli(self, task_contract: str, chat_id: str):
         group_cfg = self.get_group_config(chat_id)
-        safe_prompt = f"antigravity --prompt \"你现在是 Worker Agent [{self.role}]。当前群项目：{group_cfg.get('projectName')}。请根据分工要求在各自 Git 分支编写代码：{task_contract}\""
-        cmd = f"timeout 300s {safe_prompt}"
+        bin_path = ANTIGRAVITY_BIN or find_antigravity_bin() or "agy"
+        safe_prompt = f"你现在是 Worker Agent [{self.role}]。当前群项目：{group_cfg.get('projectName')}。请根据分工要求在各自 Git 分支编写代码：{task_contract}"
+        cmd_args = ["timeout", "300s", bin_path, "-p", safe_prompt]
 
-        log.info(f"[Plugin:{self.plugin_id}] [{self.role}] 被 @ 触发启动群 [{chat_id}] 的开发: {cmd}")
-        process = await asyncio.create_subprocess_shell(
-            cmd,
+        log.info(f"[Plugin:{self.plugin_id}] [{self.role}] 被 @ 触发启动群 [{chat_id}] 的开发")
+        process = await asyncio.create_subprocess_exec(
+            *cmd_args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )

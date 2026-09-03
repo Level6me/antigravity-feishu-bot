@@ -2,6 +2,7 @@
 
 import os
 import json
+import asyncio
 from logger import log
 from lark_client import send_card_to_chat_sdk, send_text_to_chat_sdk, send_reply_sdk, send_interactive_card_sdk
 
@@ -60,20 +61,66 @@ class BasePlugin:
         pass
 
     def send_card(self, chat_id: str, card_content: dict):
-        """Helper to send an interactive card to chat."""
-        return send_card_to_chat_sdk(chat_id, card_content)
+        """向指定 chat 发送交互卡片（非阻塞提交，返回 Future）。
+        
+        注意：此方法在 async 上下文中返回 asyncio.Future，消息在后台线程池中异步发送，
+        调用方不应依赖此方法的返回值来确认发送成功。
+        若需确认发送结果，请使用 await self.send_card_async(...) 代替。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            return loop.run_in_executor(None, lambda: send_card_to_chat_sdk(chat_id, card_content))
+        except RuntimeError:
+            return send_card_to_chat_sdk(chat_id, card_content)
 
     def send_reply_card(self, message_id: str, card_content: dict):
-        """Helper to send an interactive card replying to a message."""
-        return send_interactive_card_sdk(message_id, card_content)
+        """以回复方式发送交互卡片（非阻塞提交，返回 Future）。
+        
+        注意：此方法在 async 上下文中返回 asyncio.Future，若需等待结果请使用 await self.send_reply_card_async(...)。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            return loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
+        except RuntimeError:
+            return send_interactive_card_sdk(message_id, card_content)
 
     def send_text(self, chat_id: str, text: str):
-        """Helper to send text message to chat."""
-        return send_text_to_chat_sdk(chat_id, text)
+        """向指定 chat 发送纯文本消息（非阻塞提交，返回 Future）。
+        
+        注意：此方法在 async 上下文中返回 asyncio.Future，若需等待结果请使用 await self.send_text_async(...)。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            return loop.run_in_executor(None, lambda: send_text_to_chat_sdk(chat_id, text))
+        except RuntimeError:
+            return send_text_to_chat_sdk(chat_id, text)
 
     def send_reply_text(self, message_id: str, text: str):
-        """Helper to reply text to a message."""
-        return send_reply_sdk(message_id, text)
+        """以回复方式发送纯文本消息（非阻塞提交，返回 Future）。
+        
+        注意：此方法在 async 上下文中返回 asyncio.Future，若需等待结果请使用 await self.send_reply_text_async(...)。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            return loop.run_in_executor(None, lambda: send_reply_sdk(message_id, text))
+        except RuntimeError:
+            return send_reply_sdk(message_id, text)
+
+    async def send_card_async(self, chat_id: str, card_content: dict):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: send_card_to_chat_sdk(chat_id, card_content))
+
+    async def send_reply_card_async(self, message_id: str, card_content: dict):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
+
+    async def send_text_async(self, chat_id: str, text: str):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: send_text_to_chat_sdk(chat_id, text))
+
+    async def send_reply_text_async(self, message_id: str, text: str):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: send_reply_sdk(message_id, text))
 
     def get_config(self) -> dict:
         """Load plugin config.json if present."""

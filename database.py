@@ -2,6 +2,7 @@ import os
 import json
 import time
 import sqlite3
+import threading
 import asyncio
 import aiosqlite
 from logger import log
@@ -129,12 +130,22 @@ def migrate_from_json():
 init_db()
 migrate_from_json()
 
+# 线程安全的会话锁缓存，设置有界淘汰上限，避免无限制增长造成内存泄漏
 _session_locks = {}
+_session_locks_guard = threading.Lock()
 
-def _get_session_lock(chat_id):
-    if chat_id not in _session_locks:
-        _session_locks[chat_id] = asyncio.Lock()
-    return _session_locks[chat_id]
+def _get_session_lock(chat_id: str) -> asyncio.Lock:
+    with _session_locks_guard:
+        lock = _session_locks.get(chat_id)
+        if lock is None:
+            # 超过 2000 个会话时，主动清理未加锁的闲置对象
+            if len(_session_locks) > 2000:
+                idle_keys = [k for k, l in _session_locks.items() if not l.locked()]
+                for k in idle_keys[:500]:
+                    _session_locks.pop(k, None)
+            lock = asyncio.Lock()
+            _session_locks[chat_id] = lock
+        return lock
 
 async def get_session_async(chat_id):
     async with _get_session_lock(chat_id):
@@ -563,6 +574,25 @@ def update_cron_task_run(task_id: str, last_run_at: int, next_run_at: int):
         return True
     except Exception as e:
         log.error(f"[cron] update_cron_task_run failed: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def claim_cron_task(task_id: str, now_ts: int, tentative_next_run: int) -> bool:
+    """Atomically claim a cron task for execution so concurrent schedulers never duplicate runs."""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE cron_tasks
+            SET next_run_at = ?, last_run_at = ?, updated_at = ?
+            WHERE id = ? AND is_active = 1 AND next_run_at <= ?
+        ''', (tentative_next_run, now_ts, now_ts, task_id, now_ts))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        log.error(f"[cron] claim_cron_task failed: {e}")
         return False
     finally:
         conn.close()

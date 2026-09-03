@@ -116,6 +116,8 @@ class PluginManager:
                     return True, user_text
             except Exception as e:
                 log.error(f"[PluginManager] Error executing command '{first_word}' in plugin '{plugin.plugin_id}': {e}", exc_info=True)
+        return False, ""
+
     async def dispatch_message(self, user_text: str, message_id: str, chat_id: str, session_data: dict) -> bool:
         """Pipe incoming user_text through on_message hooks of all active plugins.
         If any plugin returns True, the message is considered handled (intercepted)."""

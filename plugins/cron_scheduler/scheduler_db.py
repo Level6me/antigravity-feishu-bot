@@ -6,9 +6,8 @@ import time
 from typing import Optional, List, Dict, Any
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-MAIN_BOT_DB = "/home/jiang/github/antigravity-feishu-bot/antigravity_bot.db"
-LOCAL_FALLBACK_DB = os.path.abspath(os.path.join(PLUGIN_DIR, "..", "..", "antigravity_bot.db"))
-DEFAULT_DB_PATH = MAIN_BOT_DB if os.path.exists(MAIN_BOT_DB) else LOCAL_FALLBACK_DB
+BASE_DIR = os.path.abspath(os.path.join(PLUGIN_DIR, "..", ".."))
+DEFAULT_DB_PATH = os.path.join(BASE_DIR, "antigravity_bot.db")
 
 
 def get_db(db_path: str = None) -> sqlite3.Connection:
@@ -202,6 +201,27 @@ def update_task_run(task_id: str, last_run_at: int, next_run_at: int, inc_count:
             ''', (last_run_at, next_run_at, now, task_id))
         conn.commit()
         return True
+    finally:
+        conn.close()
+
+
+def claim_task(task_id: str, now_ts: int, tentative_next_run: int, db_path: str = None) -> bool:
+    """Atomically claim a cron task for execution so multiple schedulers never duplicate runs."""
+    conn = get_db(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE cron_tasks
+            SET next_run_at = ?, last_run_at = ?, updated_at = ?
+            WHERE id = ? AND is_active = 1 AND next_run_at <= ?
+            """,
+            (tentative_next_run, now_ts, now_ts, task_id, now_ts)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception:
+        return False
     finally:
         conn.close()
 
