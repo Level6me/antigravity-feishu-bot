@@ -70,6 +70,104 @@ def _is_process_group_active(pid: int) -> bool:
         _process_cpu_tracker[pid] = (now, current_cputime)
     return False
 
+def format_tool_action(tool_name: str = "", params: dict = None, raw_action: str = "") -> str:
+    """Format and streamline tool actions to avoid verbose code snippets or multi-line commands."""
+    params = params or {}
+    tool_name = (tool_name or "").strip()
+
+    # 1. 优先提取语义化的工具动作说明
+    act = params.get("toolAction") or params.get("toolSummary") or raw_action or ""
+    if isinstance(act, str):
+        act = act.replace('"', '').replace("'", "").strip()
+        act = re.sub(r'[\r\n\t]+', ' ', act).strip()
+        act = re.sub(r'\s+', ' ', act)
+    else:
+        act = ""
+
+    # 如果有明确简短的描述且不是底层代码/命令
+    if act and not any(act.startswith(p) for p in ["python", "timeout", "sh", "bash", "cat", "echo", "export"]):
+        if len(act) <= 25:
+            return f"正在执行 {act}" if not act.startswith("正在") else act
+        return f"正在执行 {act[:22]}..." if not act.startswith("正在") else f"{act[:22]}..."
+
+    # 2. 针对 run_command 提取精炼用途，严禁直接展示多行代码
+    cmd = (params.get("CommandLine") or params.get("command") or "").strip()
+    if tool_name == "run_command" or cmd:
+        clean_cmd = re.sub(r'^timeout\s+\d+\s+', '', cmd).strip()
+        clean_cmd = re.sub(r'[\r\n\t]+', ' ', clean_cmd).strip(' "\'`')
+        clean_cmd = re.sub(r'\s+', ' ', clean_cmd)
+
+        if not clean_cmd:
+            return "正在执行终端命令"
+        first = clean_cmd.split()[0] if clean_cmd else ""
+        if first in ("python", "python3"):
+            if "sqlite3" in clean_cmd or "db" in clean_cmd:
+                return "正在查询本地数据库"
+            return "正在执行 Python 脚本"
+        elif first in ("docker", "docker-compose"):
+            return "正在查询 Docker 容器"
+        elif first == "git":
+            return "正在执行 Git 操作"
+        elif first in ("grep", "rg"):
+            return "正在检索文件内容"
+        elif first in ("find", "fd", "ls"):
+            return "正在查找系统文件"
+        elif first in ("curl", "wget"):
+            return "正在请求网络数据"
+        else:
+            brief = clean_cmd[:18] + "..." if len(clean_cmd) > 20 else clean_cmd
+            return f"正在运行命令: {brief}"
+
+    # 3. 针对常用文件与交互工具
+    if tool_name == "view_file":
+        path = params.get("AbsolutePath") or params.get("path") or ""
+        fname = os.path.basename(path.strip(' "\'')) if path else ""
+        return f"正在读取文件: {fname}" if fname else "正在读取文件"
+    elif tool_name in ("write_to_file", "replace_file_content"):
+        path = params.get("TargetFile") or params.get("path") or ""
+        fname = os.path.basename(path.strip(' "\'')) if path else ""
+        return f"正在编辑文件: {fname}" if fname else "正在修改文件"
+    elif tool_name == "grep_search":
+        q = (params.get("Query") or "").strip(' "\'')
+        q = re.sub(r'[\r\n\t]+', ' ', q)[:12]
+        return f"正在搜索代码: {q}" if q else "正在搜索代码"
+    elif tool_name == "find_by_name":
+        p = (params.get("Pattern") or "").strip(' "\'')
+        p = re.sub(r'[\r\n\t]+', ' ', p)[:12]
+        return f"正在查找文件: {p}" if p else "正在查找文件"
+    elif tool_name == "list_dir":
+        return "正在浏览目录结构"
+    elif tool_name == "search_web":
+        return "正在联网搜索资料"
+    elif tool_name == "read_url_content":
+        return "正在抓取网页内容"
+    elif tool_name == "invoke_subagent":
+        return "正在调度子智能体"
+    elif tool_name == "manage_task":
+        return "正在管理后台任务"
+
+    # 工具名中文映射兜底
+    TOOL_MAP = {
+        "run_command": "执行终端命令",
+        "view_file": "读取文件",
+        "write_to_file": "写入文件",
+        "replace_file_content": "编辑文件",
+        "grep_search": "搜索代码",
+        "find_by_name": "查找文件",
+        "list_dir": "浏览目录",
+        "search_web": "联网搜索",
+        "read_url_content": "抓取网页",
+        "manage_task": "管理任务",
+        "invoke_subagent": "调度智能体",
+    }
+    if tool_name in TOOL_MAP:
+        return f"正在{TOOL_MAP[tool_name]}"
+
+    if act:
+        return f"正在执行 {act[:20]}..." if len(act) > 22 else f"正在执行 {act}"
+
+    return "正在执行操作"
+
 async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, think_seconds, feishu_call_fn, start_index=0):
     """Fast stream full_text onto Feishu interactive card without artificial delay."""
     if not bot_reply_msg_id or not full_text:
@@ -568,7 +666,7 @@ async def execute_antigravity(
                 decoder = codecs.getincrementaldecoder('utf-8')()
                 line_buffer = ""
                 while True:
-                    chunk = await process.stdout.read(64)
+                    chunk = await process.stdout.read(4096)
                     if not chunk:
                         break
                     text_chunk = decoder.decode(chunk)
@@ -608,9 +706,7 @@ async def execute_antigravity(
                                     t_name = step_up.get("tool_name") or ""
                                     t_info = step_up.get("tool_info", {})
                                     t_params = t_info.get("parameters", {}) if isinstance(t_info, dict) else {}
-                                    act_desc = t_params.get("toolAction") or t_params.get("toolSummary") or t_params.get("CommandLine") or t_name
-                                    if act_desc:
-                                        stream_action = f"正在执行 {act_desc}" if not act_desc.startswith("正在") else act_desc
+                                    stream_action = format_tool_action(t_name, t_params)
                             elif event_type == "result":
                                 res_obj = event_data.get("result", {})
                                 if res_obj.get("status") == "SUCCESS":
@@ -636,7 +732,7 @@ async def execute_antigravity(
                 import codecs
                 decoder = codecs.getincrementaldecoder('utf-8')()
                 while True:
-                    chunk = await process.stderr.read(64)
+                    chunk = await process.stderr.read(4096)
                     if not chunk:
                         break
                     stderr_text += decoder.decode(chunk)
@@ -693,13 +789,9 @@ async def execute_antigravity(
                                 if isinstance(last_call, dict):
                                     args = last_call.get("args", {})
                                     name = last_call.get("name", "")
-                                    act = args.get("toolAction", "") or args.get("toolSummary", "")
-                                    if not act and name:
-                                        act = f"正在执行 {name}"
-                                    if isinstance(act, str) and act.strip():
-                                        clean_act = act.replace('"', '').strip()
-                                        if clean_act:
-                                            return clean_act
+                                    clean_act = format_tool_action(name, args)
+                                    if clean_act:
+                                        return clean_act
                         except Exception:
                             continue
                 except Exception:
@@ -773,14 +865,8 @@ async def execute_antigravity(
                 think_seconds = int(now - process_start_time)
                 stall_seconds = int(now - last_progress_time)
 
-                turn_done = stream_is_done
-                if not turn_done and t_path and os.path.exists(t_path):
-                    turn_done = await loop.run_in_executor(
-                        None,
-                        lambda: is_transcript_turn_completed(t_path, initial_transcript_size)
-                    )
-                if turn_done:
-                    log.info(f"[Executor] Model turn completed (stream_done={stream_is_done}). Terminating wait loop...")
+                if stream_is_done:
+                    log.info(f"[Executor] Model turn completed via stream result. Terminating wait loop...")
                     break
                 
                 if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:

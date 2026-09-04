@@ -16,6 +16,7 @@ class CardBuilder:
     build_tool_indicator = staticmethod(indicators.build_tool_indicator)
     build_download_indicator = staticmethod(indicators.build_download_indicator)
     build_streaming_indicator = staticmethod(indicators.build_streaming_indicator)
+    clean_action_text = staticmethod(indicators.clean_action_text)
     build_stall_warning_card = staticmethod(indicators.build_stall_warning_card)
     build_stall_error_card = staticmethod(indicators.build_stall_error_card)
 
