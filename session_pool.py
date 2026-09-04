@@ -38,6 +38,7 @@ class PersistentSession:
         self._closing = False
         self._decoder = codecs.getincrementaldecoder('utf-8')()
         self._line_buffer = ""
+        self._stderr_drain_task: Optional[asyncio.Task] = None
 
     def is_alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
@@ -93,6 +94,10 @@ class PersistentSession:
         self.last_active_time = time.time()
         app_state.running_processes[self.chat_id] = self.process
 
+        # Start background stderr drain to prevent OS pipe buffer deadlock.
+        # If stderr fills up (~64KB), the process blocks on write and stdout stalls too.
+        self._stderr_drain_task = asyncio.create_task(self._drain_stderr())
+
     async def send_prompt_and_stream(self, prompt_text: str):
         """Send a prompt turn to the process stdin and yield parsed stream events."""
         if not self.is_alive():
@@ -127,9 +132,33 @@ class PersistentSession:
                 except Exception:
                     yield {"event": "raw_log", "text": line}
 
+    async def _drain_stderr(self):
+        """Background task: continuously read and discard stderr to prevent pipe buffer deadlock."""
+        try:
+            while self.process and self.process.returncode is None:
+                chunk = await self.process.stderr.read(4096)
+                if not chunk:
+                    break
+                # Log first meaningful stderr for debugging, but don't accumulate
+                text = chunk.decode("utf-8", errors="replace").strip()
+                if text:
+                    log.debug(f"[Session:{self.chat_id}] stderr: {text[:200]}")
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
     async def close(self):
         """Gracefully terminate the warm process."""
         self._closing = True
+        # Cancel stderr drain first
+        if self._stderr_drain_task and not self._stderr_drain_task.done():
+            self._stderr_drain_task.cancel()
+            try:
+                await self._stderr_drain_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._stderr_drain_task = None
         proc = self.process
         self.process = None
         app_state.running_processes.pop(self.chat_id, None)

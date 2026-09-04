@@ -600,8 +600,6 @@ async def execute_antigravity(
         custom_env["STDOUT_LINE_BUFFERED"] = "1"
 
         sess_locked = False
-        stdout_task = None
-        stderr_task = None
         try:
             from session_pool import session_pool
             conv_id_to_resume = session_data.get("conversation", "") if not is_new_conversation else ""
@@ -958,12 +956,6 @@ async def execute_antigravity(
             return {"has_reply": bool(final_reply), "returncode": process.returncode, "is_error": is_error}
         
         finally:
-            # 确保 reader tasks 被取消并等待结束，防止下轮请求产生 "read operation already in progress"
-            _tasks_to_cancel = [t for t in [stdout_task, stderr_task] if t is not None and not t.done()]
-            for _t in _tasks_to_cancel:
-                _t.cancel()
-            if _tasks_to_cancel:
-                await asyncio.gather(*_tasks_to_cancel, return_exceptions=True)
             if sess_locked and 'sess' in dir() and sess.lock.locked():
                 sess.lock.release()
             if os.path.exists(log_file_path):
