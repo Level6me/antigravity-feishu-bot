@@ -780,7 +780,7 @@ async def execute_antigravity(
                         lambda: is_transcript_turn_completed(t_path, initial_transcript_size)
                     )
                 if turn_done:
-                    log.info(f"[Executor] Model turn completed. Terminating wait loop early to deliver response immediately...")
+                    log.info(f"[Executor] Model turn completed (stream_done={stream_is_done}). Terminating wait loop...")
                     break
                 
                 if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
@@ -861,9 +861,23 @@ async def execute_antigravity(
                 if stdout_task.done() or stream_is_done:
                     break
 
-            # Turn is completed: cancel reader tasks to prevent StreamReader collisions on next turn
+            # Turn wait ended: gracefully wait up to 1.5s for result event if not yet received
+            if not stream_is_done and stdout_task and not stdout_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(stdout_task), timeout=1.5)
+                except Exception:
+                    pass
+
+            # If stream_is_done was not reached, the stdout stream is out of sync.
+            # Reset the persistent session so subsequent turns start with a clean process and never read stale buffers.
+            if not stream_is_done:
+                log.warning(f"[Executor] Persistent stream desynced for chat {chat_id}, resetting session process.")
+                from session_pool import session_pool
+                await session_pool.reset_session(chat_id)
+
+            # Cancel reader tasks to prevent StreamReader collisions on next turn
             for reader_t in [stdout_task, stderr_task]:
-                if not reader_t.done():
+                if reader_t and not reader_t.done():
                     reader_t.cancel()
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             
