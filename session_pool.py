@@ -25,6 +25,45 @@ from utils.auth import is_admin, has_scope, SCOPE_PROJECT
 from logger import log
 import app_state
 
+class TurnEventStream:
+    """A thread-safe, non-cancellable stream of parsed JSON events for a single dialogue turn.
+    
+    Reading stdout is decoupled from consumer polling timeouts.
+    If consumer timeouts occur while waiting for an event (e.g. to refresh cards),
+    the underlying stdout reader continues reading unaffected.
+    """
+    def __init__(self, queue: asyncio.Queue, reader_task: asyncio.Task):
+        self._queue = queue
+        self._reader_task = reader_task
+        self.is_done = False
+
+    async def get_event(self, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """Fetch the next parsed event from the queue.
+        Returns None on timeout without interrupting or cancelling the reader.
+        """
+        if self.is_done:
+            return None
+        try:
+            if timeout is not None:
+                event = await asyncio.wait_for(self._queue.get(), timeout=timeout)
+            else:
+                event = await self._queue.get()
+
+            if event.get("event") in ["result", "process_exit", "read_error"]:
+                self.is_done = True
+            return event
+        except asyncio.TimeoutError:
+            return None
+
+    async def aclose(self):
+        """Clean up the turn reader task if still active."""
+        if not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
 class PersistentSession:
     """Represents a long-lived interactive agy CLI process."""
     def __init__(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = ""):
@@ -98,8 +137,8 @@ class PersistentSession:
         # If stderr fills up (~64KB), the process blocks on write and stdout stalls too.
         self._stderr_drain_task = asyncio.create_task(self._drain_stderr())
 
-    async def send_prompt_and_stream(self, prompt_text: str):
-        """Send a prompt turn to the process stdin and yield parsed stream events."""
+    async def send_prompt_and_stream(self, prompt_text: str) -> TurnEventStream:
+        """Send a prompt turn to the process stdin and return a TurnEventStream."""
         if not self.is_alive():
             await self.start()
 
@@ -108,29 +147,48 @@ class PersistentSession:
         self.process.stdin.write(req.encode("utf-8"))
         await self.process.stdin.drain()
 
-        while True:
-            if self.process.returncode is not None:
-                break
-            chunk = await self.process.stdout.read(4096)
-            if not chunk:
-                break
-            text_chunk = self._decoder.decode(chunk)
-            self._line_buffer += text_chunk
-            while "\n" in self._line_buffer:
-                line, self._line_buffer = self._line_buffer.split("\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event_data = json.loads(line)
+        queue = asyncio.Queue()
+        reader_task = asyncio.create_task(self._read_turn_stdout(queue))
+        return TurnEventStream(queue, reader_task)
+
+    async def _read_turn_stdout(self, queue: asyncio.Queue):
+        """Background coroutine reading stdout until 'result' event or EOF.
+        Guarantees that no JSON line or stream chunk is lost due to UI poll timeouts.
+        """
+        try:
+            while True:
+                if self.process is None or self.process.returncode is not None:
+                    await queue.put({"event": "process_exit", "returncode": getattr(self.process, "returncode", -1)})
+                    break
+                chunk = await self.process.stdout.read(4096)
+                if not chunk:
+                    await queue.put({"event": "process_exit", "returncode": getattr(self.process, "returncode", -1)})
+                    break
+                text_chunk = self._decoder.decode(chunk)
+                self._line_buffer += text_chunk
+                while "\n" in self._line_buffer:
+                    line, self._line_buffer = self._line_buffer.split("\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event_data = json.loads(line)
+                    except Exception:
+                        event_data = {"event": "raw_log", "text": line}
+
                     event_type = event_data.get("event")
                     if event_type == "init":
                         self.conversation_id = event_data.get("conversation_id", "")
-                    yield event_data
+
+                    await queue.put(event_data)
+
                     if event_type == "result":
                         return
-                except Exception:
-                    yield {"event": "raw_log", "text": line}
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.warning(f"[SessionPool] Error in _read_turn_stdout for {self.chat_id}: {e}")
+            await queue.put({"event": "read_error", "error": str(e)})
 
     async def _drain_stderr(self):
         """Background task: continuously read and discard stderr to prevent pipe buffer deadlock."""
