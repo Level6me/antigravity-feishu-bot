@@ -67,12 +67,43 @@ def build_typing_indicator(downloaded_file_name=None, download_success=True, use
     }
 
 
+def clean_action_text(text, max_len=28):
+    """Format and streamline action text to avoid huge code snippets or verbose messages."""
+    if not text:
+        return "执行操作中"
+    
+    clean = str(text).strip(' "\'`')
+    clean = re.sub(r'[\r\n\t]+', ' ', clean).strip()
+    clean = re.sub(r'\s+', ' ', clean)
+    clean = re.sub(r'^(正在执行\s*)+', '正在执行 ', clean)
+    
+    if any(clean.startswith(prefix) for prefix in [
+        "正在执行 python", "python3", "python", "正在执行 timeout", "timeout "
+    ]) or "import sqlite3" in clean or "sqlite3.connect" in clean:
+        if "sqlite3" in clean or "db" in clean:
+            return "查询本地数据库"
+        return "执行 Python 脚本"
+        
+    if "docker ps" in clean or "docker container" in clean:
+        return "查询容器状态"
+    elif clean.startswith("git ") or "git " in clean:
+        return "执行 Git 操作"
+    elif "grep " in clean or "ripgrep" in clean or "find " in clean:
+        return "检索项目内容"
+    elif "curl " in clean or "wget " in clean or "http" in clean:
+        return "请求网络资源"
+        
+    if len(clean) > max_len:
+        return clean[:max_len - 3] + "..."
+    return clean
+
+
 def build_tool_indicator(tool_action, user_text="", downloaded_file_name=None, download_success=True, think_seconds=0):
     title, content = _guess_intent(user_text)
     
-    # Override the text with the actual tool action
+    action_disp = clean_action_text(tool_action)
     time_hint = f"已运行 {think_seconds}s" if think_seconds > 0 else "请稍候..."
-    content = f"**当前动作：** `{tool_action}`\n\n*(AI 正在运行底层命令或操作文件，{time_hint})*"
+    content = f"**当前动作：** `{action_disp}`\n\n*(AI 正在运行底层命令或操作文件，{time_hint})*"
     
     if downloaded_file_name:
         if download_success:
@@ -80,11 +111,15 @@ def build_tool_indicator(tool_action, user_text="", downloaded_file_name=None, d
         else:
             content = f"❌ 获取资源失败：**{downloaded_file_name}**\n\n{content}"
 
+    header_title = f"🛠️ {action_disp}" if not action_disp.startswith("🛠️") else action_disp
+    if len(header_title) > 28:
+        header_title = header_title[:25] + "..."
+
     return {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "turquoise",
-            "title": {"content": "🛠️ " + tool_action, "tag": "plain_text"}
+            "title": {"content": header_title, "tag": "plain_text"}
         },
         "elements": [
             {
@@ -119,7 +154,8 @@ def build_streaming_indicator(partial_text, tool_action=None, user_text="", thin
     
     status_bar = f"*( ⏱️ 已思考 {think_seconds}s"
     if tool_action:
-        status_bar += f" | 🛠️ {tool_action}"
+        action_disp = clean_action_text(tool_action)
+        status_bar += f" | 🛠️ {action_disp}"
     status_bar += " )*\n\n---\n\n"
     
     # Trim to last 3500 chars if ultra-long to keep card patch within safe payload limit
