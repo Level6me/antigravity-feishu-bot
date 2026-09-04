@@ -598,8 +598,8 @@ async def execute_antigravity(
         custom_env["GIT_ASKPASS"] = "echo"
         custom_env["PYTHONUNBUFFERED"] = "1"
         custom_env["STDOUT_LINE_BUFFERED"] = "1"
-
         sess_locked = False
+        turn_stream = None
         try:
             from session_pool import session_pool
             conv_id_to_resume = session_data.get("conversation", "") if not is_new_conversation else ""
@@ -686,19 +686,10 @@ async def execute_antigravity(
             BASE_QUIET_WARNING_THRESHOLD = 120
             TOOL_QUIET_WARNING_THRESHOLD = 180
 
-            stream_gen = sess.send_prompt_and_stream(system_instruction + final_prompt)
+            turn_stream = await sess.send_prompt_and_stream(system_instruction + final_prompt)
 
             while True:
-                try:
-                    event_data = await asyncio.wait_for(stream_gen.__anext__(), timeout=0.3)
-                except asyncio.TimeoutError:
-                    event_data = None
-                except StopAsyncIteration:
-                    break
-                except Exception as ex:
-                    log.warning(f"[Executor] Stream generator exception: {ex}")
-                    break
-
+                event_data = await turn_stream.get_event(timeout=0.3)
                 now = time.time()
 
                 if event_data:
@@ -742,7 +733,12 @@ async def execute_antigravity(
                             stream_result_response = res_obj.get("response")
                             stream_is_done = True
                             log.info(f"[Executor] Model turn completed via stream result event.")
-                            break
+                        else:
+                            log.warning(f"[Executor] Model turn finished with status: {res_obj.get('status')}")
+                        break
+                    elif event_type in ["process_exit", "read_error"]:
+                        log.warning(f"[Executor] Stream ended prematurely with {event_type}: {event_data}")
+                        break
                     elif event_type == "raw_log":
                         accumulated_text += event_data.get("text", "") + "\n"
 
@@ -820,7 +816,8 @@ async def execute_antigravity(
                             lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
                             label="indicator patch"
                         )
-            
+            await turn_stream.aclose()
+
             is_error = (process.returncode != 0 and process.returncode is not None)
             session_data["last_execution_error"] = is_error
 
@@ -956,6 +953,8 @@ async def execute_antigravity(
             return {"has_reply": bool(final_reply), "returncode": process.returncode, "is_error": is_error}
         
         finally:
+            if turn_stream is not None:
+                await turn_stream.aclose()
             if sess_locked and 'sess' in dir() and sess.lock.locked():
                 sess.lock.release()
             if os.path.exists(log_file_path):
