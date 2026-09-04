@@ -36,6 +36,8 @@ class PersistentSession:
         self.lock = asyncio.Lock()
         self.last_active_time = time.time()
         self._closing = False
+        self._decoder = codecs.getincrementaldecoder('utf-8')()
+        self._line_buffer = ""
 
     def is_alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
@@ -86,6 +88,8 @@ class PersistentSession:
             cwd=cwd_dir,
             env=custom_env
         )
+        self._decoder = codecs.getincrementaldecoder('utf-8')()
+        self._line_buffer = ""
         self.last_active_time = time.time()
         app_state.running_processes[self.chat_id] = self.process
 
@@ -99,17 +103,16 @@ class PersistentSession:
         self.process.stdin.write(req.encode("utf-8"))
         await self.process.stdin.drain()
 
-        decoder = codecs.getincrementaldecoder('utf-8')()
-        line_buffer = ""
-
         while True:
-            chunk = await self.process.stdout.read(64)
+            if self.process.returncode is not None:
+                break
+            chunk = await self.process.stdout.read(4096)
             if not chunk:
                 break
-            text_chunk = decoder.decode(chunk)
-            line_buffer += text_chunk
-            while "\n" in line_buffer:
-                line, line_buffer = line_buffer.split("\n", 1)
+            text_chunk = self._decoder.decode(chunk)
+            self._line_buffer += text_chunk
+            while "\n" in self._line_buffer:
+                line, self._line_buffer = self._line_buffer.split("\n", 1)
                 line = line.strip()
                 if not line:
                     continue

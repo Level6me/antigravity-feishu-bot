@@ -649,94 +649,11 @@ async def execute_antigravity(
                 else:
                     log.warning(f"[Executor] Initial typing card send failed for chat {chat_id}; will fall back to sending final card as new message")
             
-            # Send prompt to persistent process stdin
-            prompt_payload = json.dumps({"event": "user", "message": {"content": system_instruction + final_prompt}}) + "\n"
-            process.stdin.write(prompt_payload.encode("utf-8"))
-            await process.stdin.drain()
-
             accumulated_text = ""
             stderr_text = ""
             stream_result_response = None
             stream_action = ""
             stream_is_done = False
-            
-            async def read_stdout():
-                nonlocal accumulated_text, stream_result_response, stream_action, stream_is_done, target_transcript_path
-                import codecs
-                decoder = codecs.getincrementaldecoder('utf-8')()
-                line_buffer = ""
-                while True:
-                    chunk = await process.stdout.read(4096)
-                    if not chunk:
-                        break
-                    text_chunk = decoder.decode(chunk)
-                    line_buffer += text_chunk
-                    while "\n" in line_buffer:
-                        line, line_buffer = line_buffer.split("\n", 1)
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            event_data = json.loads(line)
-                            event_type = event_data.get("event")
-                            if event_type == "init":
-                                conv_id = event_data.get("conversation_id")
-                                if conv_id:
-                                    from session_pool import session_pool
-                                    session_pool.update_conversation_id(chat_id, conv_id)
-                                    if session_data.get("conversation") != conv_id:
-                                        session_data["conversation"] = conv_id
-                                        try:
-                                            await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
-                                        except Exception:
-                                            pass
-                                        path = get_transcript_path(conv_id)
-                                        if os.path.exists(path):
-                                            target_transcript_path = path
-                                            if initial_transcript_size == 0:
-                                                initial_transcript_size = os.path.getsize(path)
-                            elif event_type == "step_update":
-                                step_up = event_data.get("step_update", {})
-                                step_t = step_up.get("step_type")
-                                if step_t == "agent_response":
-                                    delta = step_up.get("text_delta")
-                                    if delta:
-                                        accumulated_text += delta
-                                elif step_t == "tool":
-                                    t_name = step_up.get("tool_name") or ""
-                                    t_info = step_up.get("tool_info", {})
-                                    t_params = t_info.get("parameters", {}) if isinstance(t_info, dict) else {}
-                                    stream_action = format_tool_action(t_name, t_params)
-                            elif event_type == "result":
-                                res_obj = event_data.get("result", {})
-                                if res_obj.get("status") == "SUCCESS":
-                                    stream_result_response = res_obj.get("response")
-                                    stream_is_done = True
-                                    return
-                        except Exception:
-                            accumulated_text += line + "\n"
-
-                line_buffer += decoder.decode(b'', final=True)
-                if line_buffer.strip():
-                    try:
-                        event_data = json.loads(line_buffer.strip())
-                        if event_data.get("event") == "result":
-                            res_obj = event_data.get("result", {})
-                            stream_result_response = res_obj.get("response")
-                            stream_is_done = True
-                    except Exception:
-                        pass
-                    
-            async def read_stderr():
-                nonlocal stderr_text
-                import codecs
-                decoder = codecs.getincrementaldecoder('utf-8')()
-                while True:
-                    chunk = await process.stderr.read(4096)
-                    if not chunk:
-                        break
-                    stderr_text += decoder.decode(chunk)
-                stderr_text += decoder.decode(b'', final=True)
 
             def get_latest_transcript_file():
                 if session_data.get("conversation"):
@@ -759,86 +676,84 @@ async def execute_antigravity(
                         pass
                 return None
 
-            def fetch_current_action():
-                if stream_action:
-                    return stream_action
-                t_path = target_transcript_path or get_latest_transcript_file()
-                if not t_path or not os.path.exists(t_path):
-                    return ""
-                try:
-                    with open(t_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        if initial_transcript_size > 0:
-                            try:
-                                f.seek(initial_transcript_size)
-                            except Exception:
-                                pass
-                        lines = f.readlines()
-                    if not lines:
-                        return ""
-                    for line in reversed(lines):
-                        line_str = line.strip()
-                        if not line_str:
-                            continue
-                        try:
-                            data = json.loads(line_str)
-                            if data.get("type") == "USER_INPUT":
-                                break
-                            t_calls = data.get("tool_calls")
-                            if t_calls and isinstance(t_calls, list) and len(t_calls) > 0:
-                                last_call = t_calls[-1]
-                                if isinstance(last_call, dict):
-                                    args = last_call.get("args", {})
-                                    name = last_call.get("name", "")
-                                    clean_act = format_tool_action(name, args)
-                                    if clean_act:
-                                        return clean_act
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-                return ""
-
-            stdout_task = asyncio.create_task(read_stdout())
-            stderr_task = asyncio.create_task(read_stderr())
-            
             last_streamed_length = 0
             last_patch_time = time.time()
             process_start_time = time.time()
             last_progress_time = process_start_time
             last_cpu_check_time = 0
             is_cpu_busy = False
-            last_stdout_len = 0
-            last_log_size = 0
-            last_transcript_size = 0
             last_tool_action = ""
             STALL_TIMEOUT = 300
             STALL_HARD_TIMEOUT = 600
             BASE_QUIET_WARNING_THRESHOLD = 120
             TOOL_QUIET_WARNING_THRESHOLD = 180
-            
-            while process.returncode is None:
-                await asyncio.sleep(0.3)
+
+            stream_gen = sess.send_prompt_and_stream(system_instruction + final_prompt)
+
+            while True:
+                try:
+                    event_data = await asyncio.wait_for(stream_gen.__anext__(), timeout=0.3)
+                except asyncio.TimeoutError:
+                    event_data = None
+                except StopAsyncIteration:
+                    break
+                except Exception as ex:
+                    log.warning(f"[Executor] Stream generator exception: {ex}")
+                    break
+
                 now = time.time()
-                
+
+                if event_data:
+                    last_progress_time = now
+                    event_type = event_data.get("event")
+                    if event_type == "init":
+                        conv_id = event_data.get("conversation_id")
+                        if conv_id:
+                            from session_pool import session_pool
+                            session_pool.update_conversation_id(chat_id, conv_id)
+                            if session_data.get("conversation") != conv_id:
+                                session_data["conversation"] = conv_id
+                                try:
+                                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                                except Exception:
+                                    pass
+                                path = get_transcript_path(conv_id)
+                                if os.path.exists(path):
+                                    target_transcript_path = path
+                                    if initial_transcript_size == 0:
+                                        initial_transcript_size = os.path.getsize(path)
+                    elif event_type == "step_update":
+                        step_up = event_data.get("step_update", {})
+                        step_t = step_up.get("step_type")
+                        if step_t == "agent_response":
+                            delta = step_up.get("text_delta")
+                            if delta:
+                                accumulated_text += delta
+                        elif step_t == "tool":
+                            t_name = step_up.get("tool_name") or ""
+                            t_info = step_up.get("tool_info", {})
+                            t_params = t_info.get("parameters", {}) if isinstance(t_info, dict) else {}
+                            stream_action = format_tool_action(t_name, t_params)
+                            if stream_action and stream_action != last_tool_action:
+                                last_tool_action = stream_action
+                                from plugin_manager import plugin_manager
+                                await plugin_manager.dispatch_tool_call(stream_action, {})
+                    elif event_type == "result":
+                        res_obj = event_data.get("result", {})
+                        if res_obj.get("status") == "SUCCESS":
+                            stream_result_response = res_obj.get("response")
+                            stream_is_done = True
+                            log.info(f"[Executor] Model turn completed via stream result event.")
+                            break
+                    elif event_type == "raw_log":
+                        accumulated_text += event_data.get("text", "") + "\n"
+
+                think_seconds = int(now - process_start_time)
+                stall_seconds = int(now - last_progress_time)
+
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
-                
-                action = await loop.run_in_executor(None, fetch_current_action)
-                current_log_size = os.path.getsize(log_file_path) if os.path.exists(log_file_path) else 0
-                t_path = target_transcript_path or get_latest_transcript_file()
-                current_transcript_size = os.path.getsize(t_path) if (t_path and os.path.exists(t_path)) else 0
-                current_stdout_len = len(accumulated_text)
-                
-                partial_text = None
-                if accumulated_text and accumulated_text.strip():
-                    partial_text = extract_final_chinese_response(accumulated_text.strip())
-                elif t_path and os.path.exists(t_path):
-                    partial_text = await loop.run_in_executor(
-                        None,
-                        lambda: extract_final_response_from_transcript(t_path, initial_transcript_size)
-                    )
 
-                # 每 2 秒检测一次进程组 CPU 活跃度，若正在计算则重置停滞计时
                 if now - last_cpu_check_time >= 2.0:
                     last_cpu_check_time = now
                     is_cpu_busy = await loop.run_in_executor(
@@ -847,46 +762,12 @@ async def execute_antigravity(
                     if is_cpu_busy:
                         last_progress_time = now
 
-                has_data_growth = (
-                    current_stdout_len > last_stdout_len or 
-                    current_transcript_size > last_transcript_size or 
-                    (action and action != last_tool_action)
-                )
-                if has_data_growth:
-                    last_progress_time = now
-                    last_stdout_len = current_stdout_len
-                    last_log_size = current_log_size
-                    last_transcript_size = current_transcript_size
-                    if action and action != last_tool_action:
-                        last_tool_action = action
-                        from plugin_manager import plugin_manager
-                        await plugin_manager.dispatch_tool_call(action, {})
-                
-                think_seconds = int(now - process_start_time)
-                stall_seconds = int(now - last_progress_time)
-
-                if stream_is_done:
-                    log.info(f"[Executor] Model turn completed via stream result. Terminating wait loop...")
-                    break
-                
                 if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
-                    # 检测进程组（含子进程/subagent）是否仍有 CPU 活动
-                    cpu_active = is_cpu_busy or await loop.run_in_executor(
-                        None, lambda: _is_process_group_active(process.pid)
-                    )
-                    # 达到硬上限时无条件终止；未达硬上限但进程组仍活跃则继续等待
-                    if cpu_active and stall_seconds < STALL_HARD_TIMEOUT:
-                        log.info(f"[Executor] No file progress for {stall_seconds}s but process group still CPU-active, extending wait (hard limit {STALL_HARD_TIMEOUT}s)")
+                    if is_cpu_busy and stall_seconds < STALL_HARD_TIMEOUT:
+                        log.info(f"[Executor] No event for {stall_seconds}s but process group still CPU-active, extending wait")
                     else:
-                        reason = "hard timeout" if stall_seconds >= STALL_HARD_TIMEOUT else "no CPU activity"
-                        log.error(f"[Executor] Process stalled ({reason}, no progress for {stall_seconds}s) for chat {chat_id}, killing process group...")
-                        import signal
-                        try:
-                            pgid = os.getpgid(process.pid)
-                            os.killpg(pgid, signal.SIGKILL)
-                        except Exception as ex:
-                            log.error(f"Failed to kill stalled process: {ex}")
-                        
+                        log.error(f"[Executor] Process stalled for chat {chat_id}, closing session...")
+                        await sess.close()
                         error_card = CardBuilder.build_stall_error_card(user_text, think_seconds, stall_seconds)
                         if bot_reply_msg_id:
                             await _feishu_call(
@@ -895,24 +776,22 @@ async def execute_antigravity(
                             )
                         stderr_text = f"⚠️ 任务已检测到卡死并自动终止（连续 {stall_seconds // 60} 分钟没有任何新 Token 或日志写入）。"
                         break
-                
+
                 if think_seconds > 43200:
-                    log.error(f"[Executor] Process timeout reached (43200s / 12h) for chat {chat_id}, killing process group...")
-                    import signal
-                    try:
-                        pgid = os.getpgid(process.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                    except Exception as ex:
-                        log.error(f"Failed to kill timed out process: {ex}")
+                    log.error(f"[Executor] Process timeout reached (43200s / 12h) for chat {chat_id}...")
+                    await sess.close()
                     stderr_text = "⚠️ 执行超时 (12小时)：后台超大型任务已达到系统设定的 12 小时最高保护上限。"
                     break
 
-                # 动态静默告警阈值计算：工具执行时放宽到 180s，用户点击继续等待时顺延 300s
-                has_active_tool = bool(action or last_tool_action)
+                has_active_tool = bool(stream_action or last_tool_action)
                 effective_warning_threshold = TOOL_QUIET_WARNING_THRESHOLD if has_active_tool else BASE_QUIET_WARNING_THRESHOLD
                 extend_until = app_state.extended_wait_chats.get(chat_id, 0)
                 if now < extend_until:
                     effective_warning_threshold += 300
+
+                partial_text = None
+                if accumulated_text and accumulated_text.strip():
+                    partial_text = extract_final_chinese_response(accumulated_text.strip())
 
                 desired_patch_interval = 0.4
                 if partial_text and len(partial_text.strip()) > 0:
@@ -923,19 +802,19 @@ async def execute_antigravity(
                     if last_streamed_length < target_len:
                         last_streamed_length = min(target_len, last_streamed_length + 150)
                     display_partial = clean_partial[:last_streamed_length]
-                    indicator_card = CardBuilder.build_streaming_indicator(display_partial, action or last_tool_action, user_text, think_seconds)
+                    indicator_card = CardBuilder.build_streaming_indicator(display_partial, stream_action or last_tool_action, user_text, think_seconds)
                     desired_patch_interval = 0.4
                 elif stall_seconds >= effective_warning_threshold and not is_cpu_busy:
                     indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
                     desired_patch_interval = 2.0
                 else:
-                    display_action = action or last_tool_action
+                    display_action = stream_action or last_tool_action
                     if display_action:
                         indicator_card = CardBuilder.build_tool_indicator(display_action, user_text, downloaded_file_name, download_success, think_seconds)
                     else:
                         indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
                     desired_patch_interval = 0.4
-                
+
                 if time.time() - last_patch_time >= desired_patch_interval:
                     last_patch_time = time.time()
                     if bot_reply_msg_id:
@@ -943,29 +822,6 @@ async def execute_antigravity(
                             lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
                             label="indicator patch"
                         )
-                                
-                if stdout_task.done() or stream_is_done:
-                    break
-
-            # Turn wait ended: gracefully wait up to 1.5s for result event if not yet received
-            if not stream_is_done and stdout_task and not stdout_task.done():
-                try:
-                    await asyncio.wait_for(asyncio.shield(stdout_task), timeout=1.5)
-                except Exception:
-                    pass
-
-            # If stream_is_done was not reached, the stdout stream is out of sync.
-            # Reset the persistent session so subsequent turns start with a clean process and never read stale buffers.
-            if not stream_is_done:
-                log.warning(f"[Executor] Persistent stream desynced for chat {chat_id}, resetting session process.")
-                from session_pool import session_pool
-                await session_pool.reset_session(chat_id)
-
-            # Cancel reader tasks to prevent StreamReader collisions on next turn
-            for reader_t in [stdout_task, stderr_task]:
-                if reader_t and not reader_t.done():
-                    reader_t.cancel()
-            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             
             is_error = (process.returncode != 0 and process.returncode is not None)
             session_data["last_execution_error"] = is_error
