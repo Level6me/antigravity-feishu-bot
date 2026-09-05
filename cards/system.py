@@ -16,7 +16,18 @@ def build_no_update_card(current_version):
         "elements": [
             {
                 "tag": "markdown",
-                "content": f"**当前运行版本**：`{current_version}`\n\n🎉 太棒了！经过全网云端探测，您的机器人的核心引擎已经是最新形态，无需任何更新操作。"
+                "content": f"**当前运行版本**：`{current_version}`\n\n🎉 经过全网云端探测，本地代码已与云端保持一致。"
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🔄 强制重启重载服务"},
+                        "type": "default",
+                        "value": {"action": "user_choice", "choice": "/update confirm", "label": "强制重启重载服务"}
+                    }
+                ]
             },
             create_footer()
         ]

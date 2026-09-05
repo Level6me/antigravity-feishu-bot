@@ -25,7 +25,7 @@ class SystemUpdaterPlugin(BasePlugin):
         if command.lower() == "/update":
             clean_args = (args or "").strip().lower()
 
-            if clean_args == "confirm":
+            if clean_args in ["confirm", "restart", "force"]:
                 from commands import get_version_string
                 from database import save_pending_update_notice
                 import json
