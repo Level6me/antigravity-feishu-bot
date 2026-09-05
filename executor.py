@@ -21,6 +21,29 @@ _transcript_read_state = {}
 # 追踪进程 CPU 时间差值: pid -> (last_check_timestamp, cumulative_cputime_seconds)
 _process_cpu_tracker = {}
 
+def _parse_cputime(s: str) -> float:
+    """Parse cputime string like '0:00.02', '1:57.84', '01:23:45.67', '1-02:03:04' into seconds."""
+    try:
+        s = s.strip()
+        if not s:
+            return 0.0
+        days = 0.0
+        if '-' in s:
+            d_part, s = s.split('-', 1)
+            days = float(d_part)
+        parts = s.split(':')
+        if len(parts) == 3:
+            h, m, sec = parts
+            return days * 86400.0 + float(h) * 3600.0 + float(m) * 60.0 + float(sec)
+        elif len(parts) == 2:
+            m, sec = parts
+            return days * 86400.0 + float(m) * 60.0 + float(sec)
+        elif len(parts) == 1:
+            return days * 86400.0 + float(parts[0])
+    except Exception:
+        return 0.0
+    return 0.0
+
 def _get_process_group_cpu_seconds(pid: int) -> float:
     """获取整个进程组（主进程 + 所有子进程/subagent）的累计 CPU 秒数。
     这样即使主进程在 I/O wait，只要子进程在工作也能检测到活跃。"""
@@ -29,7 +52,7 @@ def _get_process_group_cpu_seconds(pid: int) -> float:
     try:
         pgid = os.getpgid(pid)
         out = subprocess.check_output(
-            ["ps", "-e", "-o", "pgid=,cputimes="],
+            ["ps", "-ax", "-o", "pgid=,cputime="],
             text=True, timeout=3
         ).strip()
         total = 0.0
@@ -38,17 +61,17 @@ def _get_process_group_cpu_seconds(pid: int) -> float:
             if len(parts) == 2:
                 try:
                     if int(parts[0]) == pgid:
-                        total += float(parts[1])
+                        total += _parse_cputime(parts[1])
                 except (ValueError, TypeError):
                     continue
         return total
     except Exception:
         try:
             out = subprocess.check_output(
-                ["ps", "-p", str(pid), "-o", "cputimes="],
+                ["ps", "-p", str(pid), "-o", "cputime="],
                 text=True, timeout=2
             ).strip()
-            return float(out) if out else 0.0
+            return _parse_cputime(out)
         except Exception:
             return 0.0
 
@@ -756,7 +779,12 @@ async def execute_antigravity(
                     if is_cpu_busy:
                         last_progress_time = now
 
-                if think_seconds >= STALL_TIMEOUT and stall_seconds >= STALL_TIMEOUT:
+                extend_until = app_state.extended_wait_chats.get(chat_id, 0)
+                effective_stall_timeout = STALL_TIMEOUT
+                if now < extend_until:
+                    effective_stall_timeout += 300
+
+                if think_seconds >= effective_stall_timeout and stall_seconds >= effective_stall_timeout:
                     if is_cpu_busy and stall_seconds < STALL_HARD_TIMEOUT:
                         log.info(f"[Executor] No event for {stall_seconds}s but process group still CPU-active, extending wait")
                     else:
@@ -769,17 +797,18 @@ async def execute_antigravity(
                                 label="stall error card patch"
                             )
                         stderr_text = f"⚠️ 任务已检测到卡死并自动终止（连续 {stall_seconds // 60} 分钟没有任何新 Token 或日志写入）。"
-                        break
+                        session_data["last_execution_error"] = True
+                        return {"has_reply": True, "reply_text": stderr_text, "is_error": True}
 
                 if think_seconds > 43200:
                     log.error(f"[Executor] Process timeout reached (43200s / 12h) for chat {chat_id}...")
                     await sess.close()
                     stderr_text = "⚠️ 执行超时 (12小时)：后台超大型任务已达到系统设定的 12 小时最高保护上限。"
-                    break
+                    session_data["last_execution_error"] = True
+                    return {"has_reply": True, "reply_text": stderr_text, "is_error": True}
 
                 has_active_tool = bool(stream_action or last_tool_action)
                 effective_warning_threshold = TOOL_QUIET_WARNING_THRESHOLD if has_active_tool else BASE_QUIET_WARNING_THRESHOLD
-                extend_until = app_state.extended_wait_chats.get(chat_id, 0)
                 if now < extend_until:
                     effective_warning_threshold += 300
 

@@ -64,8 +64,15 @@ class AgyDaemon:
         env["DEBIAN_FRONTEND"] = "noninteractive"
 
         log.info(f"[agy-daemon] spawning: {bin_path} (ANTIGRAVITY_HOME={home})")
+        args = []
+        from config import DANGEROUSLY_SKIP_PERMISSIONS
+        if DANGEROUSLY_SKIP_PERMISSIONS:
+            args.append("--dangerously-skip-permissions")
+
         self._child = pexpect.spawn(
             bin_path,
+            args,
+            cwd=os.path.expanduser("~"),
             env=env,
             encoding="utf-8",
             timeout=None,
@@ -131,6 +138,11 @@ class AgyDaemon:
                     stripped = line.strip()
                     if stripped:
                         log.debug(f"[agy] {stripped[:500]}")
+                        if "trust the contents" in stripped.lower() or "trust this folder" in stripped.lower():
+                            try:
+                                child.sendline("")
+                            except Exception:
+                                pass
             except KeyboardInterrupt:
                 self._stopping = True
 
