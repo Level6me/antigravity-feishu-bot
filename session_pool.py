@@ -222,11 +222,43 @@ class PersistentSession:
         app_state.running_processes.pop(self.chat_id, None)
         if proc:
             try:
+                # Collect descendant pids to prevent orphaned commands (e.g. brew, shell tasks) from lingering
+                descendant_pids = []
+                try:
+                    out = subprocess.check_output(["pgrep", "-P", str(proc.pid)], text=True).strip()
+                    if out:
+                        for p in out.split():
+                            try:
+                                descendant_pids.append(int(p))
+                                sub_out = subprocess.check_output(["pgrep", "-P", p], text=True).strip()
+                                if sub_out:
+                                    descendant_pids.extend([int(sp) for sp in sub_out.split()])
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
                 if proc.returncode is None:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    except Exception:
+                        pass
+                    for d_pid in descendant_pids:
+                        try:
+                            os.kill(d_pid, signal.SIGTERM)
+                        except Exception:
+                            pass
                     await asyncio.sleep(0.2)
                 if proc.returncode is None:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except Exception:
+                        pass
+                    for d_pid in descendant_pids:
+                        try:
+                            os.kill(d_pid, signal.SIGKILL)
+                        except Exception:
+                            pass
             except Exception as e:
                 log.warning(f"[SessionPool] Error terminating process for {self.chat_id}: {e}")
 

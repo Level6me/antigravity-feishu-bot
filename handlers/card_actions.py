@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTrigger,
