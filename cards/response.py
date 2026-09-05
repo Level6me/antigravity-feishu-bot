@@ -4,6 +4,7 @@ import os
 import re
 from datetime import datetime
 from utils import get_context_usage_stats
+from utils.quota import is_quota_error
 
 from cards.common import create_footer
 
@@ -122,16 +123,49 @@ def build_ai_response(reply_text, choice_card_data=None, current_model="Default"
             "content": f"<font color='grey'>🤖 模型: {current_model} | 🗂️ 项目: {project_name_only} | {context_str}</font>"
         })
 
-    # 4. Standard Footer
+    # 4. Quota Actions
+    is_quota = is_quota_error(reply_text)
+    if is_quota:
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "action",
+            "layout": "bisect",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "📊 查看实时配额 (/quota)"},
+                    "type": "primary",
+                    "value": {"action": "user_choice", "choice": "/quota", "label": "查看实时配额"}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔄 一键切换模型 (/model)"},
+                    "type": "default",
+                    "value": {"action": "user_choice", "choice": "/model", "label": "一键切换模型"}
+                }
+            ]
+        })
+
+    # 5. Standard Footer
     elements.append(create_footer())
 
-    header_template = "red" if is_error else ("wathet" if is_streaming else "blue")
-    header_title = "❌ 发生错误" if is_error else ("✨ AI 回复中..." if is_streaming else "✨ AI 回复")
+    if is_quota:
+        header_template = "orange"
+        header_title = "⚠️ 模型额度已用尽"
+    elif is_error:
+        header_template = "red"
+        header_title = "❌ 发生错误"
+    elif is_streaming:
+        header_template = "wathet"
+        header_title = "✨ AI 回复中..."
+    else:
+        header_template = "blue"
+        header_title = "✨ AI 回复"
 
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "template": "blue" if not is_error else "red",
+            "template": header_template,
             "title": {"content": header_title, "tag": "plain_text"}
         },
         "elements": elements

@@ -10,12 +10,16 @@ TLS is verified by default. To allow self-signed local LSP certs set
 ANTIGRAVITY_QUOTA_INSECURE=true (Google API still verifies certs).
 """
 
+import asyncio
+from datetime import datetime, timezone
+import glob
 import json
 import os
 import re
 import ssl
 import subprocess
 import time
+from typing import Optional
 import urllib.request
 
 from config import get_antigravity_home, get_oauth_token_path
@@ -196,3 +200,182 @@ def fetch_quota():
         if data:
             return data
     return _fetch_remote_fallback()
+
+
+def format_duration(seconds: int) -> str:
+    """Format duration in seconds to Antigravity style 'XhXmXs' (e.g. 1h50m17s, 4h40m18s)."""
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    elif days > 0:
+        parts.append("0h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    elif hours > 0 or days > 0:
+        parts.append("0m")
+    parts.append(f"{secs}s")
+    return "".join(parts)
+
+
+def get_reset_duration_for_model(quota_data: Optional[dict], model_name: str = "") -> Optional[str]:
+    """Calculate soonest reset duration string for the given model from quota data."""
+    if not quota_data or "response" not in quota_data or "groups" not in quota_data["response"]:
+        return None
+
+    groups = quota_data["response"].get("groups", [])
+    model_lower = (model_name or "").lower()
+
+    target_groups = []
+    for g in groups:
+        d_name = g.get("displayName", "").lower()
+        desc = g.get("description", "").lower()
+        if "gemini" in model_lower:
+            if "gemini" in d_name or "gemini" in desc:
+                target_groups.append(g)
+        elif any(k in model_lower for k in ["claude", "gpt", "3p"]):
+            if any(k in d_name or k in desc for k in ["claude", "gpt", "3p"]):
+                target_groups.append(g)
+
+    if not target_groups:
+        target_groups = groups
+
+    now_utc = datetime.now(timezone.utc)
+    soonest_seconds = None
+
+    # Priority 1: buckets that are exhausted (remainingFraction <= 0.05)
+    exhausted_buckets = []
+    for g in target_groups:
+        for b in g.get("buckets", []):
+            if b.get("remainingFraction", 1.0) <= 0.05:
+                exhausted_buckets.append(b)
+
+    candidates = exhausted_buckets if exhausted_buckets else [b for g in target_groups for b in g.get("buckets", [])]
+
+    for b in candidates:
+        reset_time_str = b.get("resetTime")
+        if reset_time_str:
+            try:
+                dt = datetime.fromisoformat(reset_time_str.replace("Z", "+00:00"))
+                diff = int((dt - now_utc).total_seconds())
+                if diff > 0:
+                    if soonest_seconds is None or diff < soonest_seconds:
+                        soonest_seconds = diff
+            except Exception:
+                pass
+
+    if soonest_seconds is not None and soonest_seconds > 0:
+        return format_duration(soonest_seconds)
+    return None
+
+
+def is_quota_error(text: str) -> bool:
+    """Check if the text represents a quota exhaustion error."""
+    if not text:
+        return False
+    lower = text.lower()
+    quota_signatures = [
+        "individual quota reached",
+        "resource_exhausted",
+        "quota reached",
+        "quota exceeded",
+        "exceeded your current quota",
+        "rate limit exceeded",
+    ]
+    return any(sig in lower for sig in quota_signatures)
+
+
+def extract_quota_duration_from_text(text: str) -> Optional[str]:
+    """Extract 'Resets in X' from raw error text."""
+    if not text:
+        return None
+    m = re.search(r'Resets in\s+([0-9a-zA-Z]+)', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def check_latest_agy_log_for_quota_error(max_lines: int = 50) -> Optional[str]:
+    """Scan the tail of the latest agy CLI log file for quota errors."""
+    try:
+        log_dir = os.path.join(get_antigravity_home(), "log")
+        if not os.path.isdir(log_dir):
+            return None
+        files = glob.glob(os.path.join(log_dir, "*.log"))
+        if not files:
+            return None
+        latest_file = max(files, key=os.path.getmtime)
+        if time.time() - os.path.getmtime(latest_file) > 120:
+            return None
+        with open(latest_file, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+            for line in reversed(lines[-max_lines:]):
+                if is_quota_error(line):
+                    return line.strip()
+    except Exception as e:
+        log.warning(f"[quota] Failed to check latest agy log: {e}")
+    return None
+
+
+async def detect_and_format_quota_error(raw_text: str = "", model: str = "") -> Optional[str]:
+    """Detect if quota is exhausted and format standard Antigravity message.
+    Returns: '⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h50m17s.'
+    or None if not a quota error.
+    """
+    text_to_check = raw_text or ""
+    quota_detected = is_quota_error(text_to_check)
+    extracted_duration = extract_quota_duration_from_text(text_to_check)
+
+    # If duration not found yet, check latest agy log file
+    if not extracted_duration:
+        log_line = check_latest_agy_log_for_quota_error()
+        if log_line:
+            quota_detected = True
+            extracted_duration = extract_quota_duration_from_text(log_line)
+
+    # If still not detected or no duration, check live quota API
+    if not quota_detected:
+        try:
+            quota_data = await asyncio.get_running_loop().run_in_executor(None, fetch_quota)
+            if quota_data and "response" in quota_data and "groups" in quota_data["response"]:
+                groups = quota_data["response"].get("groups", [])
+                model_lower = (model or "").lower()
+                for g in groups:
+                    d_name = g.get("displayName", "").lower()
+                    desc = g.get("description", "").lower()
+                    match_group = False
+                    if "gemini" in model_lower and ("gemini" in d_name or "gemini" in desc):
+                        match_group = True
+                    elif any(k in model_lower for k in ["claude", "gpt", "3p"]) and any(k in d_name or k in desc for k in ["claude", "gpt", "3p"]):
+                        match_group = True
+                    elif not model_lower:
+                        match_group = True
+                    if match_group:
+                        for b in g.get("buckets", []):
+                            if b.get("remainingFraction", 1.0) <= 0.0:
+                                quota_detected = True
+                                break
+        except Exception as e:
+            log.warning(f"[quota] API check error: {e}")
+
+    if not quota_detected:
+        return None
+
+    # If duration is still missing, calculate it from quota API
+    if not extracted_duration:
+        try:
+            quota_data = await asyncio.get_running_loop().run_in_executor(None, fetch_quota)
+            extracted_duration = get_reset_duration_for_model(quota_data, model)
+        except Exception as e:
+            log.warning(f"[quota] duration calculation error: {e}")
+
+    if extracted_duration:
+        return f"⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in {extracted_duration}."
+    return "⚠ Individual quota reached. Please upgrade your subscription to increase your limits."
+

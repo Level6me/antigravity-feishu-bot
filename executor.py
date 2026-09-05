@@ -673,8 +673,10 @@ async def execute_antigravity(
             accumulated_text = ""
             stderr_text = ""
             stream_result_response = None
+            stream_error_msg = ""
             stream_action = ""
             stream_is_done = False
+            is_quota_exhausted = False
 
             def get_latest_transcript_file():
                 if session_data.get("conversation"):
@@ -752,14 +754,19 @@ async def execute_antigravity(
                                 await plugin_manager.dispatch_tool_call(stream_action, {})
                     elif event_type == "result":
                         res_obj = event_data.get("result", {})
-                        if res_obj.get("status") == "SUCCESS":
-                            stream_result_response = res_obj.get("response")
-                            stream_is_done = True
-                            log.info(f"[Executor] Model turn completed via stream result event.")
+                        if isinstance(res_obj, dict):
+                            if res_obj.get("status") == "SUCCESS":
+                                stream_result_response = res_obj.get("response")
+                                stream_is_done = True
+                                log.info(f"[Executor] Model turn completed via stream result event.")
+                            else:
+                                stream_error_msg = str(res_obj.get("error") or res_obj.get("message") or "")
+                                log.warning(f"[Executor] Model turn finished with status: {res_obj.get('status')}, error: {stream_error_msg}")
                         else:
-                            log.warning(f"[Executor] Model turn finished with status: {res_obj.get('status')}")
+                            log.warning(f"[Executor] Model turn finished with non-dict result: {res_obj}")
                         break
                     elif event_type in ["process_exit", "read_error"]:
+                        stream_error_msg = str(event_data.get("error") or "")
                         log.warning(f"[Executor] Stream ended prematurely with {event_type}: {event_data}")
                         break
                     elif event_type == "raw_log":
@@ -847,6 +854,11 @@ async def execute_antigravity(
                         )
             await turn_stream.aclose()
 
+            if hasattr(sess, "get_recent_stderr"):
+                recent_err = sess.get_recent_stderr().strip()
+                if recent_err:
+                    stderr_text = f"{stderr_text}\n{recent_err}".strip() if stderr_text else recent_err
+
             is_error = (process.returncode != 0 and process.returncode is not None)
             session_data["last_execution_error"] = is_error
 
@@ -860,21 +872,32 @@ async def execute_antigravity(
             else:
                 final_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
             
-            # 若提取最终回答失败且进程非正常退出（如 API 抖动 EOF、卡死强死、进程崩溃），且在允许重试范围内：
+            # 探测是否由于模型配额耗尽导致报错或无回答
+            from utils.quota import detect_and_format_quota_error
+            combined_err_text = f"{stream_error_msg}\n{stderr_text}\n{accumulated_text}".strip()
+            quota_err_reply = None
+            if not final_reply or final_reply == "Sorry, I couldn't generate a response.":
+                quota_err_reply = await detect_and_format_quota_error(combined_err_text, model=session_data.get("model", ""))
+                if quota_err_reply:
+                    is_quota_exhausted = True
+                    final_reply = quota_err_reply
+
+            # 若提取最终回答失败且进程非正常退出（如 API 抖动 EOF、卡死强死、进程崩溃），且非配额用尽，且在允许重试范围内：
             # 暂不向飞书推送报错卡片，直接返回 has_reply=False 触发自动重试机制！
-            if not final_reply and (process.returncode != 0 and process.returncode is not None) and attempt < 2:
+            if not is_quota_exhausted and not final_reply and (process.returncode != 0 and process.returncode is not None) and attempt < 2:
                 log.warning(f"[Executor] Attempt {attempt} failed without final response (returncode {process.returncode}). Bypassing error card send for auto-retry.")
-                return {"has_reply": False, "returncode": process.returncode, "is_error": True}
+                return {"has_reply": False, "returncode": process.returncode, "is_error": True, "is_quota_error": False}
             
             reply_text = final_reply or accumulated_text.strip() or ""
             reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
             reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
-            reply_text = extract_final_chinese_response(reply_text)
+            if not is_quota_exhausted:
+                reply_text = extract_final_chinese_response(reply_text)
 
             from plugin_manager import plugin_manager
             reply_text = await plugin_manager.dispatch_after_ai(reply_text, chat_id, session_data)
             
-            if transcript_path and os.path.exists(transcript_path):
+            if not is_quota_exhausted and transcript_path and os.path.exists(transcript_path):
                 try:
                     with open(transcript_path, 'r', encoding='utf-8') as f:
                         f.seek(initial_transcript_size)
@@ -906,8 +929,17 @@ async def execute_antigravity(
                     await _sync_conversation_id_from_log(log_file_path)
                 
                 is_error = False
+
             if not reply_text:
-                reply_text = stderr_text.strip() or "Sorry, I couldn't generate a response."
+                if not quota_err_reply:
+                    quota_err_reply = await detect_and_format_quota_error(combined_err_text, model=session_data.get("model", ""))
+                if quota_err_reply:
+                    reply_text = quota_err_reply
+                    is_quota_exhausted = True
+                else:
+                    reply_text = stderr_text.strip() or "⚠️ 模型未返回任何有效回复，请重试或更换模型。"
+                is_error = True
+            elif is_quota_exhausted:
                 is_error = True
             else:
                 approx_tokens = len(user_text) + len(reply_text)
@@ -979,7 +1011,7 @@ async def execute_antigravity(
                         label="final-card send to chat"
                     )
                 
-            return {"has_reply": bool(final_reply), "returncode": process.returncode, "is_error": is_error}
+            return {"has_reply": bool(final_reply), "returncode": process.returncode, "is_error": is_error, "is_quota_error": is_quota_exhausted}
         
         finally:
             if turn_stream is not None:
@@ -998,7 +1030,7 @@ async def execute_antigravity(
     MAX_ATTEMPTS = 2
     for attempt in range(1, MAX_ATTEMPTS + 1):
         res = await _run_single_attempt(attempt)
-        if res["has_reply"] or res["returncode"] == 0 or attempt == MAX_ATTEMPTS:
+        if res.get("is_quota_error") or res["has_reply"] or res["returncode"] == 0 or attempt == MAX_ATTEMPTS:
             return res["is_error"]
         log.warning(f"[Executor] Attempt {attempt}/{MAX_ATTEMPTS} failed/stalled without final response for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")
         await asyncio.sleep(1.0)
