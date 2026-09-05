@@ -41,7 +41,12 @@ class SystemUpdaterPlugin(BasePlugin):
                 custom_env["GIT_ASKPASS"] = "echo"
 
                 try:
-                    subprocess.run(["git", "stash"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
+                    status_res = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, timeout=10, env=custom_env, cwd=BASE_DIR)
+                    has_local_changes = bool(status_res.stdout.strip())
+                    stashed = False
+                    if has_local_changes:
+                        stash_res = subprocess.run(["git", "stash"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
+                        stashed = "Saved working directory" in (stash_res.stdout + stash_res.stderr)
 
                     try:
                         subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
@@ -51,12 +56,23 @@ class SystemUpdaterPlugin(BasePlugin):
                             raise
                         subprocess.run(["git", "pull", "--rebase", GITEE_MIRROR_URL, "main"], capture_output=True, text=True, check=True, timeout=30, env=custom_env, cwd=BASE_DIR)
 
-                    pop_res = subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
                     conflict_hint = ""
-                    if pop_res.returncode != 0:
-                        log.warning(f"git stash pop encountered conflicts: {pop_res.stderr}")
-                        subprocess.run(["git", "checkout", "--", "."], capture_output=True, text=True, check=False, timeout=10, env=custom_env, cwd=BASE_DIR)
-                        conflict_hint = "\n\n⚠️ 本地改动与更新存在冲突，已自动清理冲突标记以保证正常启动。"
+                    if stashed:
+                        pop_res = subprocess.run(["git", "stash", "pop"], capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR)
+                        if pop_res.returncode != 0:
+                            log.warning(f"git stash pop encountered conflicts: {pop_res.stderr}")
+                            subprocess.run(["git", "reset", "--hard", "HEAD"], capture_output=True, text=True, check=False, timeout=10, env=custom_env, cwd=BASE_DIR)
+                            subprocess.run(["git", "clean", "-fd"], capture_output=True, text=True, check=False, timeout=10, env=custom_env, cwd=BASE_DIR)
+                            conflict_hint = "\n\n⚠️ 本地改动与更新存在冲突，已自动恢复至最新干净版本以保证正常启动。"
+
+                    compile_res = subprocess.run(
+                        [sys.executable, "-m", "py_compile", "main.py", "executor.py"],
+                        capture_output=True, text=True, timeout=15, cwd=BASE_DIR
+                    )
+                    if compile_res.returncode != 0:
+                        log.error(f"py_compile failed after update: {compile_res.stderr}, resetting to HEAD")
+                        subprocess.run(["git", "reset", "--hard", "HEAD"], capture_output=True, text=True, check=False, timeout=10, env=custom_env, cwd=BASE_DIR)
+                        subprocess.run(["git", "clean", "-fd"], capture_output=True, text=True, check=False, timeout=10, env=custom_env, cwd=BASE_DIR)
 
                     pip_bin = os.path.join(BASE_DIR, "venv", "bin", "pip")
                     if os.path.exists(pip_bin):
