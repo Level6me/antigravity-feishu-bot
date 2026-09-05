@@ -77,7 +77,14 @@ class PersistentSession:
         self._closing = False
         self._decoder = codecs.getincrementaldecoder('utf-8')()
         self._line_buffer = ""
+        self._recent_stderr_buf = ""
         self._stderr_drain_task: Optional[asyncio.Task] = None
+
+    def get_recent_stderr(self) -> str:
+        return self._recent_stderr_buf
+
+    def clear_recent_stderr(self):
+        self._recent_stderr_buf = ""
 
     def is_alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
@@ -142,6 +149,7 @@ class PersistentSession:
         if not self.is_alive():
             await self.start()
 
+        self.clear_recent_stderr()
         self.last_active_time = time.time()
         req = json.dumps({"event": "user", "message": {"content": prompt_text}}) + "\n"
         self.process.stdin.write(req.encode("utf-8"))
@@ -191,16 +199,16 @@ class PersistentSession:
             await queue.put({"event": "read_error", "error": str(e)})
 
     async def _drain_stderr(self):
-        """Background task: continuously read and discard stderr to prevent pipe buffer deadlock."""
+        """Background task: continuously read and buffer stderr to prevent pipe buffer deadlock."""
         try:
             while self.process and self.process.returncode is None:
                 chunk = await self.process.stderr.read(4096)
                 if not chunk:
                     break
-                # Log first meaningful stderr for debugging, but don't accumulate
-                text = chunk.decode("utf-8", errors="replace").strip()
+                text = chunk.decode("utf-8", errors="replace")
                 if text:
-                    log.debug(f"[Session:{self.chat_id}] stderr: {text[:200]}")
+                    self._recent_stderr_buf = (self._recent_stderr_buf + text)[-32768:]
+                    log.debug(f"[Session:{self.chat_id}] stderr: {text[:200].strip()}")
         except asyncio.CancelledError:
             pass
         except Exception:
