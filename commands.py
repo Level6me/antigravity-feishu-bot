@@ -367,6 +367,19 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             session_data.pop("pending_command", None)
             await save_session_async(chat_id, session_data)
 
+            if not is_admin(chat_id):
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_reply_sdk(message_id, "🔒 仅管理员可执行插件安装。")
+                )
+                return True, user_text
+
+            # 校验 repo_url 防止非法参数注入
+            if repo_url.startswith("-"):
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_reply_sdk(message_id, "❌ **无效的仓库地址！**")
+                )
+                return True, user_text
+
             await asyncio.get_running_loop().run_in_executor(
                 None, lambda: send_reply_sdk(message_id, f"⬇️ 正在从 GitHub 克隆安装插件 `{repo_url}`，请稍候...")
             )
@@ -392,16 +405,27 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 
         elif pending_command == PendingCommand.PLUGIN_ADD_SOURCE.value:
             raw_input = user_text.strip()
-            import re
-            parts = [p.strip() for p in re.split(r'[|｜]', raw_input) if p.strip()]
             session_data.pop("pending_command", None)
             await save_session_async(chat_id, session_data)
+
+            if not is_admin(chat_id):
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_reply_sdk(message_id, "🔒 仅管理员可添加插件源。")
+                )
+                return True, user_text
+
+            import re
+            parts = [p.strip() for p in re.split(r'[|｜]', raw_input) if p.strip()]
 
             if len(parts) < 2:
                 reply_text = "❌ **格式错误！**\n请发送格式为 `源名称 | GitHub仓库URL [| 描述]` 的文本。"
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             else:
                 name, url = parts[0], parts[1]
+                if url.startswith("-"):
+                    reply_text = "❌ **无效的仓库地址！**"
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+                    return True, user_text
                 desc = parts[2] if len(parts) > 2 else ""
                 from plugin_store import add_plugin_source
                 add_plugin_source(name, url, desc)
@@ -430,7 +454,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             return await _handle_create_project(user_text, message_id, chat_id, session_data)
 
     # Dispatch command to loaded plugins (if not handling a pending_command response)
-    handled_by_plugin, override_txt = await plugin_manager.dispatch_command(user_text, message_id, chat_id, session_data)
+    res = await plugin_manager.dispatch_command(user_text, message_id, chat_id, session_data)
+    handled_by_plugin, override_txt = (res if isinstance(res, (tuple, list)) and len(res) == 2 else (bool(res), ""))
     if handled_by_plugin:
         return True, override_txt
 

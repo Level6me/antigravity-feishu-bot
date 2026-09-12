@@ -1,10 +1,12 @@
 """Inbound media/message content processors."""
 import os
 import re
+import asyncio
 
 from config import BASE_DIR
 from card_builder import CardBuilder
 from lark_client import send_interactive_card_sdk, download_message_resource_sdk
+from logger import log
 
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 
@@ -102,8 +104,11 @@ async def _process_file_audio_media_message(loop, message_id, message_type, cont
         
         os.makedirs(DOWNLOADS_DIR, exist_ok=True)
         output_filename = os.path.join(DOWNLOADS_DIR, file_name)
-        dl_card = CardBuilder.build_download_indicator(file_name, message_type)
-        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
+        if message_type == "audio":
+            init_card = CardBuilder.build_typing_indicator(is_voice=True)
+        else:
+            init_card = CardBuilder.build_download_indicator(file_name, message_type)
+        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, init_card))
 
         output_path = os.path.abspath(output_filename)
         download_success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, file_key, "file", output_path))
@@ -112,7 +117,25 @@ async def _process_file_audio_media_message(loop, message_id, message_type, cont
         if message_type == "file":
             user_text = f"请详细阅读这份文件（{file_name}），并做出响应。文件路径: {output_path}"
         elif message_type == "audio":
-            user_text = f"请仔细听这段语音内容（语音文件路径: {output_path}），并做出响应。"
+            from voice_service import transcribe_audio_file
+            try:
+                recognized_text = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: transcribe_audio_file(output_path)),
+                    timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                log.warning("[Audio] Voice recognition timed out (10s)")
+                recognized_text = ""
+            except Exception as e:
+                log.error(f"[Audio] Voice recognition exception: {e}")
+                recognized_text = ""
+
+            if recognized_text:
+                log.info(f"[Audio] Voice transcribed successfully: {recognized_text}")
+                user_text = recognized_text
+            else:
+                log.warning("[Audio] Voice recognition returned empty text")
+                user_text = "（收到一条语音消息，但未能清晰识别出具体内容）"
         elif message_type == "media":
             user_text = f"请仔细观看这段视频内容（视频文件路径: {output_path}），并做出响应。"
             
@@ -128,7 +151,7 @@ async def _process_batch_media_message(loop, message_id, content_json):
     dl_card = CardBuilder.build_download_indicator(f"合并批处理 ({len(items)} 个文件)", "多媒体组")
     bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
     
-    os.makedirs("downloads", exist_ok=True)
+    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     
     for idx, item in enumerate(items):
         m_type = item["message_type"]
@@ -150,7 +173,7 @@ async def _process_batch_media_message(loop, message_id, content_json):
             file_name = os.path.basename(file_name)
             
         if file_key:
-            output_path = os.path.abspath(os.path.join("downloads", file_name))
+            output_path = os.path.abspath(os.path.join(DOWNLOADS_DIR, file_name))
             success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(item["message_id"], file_key, "image" if m_type == "image" else "file", output_path))
             if success:
                 media_hints.append(f"{idx+1}. 多模态 {m_type.upper()} 文件路径: `{output_path}`")

@@ -104,14 +104,25 @@ def format_tool_action(tool_name: str = "", params: dict = None, raw_action: str
         act = act.replace('"', '').replace("'", "").strip()
         act = re.sub(r'[\r\n\t]+', ' ', act).strip()
         act = re.sub(r'\s+', ' ', act)
+        act = CardBuilder.translate_action_verb(act)
     else:
         act = ""
 
     # 如果有明确简短的描述且不是底层代码/命令
     if act and not any(act.startswith(p) for p in ["python", "timeout", "sh", "bash", "cat", "echo", "export"]):
+        action_verbs = ["连接", "下载", "检查", "分析", "生成", "写入", "查看", "搜索", "读取", "编辑", "查询", "汇总", "获取", "上传", "发送", "整理", "运行", "执行"]
         if len(act) <= 25:
-            return f"正在执行 {act}" if not act.startswith("正在") else act
-        return f"正在执行 {act[:22]}..." if not act.startswith("正在") else f"{act[:22]}..."
+            if act.startswith("正在"):
+                return act
+            if any(act.startswith(v) for v in action_verbs):
+                return f"正在{act}"
+            return f"正在执行 {act}"
+        brief = act[:22] + "..."
+        if brief.startswith("正在"):
+            return brief
+        if any(brief.startswith(v) for v in action_verbs):
+            return f"正在{brief}"
+        return f"正在执行 {brief}"
 
     # 2. 针对 run_command 提取精炼用途，严禁直接展示多行代码
     cmd = (params.get("CommandLine") or params.get("command") or "").strip()
@@ -191,7 +202,7 @@ def format_tool_action(tool_name: str = "", params: dict = None, raw_action: str
 
     return "正在执行操作"
 
-async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, think_seconds, feishu_call_fn, start_index=0):
+async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, think_seconds, feishu_call_fn, start_index=0, completed_steps_count=0, total_planned_steps=0, is_voice=False):
     """Fast stream full_text onto Feishu interactive card without artificial delay."""
     if not bot_reply_msg_id or not full_text:
         return
@@ -201,16 +212,20 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
         return
         
     remaining = total_len - start_index
-    # 若剩余字符较少或已完整生成，直接一次性 patch 完成
-    if remaining <= 400:
-        card = CardBuilder.build_streaming_indicator(full_text, tool_action=None, user_text=user_text, think_seconds=think_seconds)
-        await feishu_call_fn(
-            lambda: patch_interactive_card_sdk(bot_reply_msg_id, card),
-            label="typewriter patch fast"
-        )
-        return
+    if not is_voice:
+        # 文本模式：若剩余字符较少或已完整生成，直接一次性 patch 完成以保证极速响应
+        if remaining <= 1500:
+            card = CardBuilder.build_streaming_indicator(
+                full_text, tool_action=None, user_text=user_text, think_seconds=think_seconds,
+                completed_steps_count=completed_steps_count, total_planned_steps=total_planned_steps
+            )
+            await feishu_call_fn(
+                lambda: patch_interactive_card_sdk(bot_reply_msg_id, card),
+                label="typewriter patch fast"
+            )
+            return
         
-    chunk_size = 500
+    chunk_size = 28 if is_voice else 1500
     current_len = start_index
     while current_len < total_len:
         current_len += chunk_size
@@ -218,14 +233,18 @@ async def _stream_typewriter_to_feishu(bot_reply_msg_id, full_text, user_text, t
             current_len = total_len
             
         typed_part = full_text[:current_len]
-        card = CardBuilder.build_streaming_indicator(typed_part, tool_action=None, user_text=user_text, think_seconds=think_seconds)
+        card = CardBuilder.build_streaming_indicator(
+            typed_part, tool_action=None, user_text=user_text, think_seconds=think_seconds,
+            completed_steps_count=completed_steps_count, total_planned_steps=total_planned_steps
+        )
         
         await feishu_call_fn(
             lambda: patch_interactive_card_sdk(bot_reply_msg_id, card),
             label="typewriter patch"
         )
-        if current_len < total_len:
-            await asyncio.sleep(0.05)
+        if is_voice and current_len < total_len:
+            await asyncio.sleep(0.12)
+
 
 def parse_transcript_turn(transcript_path, initial_size=0):
     """
@@ -353,6 +372,11 @@ def extract_final_chinese_response(text):
     if not text:
         return ""
     
+    # 0. 优先彻底移除任务规划标签及其内容（支持已闭合与未闭合流式片段），防止后续小标题正则误匹配
+    text = re.sub(r'\[TASK_PLAN\].*?(?:\[/TASK_PLAN\]|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'\[TASK_[^\]]*\]?', '', text, flags=re.IGNORECASE).strip()
+    text = re.sub(r'\[/TASK_PLAN\]', '', text, flags=re.IGNORECASE).strip()
+
     # 1. 移除被 XML 标签包裹的思考过程与思维链，如 <thought>...</thought>, <thinking>...</thinking>, <think>...</think>
     text = re.sub(r'<(?:thought|thinking|think)>.*?</(?:thought|thinking|think)>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
     text = re.sub(r'^<(?:thought|thinking|think)>.*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
@@ -384,13 +408,17 @@ def extract_final_chinese_response(text):
     ).strip()
 
     # 6. 移除包含 Thinking Process, Thought:, Plan:, Thinking: 等小标题的说明段落
-    text = re.sub(r'(?:\*\*|\#\#?\s*)?(?:Thinking Process|Thought|Thinking|Plan|Reasoning)(?:\*\*|:)?.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'(?:\*\*|\#\#?\s*)?(?:Thinking Process|Thought|Thinking|\bPlan\b|Reasoning)(?:\*\*|:)?\s*.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
 
     # 7. 移除内部消息包装 (例如 [Message] timestamp=... content=...)
     text = re.sub(r'\[Message\]\s+timestamp=.*?content=.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL).strip()
 
     # 8. 清理残留的动态思考占位符
     text = re.sub(r'\*\(\s*(?:🧠|🔍|⚙️|💡|🚀)?\s*正在.*?\)\*', '', text).strip()
+
+    # 9. 再次清理任务规划标签防泄漏
+    text = re.sub(r'\[TASK_PLAN\].*?(?:\[/TASK_PLAN\]|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'\[TASK_[^\]]*\]?', '', text, flags=re.IGNORECASE).strip()
 
     return text
 
@@ -634,18 +662,31 @@ async def execute_antigravity(
             process = sess.process
             running_processes[chat_id] = process
             
+            planned_steps = []
+            current_plan_idx = 0
+            is_voice_message = bool(
+                task_meta and (
+                    task_meta.get("message_type") == "audio" or 
+                    task_meta.get("is_voice_message")
+                )
+            )
+
             if attempt == 1:
                 if is_resumed:
                     init_card = CardBuilder.build_typing_indicator(
                         downloaded_file_name, download_success,
-                        f"🔄 检测到服务刚完成重启，正在自动继续执行未完成的任务...\n\n{user_text}"
+                        f"🔄 检测到服务刚完成重启，正在自动继续执行未完成的任务...\n\n{user_text}",
+                        is_voice=is_voice_message
                     )
                 else:
-                    init_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text)
+                    init_card = CardBuilder.build_typing_indicator(
+                        downloaded_file_name, download_success, user_text, is_voice=is_voice_message
+                    )
             else:
                 init_card = CardBuilder.build_typing_indicator(
                     downloaded_file_name, download_success,
-                    f"🔄 首次发起因无响应挂死，正在自动为您重新发起第 {attempt}/2 次重试...\n\n{user_text}"
+                    f"🔄 首次发起因无响应挂死，正在自动为您重新发起第 {attempt}/2 次重试...\n\n{user_text}",
+                    is_voice=is_voice_message
                 )
 
             if bot_reply_msg_id:
@@ -706,6 +747,9 @@ async def execute_antigravity(
             last_cpu_check_time = 0
             is_cpu_busy = False
             last_tool_action = ""
+            completed_tool_steps = []
+            current_tool_action = ""
+            last_patched_card_sig = ""
             STALL_TIMEOUT = 300
             STALL_HARD_TIMEOUT = 600
             BASE_QUIET_WARNING_THRESHOLD = 120
@@ -714,14 +758,19 @@ async def execute_antigravity(
             turn_stream = await sess.send_prompt_and_stream(system_instruction + final_prompt)
 
             while True:
-                event_data = await turn_stream.get_event(timeout=0.3)
+                event_data = await turn_stream.get_event(timeout=0.2)
                 now = time.time()
 
-                if event_data:
+                events_to_process = [event_data] if event_data else []
+                if hasattr(turn_stream, "drain_all"):
+                    events_to_process.extend(turn_stream.drain_all())
+
+                should_break = False
+                for ev in events_to_process:
                     last_progress_time = now
-                    event_type = event_data.get("event")
+                    event_type = ev.get("event")
                     if event_type == "init":
-                        conv_id = event_data.get("conversation_id")
+                        conv_id = ev.get("conversation_id")
                         if conv_id:
                             from session_pool import session_pool
                             session_pool.update_conversation_id(chat_id, conv_id)
@@ -737,23 +786,49 @@ async def execute_antigravity(
                                     if initial_transcript_size == 0:
                                         initial_transcript_size = os.path.getsize(path)
                     elif event_type == "step_update":
-                        step_up = event_data.get("step_update", {})
+                        step_up = ev.get("step_update", {})
                         step_t = step_up.get("step_type")
                         if step_t == "agent_response":
                             delta = step_up.get("text_delta")
                             if delta:
                                 accumulated_text += delta
+                                parsed_steps = CardBuilder.parse_task_plan(accumulated_text)
+                                if parsed_steps and parsed_steps != planned_steps:
+                                    planned_steps = parsed_steps
+                                    current_plan_idx = min(current_plan_idx, len(planned_steps) - 1)
+                            if current_tool_action:
+                                if current_tool_action not in completed_tool_steps:
+                                    completed_tool_steps.append(current_tool_action)
+                                current_tool_action = ""
+                                stream_action = ""
                         elif step_t == "tool":
-                            t_name = step_up.get("tool_name") or ""
+                            t_name = step_up.get("tool_name") or step_up.get("name") or ""
                             t_info = step_up.get("tool_info", {})
-                            t_params = t_info.get("parameters", {}) if isinstance(t_info, dict) else {}
-                            stream_action = format_tool_action(t_name, t_params)
-                            if stream_action and stream_action != last_tool_action:
-                                last_tool_action = stream_action
+                            if not isinstance(t_info, dict):
+                                t_info = {}
+                            t_params = t_info.get("parameters") or t_info.get("args") or step_up.get("parameters") or step_up.get("args") or {}
+                            act = format_tool_action(t_name, t_params)
+                            if act:
+                                if current_tool_action and act != current_tool_action:
+                                    if current_tool_action not in completed_tool_steps:
+                                        completed_tool_steps.append(current_tool_action)
+                                current_tool_action = act
+                                stream_action = act
+                                last_tool_action = act
+                                if planned_steps:
+                                    current_plan_idx = CardBuilder.match_step_index(
+                                        planned_steps, current_plan_idx, act, len(completed_tool_steps)
+                                    )
                                 from plugin_manager import plugin_manager
-                                await plugin_manager.dispatch_tool_call(stream_action, {})
+                                await plugin_manager.dispatch_tool_call(act, {})
                     elif event_type == "result":
-                        res_obj = event_data.get("result", {})
+                        if current_tool_action:
+                            if current_tool_action not in completed_tool_steps:
+                                completed_tool_steps.append(current_tool_action)
+                            current_tool_action = ""
+                        if planned_steps:
+                            current_plan_idx = len(planned_steps) - 1
+                        res_obj = ev.get("result", {})
                         if isinstance(res_obj, dict):
                             if res_obj.get("status") == "SUCCESS":
                                 stream_result_response = res_obj.get("response")
@@ -764,13 +839,18 @@ async def execute_antigravity(
                                 log.warning(f"[Executor] Model turn finished with status: {res_obj.get('status')}, error: {stream_error_msg}")
                         else:
                             log.warning(f"[Executor] Model turn finished with non-dict result: {res_obj}")
+                        should_break = True
                         break
                     elif event_type in ["process_exit", "read_error"]:
-                        stream_error_msg = str(event_data.get("error") or "")
-                        log.warning(f"[Executor] Stream ended prematurely with {event_type}: {event_data}")
+                        stream_error_msg = str(ev.get("error") or "")
+                        log.warning(f"[Executor] Stream ended prematurely with {event_type}: {ev}")
+                        should_break = True
                         break
                     elif event_type == "raw_log":
-                        accumulated_text += event_data.get("text", "") + "\n"
+                        accumulated_text += ev.get("text", "") + "\n"
+
+                if should_break or stream_is_done:
+                    break
 
                 think_seconds = int(now - process_start_time)
                 stall_seconds = int(now - last_progress_time)
@@ -814,39 +894,81 @@ async def execute_antigravity(
                     session_data["last_execution_error"] = True
                     return {"has_reply": True, "reply_text": stderr_text, "is_error": True}
 
-                has_active_tool = bool(stream_action or last_tool_action)
+                has_active_tool = bool(current_tool_action or stream_action or last_tool_action or completed_tool_steps)
                 effective_warning_threshold = TOOL_QUIET_WARNING_THRESHOLD if has_active_tool else BASE_QUIET_WARNING_THRESHOLD
                 if now < extend_until:
                     effective_warning_threshold += 300
 
-                partial_text = None
+                clean_partial = ""
                 if accumulated_text and accumulated_text.strip():
-                    partial_text = extract_final_chinese_response(accumulated_text.strip())
+                    raw_extracted = extract_final_chinese_response(accumulated_text.strip())
+                    if raw_extracted:
+                        cp = re.sub(r'\[CHOICE_CARD\]\s*Q:.*?(?:\[/CHOICE_CARD\]|\Z)', '', raw_extracted, flags=re.DOTALL | re.IGNORECASE).strip()
+                        cp = re.sub(r'\[TASK_PLAN\].*?(?:\[/TASK_PLAN\]|\Z)', '', cp, flags=re.DOTALL | re.IGNORECASE).strip()
+                        cp = re.sub(r'\[TASK_[^\]]*\]?', '', cp).strip()
+                        clean_partial = cp.strip()
 
-                desired_patch_interval = 0.4
-                if partial_text and len(partial_text.strip()) > 0:
-                    clean_partial = re.sub(r'\[CHOICE_CARD\]\s*Q:.*?(?:\[/CHOICE_CARD\]|\Z)', '', partial_text, flags=re.DOTALL | re.IGNORECASE).strip()
-                    if not clean_partial:
-                        clean_partial = partial_text
-                    target_len = len(clean_partial)
-                    if last_streamed_length < target_len:
-                        last_streamed_length = min(target_len, last_streamed_length + 150)
-                    display_partial = clean_partial[:last_streamed_length]
-                    indicator_card = CardBuilder.build_streaming_indicator(display_partial, stream_action or last_tool_action, user_text, think_seconds)
-                    desired_patch_interval = 0.4
+                has_tool_in_flight = bool(current_tool_action or stream_action)
+                is_complex = bool(planned_steps or completed_tool_steps)
+
+                # 判定是否切换到打字机文本流式输出：
+                # 1. 如果工具正在执行中，绝对不切换，保持显示规划步骤/工具进度卡片；
+                # 2. 如果是纯问答无工具任务，只要有文本输出立即打字机流式呈现；
+                # 3. 如果是多步骤复杂任务，仅在所有工具执行完毕、且模型输出实质性总结文本（>=25字）时才切换至打字机
+                is_streaming_text = False
+                if clean_partial and not has_tool_in_flight:
+                    if is_voice_message:
+                        # 语音对话模式：流式生成期间不提前打字剧透，优先保证语音消息首先送达
+                        is_streaming_text = False
+                    elif not is_complex:
+                        is_streaming_text = True
+                    else:
+                        min_chars = 15 if (planned_steps and current_plan_idx >= len(planned_steps) - 1) else 25
+                        if len(clean_partial) >= min_chars:
+                            if planned_steps:
+                                current_plan_idx = len(planned_steps) - 1
+                            is_streaming_text = True
+
+                desired_patch_interval = 0.20
+                if is_streaming_text:
+                    display_partial = clean_partial
+                    last_streamed_length = len(clean_partial)
+                    indicator_card = CardBuilder.build_streaming_indicator(
+                        display_partial,
+                        None,
+                        user_text,
+                        think_seconds,
+                        completed_steps_count=len(completed_tool_steps),
+                        total_planned_steps=len(planned_steps) if planned_steps else 0
+                    )
+                    desired_patch_interval = 0.20
                 elif stall_seconds >= effective_warning_threshold and not is_cpu_busy:
                     indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
                     desired_patch_interval = 2.0
                 else:
-                    display_action = stream_action or last_tool_action
-                    if display_action:
-                        indicator_card = CardBuilder.build_tool_indicator(display_action, user_text, downloaded_file_name, download_success, think_seconds)
+                    active_action = current_tool_action or stream_action
+                    display_action = active_action or (last_tool_action if not planned_steps else "")
+                    if display_action or completed_tool_steps or planned_steps:
+                        indicator_card = CardBuilder.build_tool_indicator(
+                            display_action,
+                            user_text,
+                            downloaded_file_name,
+                            download_success,
+                            think_seconds,
+                            completed_steps=completed_tool_steps,
+                            planned_steps=planned_steps,
+                            current_step_idx=current_plan_idx
+                        )
                     else:
-                        indicator_card = CardBuilder.build_typing_indicator(downloaded_file_name, download_success, user_text, think_seconds)
-                    desired_patch_interval = 0.4
+                        indicator_card = CardBuilder.build_typing_indicator(
+                            downloaded_file_name, download_success, user_text, think_seconds, is_voice=is_voice_message
+                        )
+                    desired_patch_interval = 0.25
 
-                if time.time() - last_patch_time >= desired_patch_interval:
+                card_sig = str(indicator_card.get("elements", []))
+                if (card_sig != last_patched_card_sig) and (time.time() - last_patch_time >= desired_patch_interval):
                     last_patch_time = time.time()
+                    last_patched_card_sig = card_sig
                     if bot_reply_msg_id:
                         await _feishu_call(
                             lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
@@ -915,12 +1037,13 @@ async def execute_antigravity(
                 except Exception as e:
                     log.error(f"Failed to extract generated images from transcript: {e}")
             
+            if not is_quota_exhausted and reply_text:
                 active_project = session_data.get("project")
                 ws_root = session_data.get("workspace_root")
                 allowed_dirs = [active_project, ws_root]
                 
                 await _feishu_call(
-                    lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs),
+                    lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs, chat_id=chat_id),
                     timeout=120.0,
                     label="extract_and_upload_resources"
                 )
@@ -967,12 +1090,34 @@ async def execute_antigravity(
             if os.path.exists(log_file_path):
                 await _sync_conversation_id_from_log(log_file_path)
 
+            is_voice_message = bool(
+                task_meta and (
+                    task_meta.get("message_type") == "audio" or 
+                    task_meta.get("is_voice_message")
+                )
+            )
+            # 1. 优先生成并发送原生语音消息，确保语音条率先送达聊天窗口！
+            if is_voice_message and not is_error and reply_text:
+                try:
+                    from voice_service import send_native_voice_reply
+                    log.info("[Executor] Voice reply prioritized: generating and delivering audio message first...")
+                    await asyncio.wait_for(
+                        send_native_voice_reply(message_id, chat_id, reply_text, api_client),
+                        timeout=18.0
+                    )
+                except Exception as e:
+                    log.error(f"[Executor] Prioritized voice reply failed or timed out: {e}")
+
+            # 2. 语音消息已送达，紧接着让卡片启动打字机效果呈现完整文字
             if not is_error and bot_reply_msg_id and reply_text:
                 try:
-                    safe_start_index = min(last_streamed_length, len(reply_text))
+                    safe_start_index = 0 if is_voice_message else min(last_streamed_length, len(reply_text))
                     await _stream_typewriter_to_feishu(
                         bot_reply_msg_id, reply_text, user_text, think_seconds, _feishu_call,
-                        start_index=safe_start_index
+                        start_index=safe_start_index,
+                        completed_steps_count=len(completed_tool_steps),
+                        total_planned_steps=len(planned_steps) if planned_steps else 0,
+                        is_voice=is_voice_message
                     )
                 except Exception as e:
                     log.error(f"[Executor] Typewriter streaming failed: {e}")
@@ -1010,8 +1155,9 @@ async def execute_antigravity(
                         lambda: send_card_to_chat_sdk(chat_id, final_card),
                         label="final-card send to chat"
                     )
-                
+
             return {"has_reply": bool(final_reply), "returncode": process.returncode, "is_error": is_error, "is_quota_error": is_quota_exhausted}
+
         
         finally:
             if turn_stream is not None:
