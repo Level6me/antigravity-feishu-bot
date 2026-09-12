@@ -87,12 +87,13 @@
 
 ---
 
-## 五、优化建议与整改清单
+## 五、高风险项整改与落实清单
 
-| 优先级 | 涉及模块 | 现状与风险 | 推荐整改方案 |
-| :---: | :---: | :---: | :---: |
-| **高 (P1)** | `requirements.txt` | 遗漏 `SpeechRecognition` 库，新环境部署运行音频识别时将直接报错。 | 追加 `SpeechRecognition>=3.10.0` 至 `requirements.txt`。 |
-| **高 (P1)** | `database.py` | SQLite 连接超时使用默认 5.0 秒，多并发写入存在锁争用超时风险。 | `sqlite3.connect` 与 `aiosqlite.connect` 统一配置 `timeout=20.0`。 |
-| **中 (P2)** | `voice_service.py` | Google ASR 识别强依赖外网连通性，异常时仅记录日志返回空。 | 增加外网超时保护（5秒），在网络不可达时提供更友好的提示。 |
-| **中 (P2)** | 工作区管理 | `voice_service.py` 与 `send_to_feishu.py` 功能完整稳定但未纳入 Git 跟踪。 | 执行 `git add` 并创建结构化 Commit，纳入版本管理。 |
-| **低 (P3)** | `main.py` | 服务异常关闭时偶发 `/tmp/tts_*` 残留。 | 在 `main()` 初始化时添加历史临时文件清理钩子。 |
+| 优先级 | 涉及模块 | 风险诊断分析 | 整改落实方案 | 验证结果与状态 |
+| :---: | :---: | :---: | :---: | :---: |
+| **高 (P1)** | `requirements.txt` | 遗漏 `SpeechRecognition` 依赖库声明，新环境安装部署时语音识别 ASR 模块会直接崩溃报错。 | 追加 `SpeechRecognition>=3.10.0` 至 `requirements.txt` 并完成依赖环境全量同步。 | **✅ 已修复并验证**<br>环境实测 `pip install` 满足所有依赖，测试 ASR 导入与解析正常。 |
+| **高 (P1)** | `database.py` / `garbage_collection.py` | SQLite 数据库连接默认仅 5.0 秒超时，高并发写入、GC 备份或多会话排队时易触发 `database is locked`。 | 全局定义 `DB_TIMEOUT = 20.0`，在 `database.py`（同步与 aiosqlite）及 `garbage_collection.py` 中统一配置 20s 锁等待。 | **✅ 已修复并验证**<br>所有 SQLite 连接链路统一受控，消除并发写入超时风险。 |
+| **中 (P2)** | `voice_service.py` / `handlers/media.py` | Google ASR 依赖外网连通性，弱网环境下可能无限阻塞请求。 | 引入 `asyncio.wait_for(..., timeout=10.0)` 保护机制与优雅降级回退。 | **✅ 已修复并验证**<br>外网超时 10s 自动平稳回退并记录日志。 |
+| **中 (P2)** | `commands.py` | 项目创建 Git URL 未做连字符校验，存在命令参数注入（Flag Injection）隐患。 | 增加 `input_text.startswith("-")` 校验，拦截非法参数并提示错误。 | **✅ 已修复并验证**<br>阻断非法 flag 注入。 |
+| **中 (P2)** | 版本跟踪 | 新增核心文件未纳入版本控制，存在丢失与脱节风险。 | `voice_service.py` 与 `send_to_feishu.py` 已全量纳入 Git 跟踪并推送。 | **✅ 已修复并验证**<br>代码库版本状态完整一致。 |
+| **低 (P3)** | `main.py` | 服务异常退出时临时语音文件偶发残留。 | 在文件合成与转换流程中完善 `finally: os.remove(...)` 释放逻辑。 | **✅ 已优化** |

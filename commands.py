@@ -7,6 +7,10 @@ async def _execute_project_creation(input_text, ideal_path, parent_path, is_git_
     new_project_path = ideal_path
     
     if is_git_url:
+        if input_text.strip().startswith("-"):
+            reply_text = "❌ **无效的仓库地址！**"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, input_text
         reply_text = f"🔄 正在为您克隆 Git 仓库 `{input_text}`，请稍候..."
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         try:
