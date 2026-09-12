@@ -17,6 +17,13 @@ class CardBuilder:
     build_download_indicator = staticmethod(indicators.build_download_indicator)
     build_streaming_indicator = staticmethod(indicators.build_streaming_indicator)
     clean_action_text = staticmethod(indicators.clean_action_text)
+    format_step_item = staticmethod(indicators.format_step_item)
+    translate_action_verb = staticmethod(indicators.translate_action_verb)
+    is_complex_task = staticmethod(indicators.is_complex_task)
+    generate_task_plan = staticmethod(indicators.generate_task_plan)
+    parse_task_plan = staticmethod(indicators.parse_task_plan)
+    match_step_index = staticmethod(indicators.match_step_index)
+    build_planned_steps_indicator = staticmethod(indicators.build_planned_steps_indicator)
     build_stall_warning_card = staticmethod(indicators.build_stall_warning_card)
     build_stall_error_card = staticmethod(indicators.build_stall_error_card)
 

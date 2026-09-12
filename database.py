@@ -9,9 +9,10 @@ from logger import log
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "antigravity_bot.db")
+DB_TIMEOUT = 20.0
 
 def get_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=DB_TIMEOUT)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -151,7 +152,7 @@ from config import DEFAULT_MODEL
 
 async def get_session_async(chat_id):
     async with _get_session_lock(chat_id):
-        async with aiosqlite.connect(DB_FILE) as db:
+        async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
                 row = await cursor.fetchone()
@@ -164,12 +165,12 @@ async def get_session_async(chat_id):
 
 async def save_session_async(chat_id, data):
     async with _get_session_lock(chat_id):
-        async with aiosqlite.connect(DB_FILE) as db:
+        async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
             await db.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
             await db.commit()
 
 async def get_profile_async(user_id):
-    async with aiosqlite.connect(DB_FILE) as db:
+    async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute('SELECT data FROM user_profiles WHERE user_id = ?', (user_id,)) as cursor:
             row = await cursor.fetchone()
@@ -178,7 +179,7 @@ async def get_profile_async(user_id):
             return []
 
 async def save_profile_async(user_id, data):
-    async with aiosqlite.connect(DB_FILE) as db:
+    async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
         await db.execute('INSERT OR REPLACE INTO user_profiles (user_id, data) VALUES (?, ?)', (user_id, json.dumps(data)))
         await db.commit()
 

@@ -6,7 +6,8 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequest, ReplyMessageRequestBody, PatchMessageRequest,
     PatchMessageRequestBody, GetMessageResourceRequest, CreateMessageRequest,
     CreateMessageRequestBody, CreateMessageReactionRequest, GetChatRequest,
-    CreateMessageReactionRequestBody, Emoji, DeleteMessageReactionRequest
+    CreateMessageReactionRequestBody, Emoji, DeleteMessageReactionRequest,
+    CreateFileRequest, CreateFileRequestBody
 )
 from lark_oapi.api.contact.v3 import GetUserRequest
 from config import APP_ID, APP_SECRET
@@ -263,3 +264,144 @@ async def get_chat_name_async(chat_id):
 async def get_user_name_async(open_id):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: get_user_name_sdk(open_id))
+
+
+# ---------------------------------------------------------------------------
+# File & Voice transfer helpers using Lark OpenAPI
+# ---------------------------------------------------------------------------
+
+@with_retry(max_retries=2)
+def upload_file_sdk(file_path, file_type=None, duration_ms=None):
+    """上传本地文件到飞书，返回 file_key（失败返回 None）。
+    支持 file_type: 'stream', 'pdf', 'doc', 'xls', 'ppt', 'mp4', 'opus'
+    """
+    if not os.path.exists(file_path):
+        log.error(f"[upload_file_sdk] File not found: {file_path}")
+        return None
+
+    if not file_type:
+        ext = os.path.splitext(file_path)[1].lower()
+        ext_map = {
+            ".opus": "opus",
+            ".mp4": "mp4",
+            ".pdf": "pdf",
+            ".doc": "doc", ".docx": "doc",
+            ".xls": "xls", ".xlsx": "xls",
+            ".ppt": "ppt", ".pptx": "ppt"
+        }
+        file_type = ext_map.get(ext, "stream")
+
+    try:
+        with open(file_path, "rb") as f:
+            builder = CreateFileRequestBody.builder() \
+                .file_type(file_type) \
+                .file_name(os.path.basename(file_path)) \
+                .file(f)
+            if duration_ms is not None:
+                builder.duration(int(duration_ms))
+            req = CreateFileRequest.builder().request_body(builder.build()).build()
+            resp = api_client.im.v1.file.create(req)
+
+        if resp.code == 0:
+            data = json.loads(resp.raw.content).get("data", {})
+            return data.get("file_key")
+        log.error(f"[upload_file_sdk] Failed (code {resp.code}): {resp.msg}")
+        return None
+    except Exception as e:
+        log.error(f"[upload_file_sdk] Error: {e}")
+        return None
+
+
+@with_retry(max_retries=1)
+def send_file_to_chat_sdk(chat_id, file_key):
+    """向会话发送原生文件消息。"""
+    req = CreateMessageRequest.builder() \
+        .receive_id_type("chat_id") \
+        .request_body(CreateMessageRequestBody.builder()
+            .receive_id(chat_id)
+            .msg_type("file")
+            .content(json.dumps({"file_key": file_key}))
+            .build()) \
+        .build()
+    resp = api_client.im.v1.message.create(req)
+    if resp.code != 0:
+        log.error(f"[send_file_to_chat_sdk] Failed: {resp.msg}")
+        return False
+    return True
+
+
+@with_retry(max_retries=1)
+def reply_file_sdk(message_id, file_key):
+    """回复消息：发送原生文件卡片。"""
+    req = ReplyMessageRequest.builder() \
+        .message_id(message_id) \
+        .request_body(ReplyMessageRequestBody.builder()
+            .msg_type("file")
+            .content(json.dumps({"file_key": file_key}))
+            .build()) \
+        .build()
+    resp = api_client.im.v1.message.reply(req)
+    if resp.code != 0:
+        log.error(f"[reply_file_sdk] Failed: {resp.msg}")
+        return False
+    return True
+
+
+@with_retry(max_retries=1)
+def send_voice_to_chat_sdk(chat_id, file_key):
+    """向会话发送原生语音消息（可直接在聊天窗口播放的语音条）。"""
+    req = CreateMessageRequest.builder() \
+        .receive_id_type("chat_id") \
+        .request_body(CreateMessageRequestBody.builder()
+            .receive_id(chat_id)
+            .msg_type("audio")
+            .content(json.dumps({"file_key": file_key}))
+            .build()) \
+        .build()
+    resp = api_client.im.v1.message.create(req)
+    if resp.code != 0:
+        log.error(f"[send_voice_to_chat_sdk] Failed: {resp.msg}")
+        return False
+    return True
+
+
+@with_retry(max_retries=1)
+def reply_voice_sdk(message_id, file_key):
+    """回复消息：发送原生语音条消息（带波形与时长，点击直接播放）。"""
+    req = ReplyMessageRequest.builder() \
+        .message_id(message_id) \
+        .request_body(ReplyMessageRequestBody.builder()
+            .msg_type("audio")
+            .content(json.dumps({"file_key": file_key}))
+            .build()) \
+        .build()
+    resp = api_client.im.v1.message.reply(req)
+    if resp.code != 0:
+        log.error(f"[reply_voice_sdk] Failed: {resp.msg}")
+        return False
+    return True
+
+
+def send_local_file_to_chat(chat_id, file_path, file_type=None, caption=None, duration_ms=None):
+    """组合工具：直接上传本地文件并通过 Lark API 发送到指定会话。"""
+    file_key = upload_file_sdk(file_path, file_type=file_type, duration_ms=duration_ms)
+    if not file_key:
+        return False
+    is_audio = (file_type == "opus") or file_path.lower().endswith(".opus")
+    ok = send_voice_to_chat_sdk(chat_id, file_key) if is_audio else send_file_to_chat_sdk(chat_id, file_key)
+    if ok and caption:
+        send_text_to_chat_sdk(chat_id, caption)
+    return ok
+
+
+def send_local_file_as_reply(message_id, file_path, file_type=None, caption=None, duration_ms=None):
+    """组合工具：直接上传本地文件并通过 Lark API 回复指定消息。"""
+    file_key = upload_file_sdk(file_path, file_type=file_type, duration_ms=duration_ms)
+    if not file_key:
+        return False
+    is_audio = (file_type == "opus") or file_path.lower().endswith(".opus")
+    ok = reply_voice_sdk(message_id, file_key) if is_audio else reply_file_sdk(message_id, file_key)
+    if ok and caption:
+        send_reply_sdk(message_id, caption)
+    return ok
+

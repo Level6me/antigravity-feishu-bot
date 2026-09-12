@@ -55,6 +55,20 @@ class TurnEventStream:
         except asyncio.TimeoutError:
             return None
 
+    def drain_all(self) -> list[Dict[str, Any]]:
+        """Drain all currently available events in the queue non-blockingly."""
+        events = []
+        while not self.is_done and not self._queue.empty():
+            try:
+                ev = self._queue.get_nowait()
+                events.append(ev)
+                if ev.get("event") in ["result", "process_exit", "read_error"]:
+                    self.is_done = True
+                    break
+            except asyncio.QueueEmpty:
+                break
+        return events
+
     async def aclose(self):
         """Clean up the turn reader task if still active."""
         if not self._reader_task.done():

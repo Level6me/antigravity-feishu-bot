@@ -178,6 +178,38 @@ async def _process_single_task(chat_id, task):
         "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
     )
 
+    system_instruction += (
+        "[System Feishu Resource Delivery / 飞书文件传送规范]\n"
+        "1. 【严禁使用 antigravity 私自发文件】：严禁在 antigravity 中编写外部脚本、使用 curl 或 webhook 尝试私自向飞书发送文件。\n"
+        "2. 【统一使用飞书 Lark API 推送】：向用户提供文件时，请在最终回复中直接以标准 Markdown 链接输出该文件的本地绝对路径（例如 `[导出报告.xlsx](/path/to/file.xlsx)`、`📄 [文档.md](/path/to/doc.md)` 或 `[发送文件: script.py](/path/to/script.py)`）。\n"
+        "   请注意：用户在飞书客户端无法直接点击打开 Linux 本地磁盘路径，系统后台会自动拦截你链接的文件路径，统一使用飞书官方 Lark API（im.v1.file.create）将该文件原生推送到当前飞书会话中供用户点击预览与下载。\n"
+        "3. 【命令行工具支持】：如需在终端脚本中主动传送文件，可直接运行 `python3 send_to_feishu.py <文件路径>`，该脚本使用官方 Lark API 发送文件到当前会话。\n\n"
+    )
+
+    system_instruction += (
+        "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
+        "【必须执行】：只要你根据用户意图，判断当前任务需要调用工具执行操作（如读取或修改代码、执行终端命令、多步骤排错、数据查询分析、生成或导出文件等），你必须在调用任何工具之前，首先在回复的最开始输出一行结构化规划标签：\n"
+        "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | 步骤4名称 [/TASK_PLAN]\n"
+        "规则要求：\n"
+        "1. 规划必须由你基于对任务的真实理解量身定制（3~4步为宜），每一步需精炼并包含具体目标或涉及的关键文件/操作，切忌泛化套话；\n"
+        "2. 输出该行标签后立即调用首个工具开始执行，不要输出任何多余过渡句；\n"
+        "3. 前端界面会自动提取此标签并在飞书卡片中向用户展示步骤清单并逐项打勾 ✅。\n"
+        "（注意：如果是纯技术问答、概念解释、语法教学、闲聊等无需调用工具的任务，严禁输出 [TASK_PLAN]，直接自然回复即可）。\n\n"
+    )
+
+    system_instruction += (
+        "[System Autonomous Execution Directive / 自主执行决策规范]\n"
+        "当遇到需要执行终端命令、修改文件或面对多种技术路径时，请始终自主评估并采用最稳妥、最高效的最优方案直接调用工具执行，严禁主动提出多选方案（如方案一/二/三/四）让用户做选择题，严禁停下来等待用户确认。始终直接自主推进并交付最终结果！\n\n"
+    )
+
+    if task.get("message_type") == "audio" or task.get("is_voice_message"):
+        system_instruction += (
+            "[Voice Interaction Directive / 语音交互规范]\n"
+            "用户正在通过飞书原生语音与你对话。本系统会将你的文本回复自动合成为高拟真语音消息发送给用户。\n"
+            "请遵循口语化表达：语言自然生动、亲切凝练、避免输出冗长代码块或复杂大表格，重点结论口语化输出。\n\n"
+        )
+
+
     if is_complex_agent:
         # 复杂工程任务：注入全套安全防护与项目上下文
         system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
