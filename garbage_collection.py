@@ -22,7 +22,8 @@ def backup_database_if_due():
         return  # 当天已备份
 
     try:
-        conn = sqlite3.connect(DB_FILE)
+        from database import DB_TIMEOUT
+        conn = sqlite3.connect(DB_FILE, timeout=DB_TIMEOUT)
         try:
             conn.execute(f"VACUUM INTO '{target}'")
         finally:
