@@ -42,7 +42,35 @@ def _is_valid_url(url: str) -> bool:
         return True
     if "." in u and (":" in u or "/" in u):
         return True
-    return False
+def cleanup_orphan_timer_threads() -> int:
+    """扫描当前 Python 进程所有活动线程的调用栈，强制终结所有失控或历史残留的 _timer_worker 循环线程"""
+    import sys
+    killed = 0
+    try:
+        for tid, top_frame in list(sys._current_frames().items()):
+            f = top_frame
+            while f:
+                if f.f_code.co_name == "_timer_worker":
+                    evt = f.f_locals.get("evt")
+                    if isinstance(evt, threading.Event):
+                        try:
+                            evt.set()
+                            killed += 1
+                        except Exception:
+                            pass
+                    obj = f.f_locals.get("self")
+                    if obj and hasattr(obj, "stop_timer_event"):
+                        try:
+                            obj.stop_timer_event.set()
+                            obj.current_buzzer_mode = "idle"
+                        except Exception:
+                            pass
+                f = f.f_back
+    except Exception as e:
+        log.error(f"[BuzzerGuard] Error cleaning orphan timer threads: {e}")
+    if killed > 0:
+        log.info(f"[BuzzerGuard] 🛡️ 成功扫描并终止 {killed} 个失控的 _timer_worker 历史循环线程")
+    return killed
 
 
 class RpiGpioApiStatusPlugin(BasePlugin):
@@ -257,37 +285,6 @@ class RpiGpioApiStatusPlugin(BasePlugin):
     def stop_buzzer(self):
         """紧急停止蜂鸣器当前发声"""
         self._call_buzzer_api_async("/api/stop", {})
-
-def cleanup_orphan_timer_threads() -> int:
-    """扫描当前 Python 进程所有活动线程的调用栈，强制终结所有失控或历史残留的 _timer_worker 循环线程"""
-    import sys
-    killed = 0
-    try:
-        for tid, top_frame in list(sys._current_frames().items()):
-            f = top_frame
-            while f:
-                if f.f_code.co_name == "_timer_worker":
-                    evt = f.f_locals.get("evt")
-                    if isinstance(evt, threading.Event):
-                        try:
-                            evt.set()
-                            killed += 1
-                        except Exception:
-                            pass
-                    obj = f.f_locals.get("self")
-                    if obj and hasattr(obj, "stop_timer_event"):
-                        try:
-                            obj.stop_timer_event.set()
-                            obj.current_buzzer_mode = "idle"
-                        except Exception:
-                            pass
-                f = f.f_back
-    except Exception as e:
-        log.error(f"[BuzzerGuard] Error cleaning orphan timer threads: {e}")
-    if killed > 0:
-        log.info(f"[BuzzerGuard] 🛡️ 成功扫描并终止 {killed} 个失控的 _timer_worker 历史循环线程")
-    return killed
-
 
     # ==================== 循环提示音定时器引擎 ====================
 

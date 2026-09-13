@@ -2,6 +2,11 @@
   "enabled": true,
   "api_url": "http://127.0.0.1:8080",
   "api_token": "tok_98456ea9826d816b7a8198303823aa2f",
+  "buzzer_api_url": "http://127.0.0.1:8001",
+  "buzzer_api_token": "bz_live_7546eb23c0725692a2fa8cc3",
+  "buzzer_enabled": true,
+  "buzzer_volume": 1,
+  "buzzer_interval": 15,
   "auto_indicator_enabled": true,
   "success_duration_sec": 300
 }
