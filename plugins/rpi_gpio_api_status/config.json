@@ -8,5 +8,7 @@
   "buzzer_volume": 1,
   "buzzer_interval": 15,
   "auto_indicator_enabled": true,
-  "success_duration_sec": 300
+  "success_duration_sec": 300,
+  "startup_sound_enabled": true,
+  "startup_sound_melody": "mario_flag"
 }
