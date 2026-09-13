@@ -91,6 +91,13 @@ class SystemUpdaterPlugin(BasePlugin):
                     except Exception as ex:
                         log.error(f"Failed to write .update_pending.json: {ex}")
 
+                    buzzer_pending_file = os.path.join(BASE_DIR, ".update_buzzer_pending")
+                    try:
+                        with open(buzzer_pending_file, "w") as f:
+                            f.write("pending")
+                    except Exception as ex:
+                        log.error(f"Failed to write .update_buzzer_pending: {ex}")
+
                     reply_text = "🔄 系统升级就绪，正在触发自启进程，预计 3 秒后重新上线..." + conflict_hint
                     await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
 

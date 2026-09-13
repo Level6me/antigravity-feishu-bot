@@ -2,12 +2,34 @@
 
 import asyncio
 import os
-import subprocess
 import time
 from datetime import datetime
-from typing import Dict, Any, Tuple
+from typing import Tuple
 import urllib.request
 import json
+import sys
+import threading
+from logger import log
+
+# 自动自愈：当 executors 模块加载时，立即扫描并终止父进程内所有残留的孤儿 _timer_worker 循环发声线程
+try:
+    _killed_at_import = 0
+    for _tid, _top_frame in list(sys._current_frames().items()):
+        _f = _top_frame
+        while _f:
+            if _f.f_code.co_name == "_timer_worker":
+                _evt = _f.f_locals.get("evt")
+                if isinstance(_evt, threading.Event):
+                    try:
+                        _evt.set()
+                        _killed_at_import += 1
+                    except Exception:
+                        pass
+            _f = _f.f_back
+    if _killed_at_import > 0:
+        log.info(f"[executors] Terminated {_killed_at_import} orphan _timer_worker thread(s) on import.")
+except Exception as _e:
+    log.error(f"[executors] Error in import-time thread cleanup: {_e}")
 
 
 def build_reminder_card(task: dict) -> dict:
@@ -126,9 +148,36 @@ async def execute_task(task: dict, send_card_func=None) -> Tuple[bool, str, int]
     action_type = task.get("action_type", "reminder")
     prompt = task.get("prompt", "")
     command = task.get("command", "")
-    
-    is_success = True
-    result_text = ""
+    # 运行时兜底：扫描并清理进程内所有残留的孤儿 _timer_worker 循环发声线程
+    try:
+        _k = 0
+        for _tid, _top_frame in list(sys._current_frames().items()):
+            _f = _top_frame
+            while _f:
+                if _f.f_code.co_name == "_timer_worker":
+                    _evt = _f.f_locals.get("evt")
+                    if isinstance(_evt, threading.Event):
+                        try:
+                            _evt.set()
+                            _k += 1
+                        except Exception:
+                            pass
+                _f = _f.f_back
+        if _k > 0:
+            log.info(f"[executors] execute_task terminated {_k} orphan _timer_worker thread(s).")
+    except Exception as _e:
+        log.error(f"[executors] Error in execute_task thread cleanup: {_e}")
+
+    # 如果任务指令中包含 reload_plugins，执行热重载
+    if command == "sys_reload_plugins" or prompt == "sys_reload_plugins":
+        try:
+            from plugin_manager import plugin_manager
+            plugin_manager.reload_plugins()
+            log.info("[executors] execute_task successfully reloaded all plugins.")
+            return True, "sys_reload_plugins done", 0
+        except Exception as _e:
+            log.error(f"[executors] Failed to reload plugins: {_e}")
+            return False, str(_e), 0
 
     try:
         # 1. 提醒类任务

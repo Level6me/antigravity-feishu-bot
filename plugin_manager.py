@@ -196,6 +196,15 @@ class PluginManager:
                 except Exception as e:
                     log.error(f"[PluginManager] Error in plugin '{pid}' on_tool_call: {e}")
 
+    async def dispatch_task_stop(self, chat_id: str):
+        """Dispatch task cancellation/stop event to all active plugins."""
+        for pid, plugin in self.plugins.items():
+            if getattr(plugin, "enabled", True):
+                try:
+                    await plugin.on_task_stop(chat_id)
+                except Exception as e:
+                    log.error(f"[PluginManager] Error in plugin '{pid}' on_task_stop: {e}")
+
     def dispatch_service_restarting(self):
         """Sync dispatch service restarting event to all plugins."""
         for pid, plugin in self.plugins.items():

@@ -122,6 +122,11 @@ async def main():
                 with open(pending_file, "r") as f:
                     data = json.load(f)
                 os.remove(pending_file)
+                try:
+                    with open(os.path.join(BASE_DIR, ".update_buzzer_pending"), "w") as bf:
+                        bf.write("pending")
+                except Exception:
+                    pass
             except Exception as e:
                 log.error(f"Error reading .update_pending.json: {e}")
 
