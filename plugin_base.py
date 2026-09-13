@@ -56,6 +56,10 @@ class BasePlugin:
         """Hook called when AI executes a tool action during pipeline."""
         pass
 
+    async def on_task_stop(self, chat_id: str):
+        """Hook called when a running AI task is aborted, cancelled or stopped via /stop."""
+        pass
+
     def on_service_restarting(self):
         """Hook called when feishu-bot service is shutting down / restarting."""
         pass

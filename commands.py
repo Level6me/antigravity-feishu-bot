@@ -501,10 +501,22 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             if chat_workers and chat_id in chat_workers:
                 chat_workers[chat_id].cancel()
                 chat_workers.pop(chat_id, None)
+
+            # 触发所有插件的 on_task_stop 钩子，立即终止蜂鸣器循环音与报警
+            try:
+                from plugin_manager import plugin_manager
+                await plugin_manager.dispatch_task_stop(chat_id)
+            except Exception as ex:
+                log.error(f"[commands] Error dispatching task stop to plugins: {ex}")
                 
             reply_text = "🛑 当前任务已被紧急叫停，排队中的任务也已清空！"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         else:
+            try:
+                from plugin_manager import plugin_manager
+                await plugin_manager.dispatch_task_stop(chat_id)
+            except Exception:
+                pass
             reply_text = "ℹ️ 当前没有正在运行的任务。"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
@@ -811,7 +823,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
         return True, user_text
 
-    elif first_word in ["/plugin", "/plugins"]:
+    elif first_word in ["/plugin", "/plugins", "/pluginreload"]:
         if not is_admin(chat_id):
             await asyncio.get_running_loop().run_in_executor(
                 None, lambda: send_reply_sdk(message_id, "🔒 该命令仅管理员可用。")
@@ -819,7 +831,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             return True, user_text
         from plugin_manager import plugin_manager
         args = user_text[len(first_word):].strip()
-        if args == "reload":
+        if args == "reload" or first_word == "/pluginreload":
             plugin_manager.reload_plugins()
             await asyncio.get_running_loop().run_in_executor(
                 None, lambda: send_reply_sdk(message_id, "✅ 已成功热重载插件中心！")

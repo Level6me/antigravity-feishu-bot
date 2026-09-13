@@ -43,6 +43,11 @@ async def process_chat_queue(chat_id):
                     delete_pending_task(chat_id, created_at)
     except asyncio.CancelledError:
         log.info(f"Chat worker for {chat_id} was cancelled by /stop")
+        try:
+            from plugin_manager import plugin_manager
+            await plugin_manager.dispatch_task_stop(chat_id)
+        except Exception as e:
+            log.error(f"Error dispatching task stop on worker cancellation: {e}")
     finally:
         chat_workers.pop(chat_id, None)
         # 回收空闲的队列条目，防止 chat_queues 随 chat_id 数量单调增长
