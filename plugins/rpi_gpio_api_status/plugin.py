@@ -83,8 +83,10 @@ class RpiGpioApiStatusPlugin(BasePlugin):
         self.buzzer_api_url = DEFAULT_BUZZER_URL
         self.buzzer_api_token = DEFAULT_BUZZER_TOKEN
         self.buzzer_enabled = True
-        self.buzzer_volume = 10
+        self.buzzer_volume = 1
         self.buzzer_interval = 15
+        self.startup_sound_enabled = True
+        self.startup_sound_melody = "mario_flag"
         self.auto_indicator = True
         self.success_duration = 300
         self.current_state = "off"
@@ -115,8 +117,12 @@ class RpiGpioApiStatusPlugin(BasePlugin):
         self.buzzer_api_url = raw_buzzer_url
         self.buzzer_api_token = self.config_data.get("buzzer_api_token", DEFAULT_BUZZER_TOKEN)
         self.buzzer_enabled = self.config_data.get("buzzer_enabled", True)
-        self.buzzer_volume = int(self.config_data.get("buzzer_volume", 10))
+        self.buzzer_volume = int(self.config_data.get("buzzer_volume", 1))
         self.buzzer_interval = int(self.config_data.get("buzzer_interval", 15))
+
+        # 开机与重启提示音设置 (默认: 马里奥通关城堡升旗 mario_flag)
+        self.startup_sound_enabled = bool(self.config_data.get("startup_sound_enabled", True))
+        self.startup_sound_melody = str(self.config_data.get("startup_sound_melody", "mario_flag")).strip()
 
         # 自动联动与时长参数
         self.auto_indicator = self.config_data.get("auto_indicator_enabled", True)
@@ -134,16 +140,10 @@ class RpiGpioApiStatusPlugin(BasePlugin):
         # 初始化与重载时首先彻底清理历史残留的循环定时器线程
         cleanup_orphan_timer_threads()
 
-        log.info(f"[Plugin:{self.plugin_id}] Initialized: LED={self.api_url}, Buzzer={self.buzzer_api_url}")
+        log.info(f"[Plugin:{self.plugin_id}] Initialized: LED={self.api_url}, Buzzer={self.buzzer_api_url}, StartupSound={self.startup_sound_melody}({self.startup_sound_enabled})")
 
         # 检查是否刚完成 OTA /update 升级重启成功
-        self._check_and_trigger_update_success_sound()
-
-        # 开机自检完成指示灯
-        self.on_startup_complete()
-
-    def _check_and_trigger_update_success_sound(self):
-        """检查是否存在更新成功待播放标记，触发角色升级提示音 (level_up)"""
+        is_ota = False
         base_dir = os.path.abspath(os.path.join(self.plugin_dir, "..", ".."))
         flag_file = os.path.join(base_dir, ".update_buzzer_pending")
         if os.path.exists(flag_file):
@@ -151,12 +151,38 @@ class RpiGpioApiStatusPlugin(BasePlugin):
                 os.remove(flag_file)
             except Exception:
                 pass
-            log.info(f"[Plugin:{self.plugin_id}] 🔔 检测到核心系统 /update 升级成功重启，触发角色升级提示音 (level_up)！")
-            # 延时 1 秒等待系统与网络就绪后播放
-            def _play_delay():
-                time.sleep(1.0)
-                self.play_melody("level_up")
-            threading.Thread(target=_play_delay, daemon=True).start()
+            is_ota = True
+            log.info(f"[Plugin:{self.plugin_id}] 🔔 检测到核心系统 OTA 升级重启完成！")
+
+        # 触发启动/重启时的音画联动（开机自检绿灯闪烁 + 马里奥通关城堡升旗音效）
+        self._trigger_startup_sound_and_led(is_restart=is_ota)
+
+    def _trigger_startup_sound_and_led(self, is_restart: bool = False):
+        """服务启动或重启就绪时音画联动：开机自检快闪 + 马里奥通关城堡升旗号角 (Flagpole)"""
+        if not getattr(self, "enabled", True):
+            return
+
+        # 1. 立即触发硬件 LED 绿灯连续快闪 5 次开机自检
+        self.on_startup_complete()
+
+        # 2. 异步延时播放马里奥升旗提示音（延时 0.6s 等待网络与网关完全就绪）
+        if getattr(self, "buzzer_enabled", True) and getattr(self, "startup_sound_enabled", True):
+            melody = getattr(self, "startup_sound_melody", "mario_flag")
+            tag = "重启就绪" if is_restart else "服务启动"
+            log.info(f"[Plugin:{self.plugin_id}] 🚩 触发{tag}音效联动: 旋律={melody}")
+
+            def _sound_worker():
+                try:
+                    time.sleep(0.6)
+                    self.play_melody(melody)
+                    # 升旗号角播放时长约 3.6 秒，播放完毕后平稳切为就绪绿灯常亮
+                    time.sleep(3.6)
+                    if self.current_state == "startup_flashing_green":
+                        self.set_state_success()
+                except Exception as e:
+                    log.debug(f"[Plugin:{self.plugin_id}] 播放{tag}提示音异常: {e}")
+
+            threading.Thread(target=_sound_worker, daemon=True).start()
 
     def save_config_file(self, new_configs: dict):
         """保存配置到插件本地 config.json 并实时热更新内存属性"""
@@ -189,6 +215,10 @@ class RpiGpioApiStatusPlugin(BasePlugin):
             self.auto_indicator = bool(new_configs["auto_indicator_enabled"])
         if "success_duration_sec" in new_configs:
             self.success_duration = int(new_configs["success_duration_sec"])
+        if "startup_sound_enabled" in new_configs:
+            self.startup_sound_enabled = bool(new_configs["startup_sound_enabled"])
+        if "startup_sound_melody" in new_configs:
+            self.startup_sound_melody = str(new_configs["startup_sound_melody"]).strip()
 
         config_path = os.path.join(os.path.dirname(__file__), "config.json")
         try:
@@ -682,13 +712,15 @@ class RpiGpioApiStatusPlugin(BasePlugin):
 
         elif subcmd in ["upgrade", "levelup"]:
             self.play_melody("level_up")
-            self.send_reply_text(message_id, "🆙 正在播放【角色升级 (Level Up)】提示音！")
+        elif subcmd in ["mario", "flag"]:
+            self.on_startup_complete()
+            self.play_melody("mario_flag")
+            self.send_reply_text(message_id, "🚩 正在播放【马里奥通关城堡升旗 (Flagpole)】开机/重启提示音，并联动开机自检绿灯闪烁！")
             return True
 
         elif subcmd in ["startup", "check"]:
-            self.on_startup_complete()
-            self.play_melody("level_up")
-            self.send_reply_text(message_id, "🔄 已触发【开机自检】(绿灯连闪 5 次 + 角色升级音)")
+            self._trigger_startup_sound_and_led(is_restart=False)
+            self.send_reply_text(message_id, "🔄 已触发【开机/重启音画联动自检】(绿灯连续快闪 5 次 + 马里奥城堡通关升旗号角)")
             return True
 
         elif subcmd == "timer" and len(args_parts) >= 3:
@@ -714,7 +746,9 @@ class RpiGpioApiStatusPlugin(BasePlugin):
                 "• `/led` 或 `/light`：弹出重构后的交互式综合控制面板卡片\n"
                 "• `/led test`：测试 LED 网关与蜂鸣器双网关连通性与响应延迟\n"
                 "• `/led config`：进入交互式网关地址、Token 与音量配置面板\n"
-                "• `/led sound <name>`：试听提示音 (`level_up` / `beep` / `two_beeps` / `success` / `error`)\n"
+                "• `/led mario`：试听开机与重启提示音 (马里奥通关城堡升旗)\n"
+                "• `/led startup`：模拟服务启动/重启自检 (绿灯连闪 + 升旗号角)\n"
+                "• `/led sound <name>`：试听提示音 (`mario_flag` / `level_up` / `beep` / `two_beeps` / `success` / `error`)\n"
                 "• `/led thinking`：测试思考状态 (黄灯常亮 + 单哔)\n"
                 "• `/led breathing`：测试任务执行状态 (正弦呼吸 + 双哔)\n"
                 "• `/led success`：测试成功状态 (绿灯 + 成功音)\n"
@@ -847,6 +881,20 @@ class RpiGpioApiStatusPlugin(BasePlugin):
             snapshot = self._fetch_snapshot_sync()
             buzzer_snapshot = self._fetch_buzzer_status_sync()
             card = self.build_control_card(snapshot, buzzer_snapshot, view_mode="config")
+            patch_interactive_card_sdk(card_message_id, card)
+            return True
+
+        # 10.1 切换服务启动/重启开机升旗音效开关
+        elif act == "toggle_startup_sound":
+            curr = getattr(self, "startup_sound_enabled", True)
+            new_val = not curr
+            self.save_config_file({"startup_sound_enabled": new_val})
+            if new_val:
+                self.play_melody(getattr(self, "startup_sound_melody", "mario_flag"))
+            snapshot = self._fetch_snapshot_sync()
+            buzzer_snapshot = self._fetch_buzzer_status_sync()
+            status_text = "已开启 🟢 (马里奥升旗)" if new_val else "已停用 ⚪"
+            card = self.build_control_card(snapshot, buzzer_snapshot, view_mode="config", info_banner=f"✅ 开机与重启提示音效{status_text}")
             patch_interactive_card_sdk(card_message_id, card)
             return True
 
@@ -1036,6 +1084,7 @@ class RpiGpioApiStatusPlugin(BasePlugin):
                     "actions": [
                         {"tag": "button", "text": {"tag": "plain_text", "content": f"LED联动: {'🟢 开启' if self.auto_indicator else '⚪ 停用'}"}, "type": "primary" if self.auto_indicator else "default", "value": {"action": "toggle_auto_indicator"}},
                         {"tag": "button", "text": {"tag": "plain_text", "content": f"提示音: {buzzer_switch_text}"}, "type": "primary" if self.buzzer_enabled else "default", "value": {"action": "toggle_buzzer_enabled"}},
+                        {"tag": "button", "text": {"tag": "plain_text", "content": f"开机升旗音: {'🟢 开启' if getattr(self, 'startup_sound_enabled', True) else '⚪ 停用'}"}, "type": "primary" if getattr(self, 'startup_sound_enabled', True) else "default", "value": {"action": "toggle_startup_sound"}},
                         {"tag": "button", "text": {"tag": "plain_text", "content": f"{'✓ ' if self.buzzer_volume == 1 else ''}音量 1%"}, "type": "primary" if self.buzzer_volume == 1 else "default", "value": {"action": "set_buzzer_volume", "volume": 1}},
                         {"tag": "button", "text": {"tag": "plain_text", "content": f"{'✓ ' if self.buzzer_volume == 5 else ''}音量 5%"}, "type": "primary" if self.buzzer_volume == 5 else "default", "value": {"action": "set_buzzer_volume", "volume": 5}},
                         {"tag": "button", "text": {"tag": "plain_text", "content": f"{'✓ ' if self.buzzer_volume == 10 else ''}音量 10%"}, "type": "primary" if self.buzzer_volume == 10 else "default", "value": {"action": "set_buzzer_volume", "volume": 10}},
@@ -1105,7 +1154,8 @@ class RpiGpioApiStatusPlugin(BasePlugin):
                     "tag": "action",
                     "layout": "flow",
                     "actions": [
-                        {"tag": "button", "text": {"tag": "plain_text", "content": "🆙 角色升级"}, "type": "primary", "value": {"action": "play_buzzer_melody", "melody": "level_up"}},
+                        {"tag": "button", "text": {"tag": "plain_text", "content": "🚩 马里奥升旗"}, "type": "primary", "value": {"action": "play_buzzer_melody", "melody": "mario_flag"}},
+                        {"tag": "button", "text": {"tag": "plain_text", "content": "🆙 角色升级"}, "type": "default", "value": {"action": "play_buzzer_melody", "melody": "level_up"}},
                         {"tag": "button", "text": {"tag": "plain_text", "content": "🔔 单哔确认"}, "type": "default", "value": {"action": "play_buzzer_melody", "melody": "beep"}},
                         {"tag": "button", "text": {"tag": "plain_text", "content": "✌️ 双哔确认"}, "type": "default", "value": {"action": "play_buzzer_melody", "melody": "two_beeps"}},
                         {"tag": "button", "text": {"tag": "plain_text", "content": "✅ 操作成功"}, "type": "primary", "value": {"action": "play_buzzer_melody", "melody": "success"}},
