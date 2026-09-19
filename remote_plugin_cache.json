@@ -13,14 +13,15 @@
   },
   {
     "id": "cron_scheduler",
-    "name": "⏱️ 计划任务与定时调度插件",
-    "version": "2.0.0",
+    "name": "⏱️ 计划任务与后台常驻调度中心",
+    "version": "3.0.0",
     "author": "Antigravity",
-    "description": "基于 Cron 表达式与秒级倒计时的后台定时任务与巡检调度中心",
+    "description": "基于独立 PM2 守护引擎的高精度秒级倒计时、Cron 周期调度与 AI/运维巡检中心",
     "commands": [
       "/cron",
       "/schedule"
     ],
+    "daemon_script": "daemon.py",
     "enabled": true,
     "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
   },
@@ -59,9 +60,22 @@
     "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
   },
   {
+    "id": "passport_bridge",
+    "name": "📟 FoloToy AI Passport 硬件随身对讲与看板网关",
+    "version": "1.0.0",
+    "author": "Antigravity",
+    "description": "提供局域网全双工 WebSocket、UDP 服务自发现、双向语音对讲、声屏状态看板与飞书卡片联动中继",
+    "commands": [
+      "/passport",
+      "/hardware"
+    ],
+    "enabled": true,
+    "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
+  },
+  {
     "id": "rpi_gpio_api_status",
     "name": "🍓 树莓派 GPIO 状态灯指示 (API 网关版)",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "author": "Antigravity",
     "description": "基于 pi_led_api 集中式 HTTP 网关控制红绿黄三色 LED，实时联动 AI 思考、工具调用与任务完成状态，并提供飞书交互卡片",
     "commands": [
@@ -73,15 +87,15 @@
   },
   {
     "id": "rpi_gpio_status",
-    "name": "🍓 树莓派 GPIO 状态灯指示插件",
+    "name": "🍓 树莓派 GPIO 状态灯指示 (物理直驱版)",
     "version": "1.0.0",
     "author": "Antigravity",
-    "description": "通过树莓派 GPIO 引脚控制红绿黄三色 LED 灯，实时展现 AI 任务的就绪、运行中、成功及异常状态",
+    "description": "通过树莓派底层 GPIO 硬件直接驱动控制红绿黄三色 LED 灯",
     "commands": [
-      "/light",
-      "/led"
+      "/gpio_led",
+      "/rpi_gpio"
     ],
-    "enabled": true,
+    "enabled": false,
     "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
   },
   {
