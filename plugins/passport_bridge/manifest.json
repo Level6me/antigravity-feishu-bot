@@ -1,0 +1,9 @@
+{
+  "id": "passport_bridge",
+  "name": "📟 FoloToy AI Passport 硬件随身对讲与看板网关",
+  "version": "1.0.0",
+  "author": "Antigravity",
+  "description": "提供局域网全双工 WebSocket、UDP 服务自发现、双向语音对讲、声屏状态看板与飞书卡片联动中继",
+  "commands": ["/passport", "/hardware"],
+  "enabled": true
+}

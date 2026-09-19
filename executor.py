@@ -75,9 +75,9 @@ def _get_process_group_cpu_seconds(pid: int) -> float:
         except Exception:
             return 0.0
 
-def _is_process_group_active(pid: int) -> bool:
+def _is_process_group_active(pid: int, min_cpu_percent: float = 0.05) -> bool:
     """检测进程组是否有实际 CPU 活动（涵盖所有子进程/subagent）。
-    只要进程组中有任何进程在消耗 CPU（>1% 占比），就认定为活跃。"""
+    只有进程组中有实质性 CPU 消耗（>5% 占比，过滤 Go 运行时心跳或微小波动），才认定为活跃。"""
     if not pid:
         return False
     current_cputime = _get_process_group_cpu_seconds(pid)
@@ -88,7 +88,7 @@ def _is_process_group_active(pid: int) -> bool:
         cpu_delta = current_cputime - last_cputime
         _process_cpu_tracker[pid] = (now, current_cputime)
         if time_delta > 0:
-            return (cpu_delta / time_delta) > 0.01
+            return (cpu_delta / time_delta) > min_cpu_percent
     else:
         _process_cpu_tracker[pid] = (now, current_cputime)
     return False
@@ -863,8 +863,6 @@ async def execute_antigravity(
                     is_cpu_busy = await loop.run_in_executor(
                         None, lambda: _is_process_group_active(process.pid)
                     )
-                    if is_cpu_busy:
-                        last_progress_time = now
 
                 extend_until = app_state.extended_wait_chats.get(chat_id, 0)
                 effective_stall_timeout = STALL_TIMEOUT

@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "server_host": "0.0.0.0",
+  "server_port": 8765,
+  "udp_discovery_port": 8765,
+  "device_id": "passport_default",
+  "bound_chat_id": "",
+  "tts_voice": "zh-CN-XiaoxiaoNeural",
+  "tts_speed": "+10%",
+  "auto_card_to_feishu": true,
+  "dashboard_refresh_sec": 3
+}
