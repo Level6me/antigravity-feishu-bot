@@ -9,27 +9,11 @@ NetworkWS::NetworkWS()
       lastHeartbeat(0) {}
 
 void NetworkWS::init() {
-    connectWiFi();
+    // 采用 NVS 凭证优先与 SoftAP Web 配网管理器
+    bool connected = wifiMgr.init();
     udp.begin(UDP_DISCOVERY_PORT);
-}
-
-void NetworkWS::connectWiFi() {
-    log_i("Connecting to Wi-Fi SSID: %s", DEFAULT_WIFI_SSID);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(DEFAULT_WIFI_SSID, DEFAULT_WIFI_PASSWORD);
-
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-        delay(500);
-        attempts++;
-        Serial.print(".");
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        log_i("\nWi-Fi connected! IP: %s", WiFi.localIP().toString().c_str());
+    if (connected) {
         discoverServer();
-    } else {
-        log_w("\nWi-Fi connection failed or not set. Running in AP discovery mode.");
     }
 }
 
@@ -81,13 +65,14 @@ void NetworkWS::onWsEvent(WStype_t type, uint8_t * payload, size_t length) {
             wsConnected = true;
             log_i("[WS] Connected to %s", (char*)payload);
             ui.setState(UI_STATE_DASHBOARD);
+            audio.playTone(TONE_CONNECTED);
             
             // 发送登记握手包
             {
                 JsonDocument doc;
                 doc["type"] = "handshake";
                 doc["device_id"] = "passport_c3";
-                doc["version"] = "1.0.0";
+                doc["version"] = "1.2.0";
                 String out;
                 serializeJson(doc, out);
                 wsClient.sendTXT(out);
@@ -150,7 +135,40 @@ void NetworkWS::handleTextMessage(const char* jsonText) {
         const char* title = doc["title"] | "通知";
         const char* content = doc["content"] | "";
         const char* level = doc["level"] | "warning";
+        audio.playTone(TONE_ALERT);
         ui.showAlert(String(title), String(content), String(level));
+    }
+    else if (strcmp(type, "confirm_request") == 0) {
+        // 物理 2FA 高危二次确认弹窗
+        const char* actionId = doc["action_id"] | "unknown";
+        const char* title = doc["title"] | "高危指令确认";
+        const char* details = doc["details"] | "需物理按键确认批准";
+        audio.playTone(TONE_ALERT);
+        ui.show2FA(String(actionId), String(title), String(details));
+    }
+    else if (strcmp(type, "ota_update") == 0) {
+        const char* url = doc["url"] | "";
+        if (url && strlen(url) > 0) {
+            startOTA(String(url));
+        }
+    }
+    else if (strcmp(type, "find_device") == 0) {
+        // 飞书寻机指令触发
+        ui.triggerFindAlert();
+    }
+    else if (strcmp(type, "weather_sync") == 0) {
+        // 局域网天气与温湿度同步
+        const char* w = doc["weather"] | "SUNNY";
+        const char* temp = doc["temp"] | "24C";
+        const char* aqi = doc["aqi"] | "AQI 32";
+        ui.updateWeather(String(w), String(temp), String(aqi));
+    }
+    else if (strcmp(type, "meeting_alert") == 0) {
+        // 飞书日历会议到期提前提醒
+        const char* title = doc["title"] | "飞书会议";
+        const char* timeStr = doc["time"] | "5分钟后开始";
+        audio.playTone(TONE_ALERT);
+        ui.showAlert("📅 会议提醒", String(title) + "\n" + String(timeStr), "warning");
     }
 }
 
@@ -180,11 +198,67 @@ void NetworkWS::sendAudioChunk(const uint8_t* data, size_t len) {
     wsClient.sendBIN(data, len);
 }
 
+// 语音打断通知 (Barge-in)
+void NetworkWS::sendInterrupt() {
+    if (!wsConnected) return;
+    wsClient.sendTXT("{\"type\":\"interrupt\"}");
+    log_i("[WS] Sent voice interrupt (barge-in) signal to server");
+}
+
+// 物理 2FA 确认或拒绝上报
+void NetworkWS::send2FAResponse(const String& actionId, const String& result) {
+    if (!wsConnected) return;
+    JsonDocument doc;
+    doc["type"] = "confirm_response";
+    doc["action_id"] = actionId;
+    doc["result"] = result;
+    String out;
+    serializeJson(doc, out);
+    wsClient.sendTXT(out);
+    log_i("[WS] Sent 2FA response: id=%s, result=%s", actionId.c_str(), result.c_str());
+}
+
+// 局域网 OTA 无线升级
+void NetworkWS::startOTA(const String& url) {
+    log_i("[OTA] Starting OTA wireless upgrade from: %s", url.c_str());
+    wsClient.disconnect();
+    ui.showOTAProgress(0);
+
+    WiFiClient client;
+    httpUpdate.setLedPin(-1);
+    
+    Update.onProgress([](size_t current, size_t total) {
+        if (total > 0) {
+            int pct = (current * 100) / total;
+            ui.showOTAProgress(pct);
+        }
+    });
+
+    t_httpUpdate_return ret = httpUpdate.update(client, url);
+    switch (ret) {
+        case HTTP_UPDATE_FAILED:
+            log_e("[OTA] Update failed! Error (%d): %s", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+            ui.showAlert("OTA 升级失败", httpUpdate.getLastErrorString(), "danger");
+            break;
+        case HTTP_UPDATE_NO_UPDATES:
+            log_w("[OTA] No updates available");
+            break;
+        case HTTP_UPDATE_OK:
+            log_i("[OTA] Update successfully finished! Rebooting...");
+            ui.showAlert("OTA 升级成功", "固件校验通过，正在重启生效...", "info");
+            delay(1000);
+            ESP.restart();
+            break;
+    }
+}
+
 bool NetworkWS::isConnected() {
     return wsConnected;
 }
 
 void NetworkWS::loop() {
+    wifiMgr.loop();
+
     if (WiFi.status() == WL_CONNECTED) {
         if (!wsConnected) {
             unsigned long now = millis();

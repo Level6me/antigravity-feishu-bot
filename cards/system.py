@@ -168,6 +168,7 @@ def build_help_card():
             "content": (
                 "⚡ **系统管理与防护：**\n"
                 "• `/stop` : 紧急刹车！强行中止后台正在运行的大模型耗时任务\n"
+                "• `/typesafe` : 查看 TypeSafe AI (System One Jev) 决策网关与安全门禁状态\n"
                 "• `/update` : 检查并热升级云端最新版本的机器人引擎核心\n"
                 "• `/help` : 显示此交互式帮助卡片"
             )

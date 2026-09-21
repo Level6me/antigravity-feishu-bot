@@ -8,5 +8,23 @@
   "tts_voice": "zh-CN-XiaoxiaoNeural",
   "tts_speed": "+10%",
   "auto_card_to_feishu": true,
-  "dashboard_refresh_sec": 3
+  "dashboard_refresh_sec": 3,
+  "macro_bindings": {
+    "ok_double_click": {
+      "action": "feishu_checkin",
+      "description": "飞书快捷签到打卡",
+      "notify_feishu": true
+    },
+    "up_double_click": {
+      "action": "git_status_check",
+      "description": "当前工程 Git 状态巡检",
+      "notify_feishu": true
+    },
+    "down_double_click": {
+      "action": "custom_script",
+      "description": "工位安全防窥 / 自定义执行宏",
+      "command": "echo '工位防窥模式已激活' && date",
+      "notify_feishu": true
+    }
+  }
 }

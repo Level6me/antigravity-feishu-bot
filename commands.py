@@ -228,6 +228,8 @@ class PendingCommand(str, Enum):
     CRON_ADD = "cron_add"
     PLUGIN_INSTALL_GITHUB = "plugin_install_github"
     PLUGIN_ADD_SOURCE = "plugin_add_source"
+    TYPESAFE_SET_KEY = "typesafe_set_key"
+    TYPESAFE_SET_BASE_URL = "typesafe_set_base_url"
 
 async def handle_slash_command(user_text, message_id, chat_id, session_data, running_processes, chat_queues, chat_workers=None):
     log.info(f"handle_slash_command call: user_text='{user_text}', pending_command='{session_data.get('pending_command')}'")
@@ -456,6 +458,42 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             
         elif pending_command == PendingCommand.CREATE_PROJECT.value:
             return await _handle_create_project(user_text, message_id, chat_id, session_data)
+
+        elif pending_command == PendingCommand.TYPESAFE_SET_KEY.value:
+            new_key = user_text.strip()
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            from typesafe_gate import update_typesafe_env
+            cfg = update_typesafe_env(api_key=new_key)
+            card = CardBuilder.build_typesafe_config_card(
+                api_key=cfg["api_key"],
+                enabled=cfg["enabled"],
+                model=cfg["model"],
+                base_url=cfg["base_url"]
+            )
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_interactive_card_sdk(message_id, card)
+            )
+            return True, user_text
+
+        elif pending_command == PendingCommand.TYPESAFE_SET_BASE_URL.value:
+            new_url = user_text.strip()
+            if new_url.lower() in ["clear", "reset", "default", "默认", "官方"]:
+                new_url = ""
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            from typesafe_gate import update_typesafe_env
+            cfg = update_typesafe_env(base_url=new_url)
+            card = CardBuilder.build_typesafe_config_card(
+                api_key=cfg["api_key"],
+                enabled=cfg["enabled"],
+                model=cfg["model"],
+                base_url=cfg["base_url"]
+            )
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_interactive_card_sdk(message_id, card)
+            )
+            return True, user_text
 
     # Dispatch command to loaded plugins (if not handling a pending_command response)
     res = await plugin_manager.dispatch_command(user_text, message_id, chat_id, session_data)
@@ -842,6 +880,18 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             await asyncio.get_running_loop().run_in_executor(
                 None, lambda: send_interactive_card_sdk(message_id, card)
             )
+        return True, user_text
+
+    elif first_word in ["/typesafe", "/ts"]:
+        from typesafe_gate import get_typesafe_config_state
+        cfg = get_typesafe_config_state()
+        ts_card = CardBuilder.build_typesafe_config_card(
+            api_key=cfg["api_key"],
+            enabled=cfg["enabled"],
+            model=cfg["model"],
+            base_url=cfg["base_url"]
+        )
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, ts_card))
         return True, user_text
 
     # Dispatch command to plugin manager

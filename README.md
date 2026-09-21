@@ -1,6 +1,51 @@
-# Antigravity Feishu Bot
+# 🚀 Antigravity Feishu Bot
 
-基于飞书原生 WebSocket 与本地 `antigravity`（`agy`）引擎的智能助手：在飞书里远程驱动本机做代码读写、终端执行、多模态解析与项目管理。
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10+-brightgreen?style=flat-square" alt="Python">
+  <img src="https://img.shields.io/badge/Feishu-WebSocket%20Lark%20OAPI-orange?style=flat-square" alt="Feishu">
+  <img src="https://img.shields.io/badge/Engine-Google%20Antigravity%20(agy)-purple?style=flat-square" alt="Antigravity">
+  <img src="https://img.shields.io/badge/Gateway-TypeSafe%20AI%20(Jev)-teal?style=flat-square" alt="TypeSafe AI">
+  <img src="https://img.shields.io/badge/Process-PM2%20%7C%20Docker-blueviolet?style=flat-square" alt="PM2">
+</p>
+
+基于飞书原生 WebSocket 长连接与宿主机 `antigravity`（`agy`）核心引擎，深度融合 **TypeSafe AI (System One Jev)** 毫秒级决策网关的企业级智能研发助手。
+
+无需公网 IP 或 Webhook 回调地址，在飞书内即可直接远程驱动服务器完成全栈代码读写、智能终端命令执行、多模态音视频深度解析、实时交互卡片流转与任务规划自动化执行。
+
+---
+
+## 🌟 核心特性与技术亮点
+
+### 🧠 1. TypeSafe AI (System One Jev) 毫秒级智能安全路由网关
+- **前置智能安全防御（Safety Gate）**：基于 Jev 结构化判断模型，在任何指令到达宿主机大模型执行引擎前进行安全与合规检测，实时拦截 Prompt 注入、角色越狱、提权攻击以及恶意的系统级破坏指令（如越权删除、格式化磁盘等）。
+- **结构化意图与复杂度度量（Intent & Complexity Routing）**：毫秒级并行输出分类意图、置信度与连续复杂度数值（`complexity_score` 与 `needs_terminal` 标记），动态隔离轻量对话与重型工程任务。
+- **高频场景极速 Fast-Path（< 200ms 秒回）**：
+  - 针对服务器健康监控（`server_health`）、备忘笔记（`notes`）、定时任务计划（`cron`）、网关配置（`typesafe_status`）等高频意图，网关直接命中 Fast-Path 并在本地秒级回传交互卡片，彻底免除等待大模型生成的数秒延迟与 Token 开销。
+- **动态约束与任务规划流转（Task Planning Directive）**：
+  - 对高置信度工程任务自动注入 `[TASK_PLAN]` 步骤流转并在飞书卡片中实时打勾 ✅。
+  - 注入**自主执行防选择题准则**：遇到多技术分支时由 Agent 自动评估并选取最优方案推进，严禁向用户输出无意义的选择题。
+  - 对轻量纯文本咨询模式禁用一切终端与文件写入工具，保障安全与极速响应。
+- **无感静默降级（Zero-Overhead Fallback）**：未配置 Key 或网络不可达时，自动短路无缝降级为纯本地内存级启发式规则引擎（耗时仅 **~0.05ms**，零性能损耗）。
+
+### 🎛️ 2. 全新飞书原生交互式配置控制台 (`/typesafe`)
+- 飞书聊天框内直接发送 `/typesafe` 或 `/ts`，唤起原生配置卡片。
+- **在线 Ping 连通性测试**：实时探测 TypeSafe API 连接状态、往返延迟与模型名称。
+- **一键切换模型与开关**：支持在卡片中即时切换 `jev-latest` / `jev-preview`，一键开启或暂停网关。
+- **交互式 Key 录入与清除**：支持在飞书端安全交互式输入或清除 `TYPESAFE_API_KEY`，并自动热同步持久化至服务器 `.env` 文件。
+
+### 🖥️ 3. 本地全栈开发与执行引擎
+- **宿主机直驱**：依托本机 `agy` 引擎，支持在宿主机目录读写源码、安装依赖、调试构建与执行 Shell 脚本。
+- **项目工作区隔离**：`/project` 呼出可视化项目管理器，支持多目录快速切换、新建工程空间、或直接输入 Git 仓库地址自动 Clone 并在飞书里即刻开发。
+- **生成物智能捕获回传**：自动嗅探模型在执行过程中生成的图片、数据图表、Word、Excel、PDF 及压缩包，自动通过飞书富媒体通道安全回传。
+
+### 💬 4. 原生卡片流转与异步会话管理
+- **动态流转卡片**：从任务排队、资源加载、思考推理、步骤规划打勾、工具执行耗时追踪到最终交付，全生命周期原地刷新（In-place Patch）。
+- **会话独立排队**：按 `chat_id` 维护独立异步任务队列，避免并发冲突；支持 `/stop` 随时紧急熔断中断任务。
+- **上下文预热池（Prewarm Pool）**：内置会话预热守护机制，大幅削减大模型 CLI 初始化冷启动延迟。
+
+### 🎙️ 5. 多模态与语音双向交互
+- **全格式下行多模态**：支持直接向机器人发送图片、PDF、Word 文档、代码文件、短视频或音频条，自动抽取并提供上下文分析。
+- **原生双向语音**：用户发送飞书语音条时，系统自动识别转写、执行推理，并使用 Edge-TTS 实时回传生动自然的口语化语音答复。
 
 ---
 
@@ -16,227 +61,242 @@
 
 ---
 
-## 🌟 核心功能
+## ⌨️ 完整 Slash 指令列表
 
-### 交互体验
-- 飞书 Interactive Card 状态流转（资源加载 / 工具执行 / 思考中 / 最终回复）
-- 卡片原生按钮：切模型、选项目、确认升级、笔记与偏好管理
-- 按 `chat_id` 异步排队，忙时入队而不是直接拒绝
-
-### 本地执行引擎
-- 读写宿主机文件、执行 Shell（由本机 `agy` 驱动）
-- 工作区绑定：`/project` 设定活跃目录
-- 生成物自动回传（图片 / 附件，路径白名单校验）
-
-### 多模态
-- 支持图片、Word / PDF / 文本、音视频等下行解析
-- 上行自动捕获 transcript 中的本地产物并回传到飞书
-
-### 运维
-- `install.sh` 一键安装 / 升级 / 卸载（PM2）
-- `/update` OTA 热升级
-- SQLite 持久化会话与用户偏好
-- Docker / Compose 可选部署
-
----
-
-## ⌨️ Slash 指令（与代码一致）
-
-| 指令 | 说明 |
-|------|------|
-| `/help` | 交互式帮助与快捷按钮 |
-| `/auth` | 未授权会话向管理员申请使用权限 |
-| `/user` | 管理员管理用户/群（面板 + grant/revoke/ban/promote 等子命令） |
-| `/model` | 弹出模型切换面板 |
-| `/project` | 项目管理器（切换 / 新建 / 设置根目录） |
-| `/note` | 记事本（`/note add`、`/note del`、`/notes`） |
-| `/memory` | 个人偏好记忆管理（卡片内新增 / 删除） |
-| `/brain` | Antigravity 全局跨会话记忆看板 |
-| `/context` | 上下文 Token 容量看板 |
-| `/quota` | Google AI Pro 额度查询 |
-| `/status` | 进程 CPU / 内存 / Uptime / 日志摘要 |
-| `/clear` | 清空当前会话上下文 |
-| `/stop` | 强制中断当前任务并清空排队 |
-| `/update` | 检查更新；`/update confirm` 执行热升级 |
-
-> 已移除：`/role`、`/remember`、`/forget`（偏好统一走 `/memory` 卡片交互）。
-
-## 🔐 权限机制
-
-- 首次部署后，**第一个私聊会话自动绑定为最高管理员**；群聊无法被绑定。
-- 其他会话默认**静默**：发送 `/auth` 申请权限，管理员收到授权卡片（显示会话名称/群名、会话 ID、申请者），可一键按"基础 / 开发 / 完全"三档授权或拒绝/拉黑。
-- 管理员可用 `/user` 查看并管理全部会话（授权、撤销、拉黑、提升管理员等）。
-- 权限联动：`--dangerously-skip-permissions` 仅对管理员生效；普通用户强制受限模式，且仅拥有对应能力时才可使用项目切换、额度查询等功能。
-- 限流：普通用户每分钟最多 5 条消息、每日最多 100 次执行（管理员不限）。
+| 指令 | 权限级别 | 功能与交互说明 |
+| :--- | :---: | :--- |
+| `/help` | 全部 | 呼出交互式帮助卡片与全功能快捷入口 |
+| `/project` | 全部 | 呼出可视化项目管理器（切换工作区、新建项目、设置根目录、克隆仓库） |
+| `/model` / `/card` / `/menu` | 全部 | 呼出大模型切换面板（支持 Gemini 3.7/3.8、Claude Sonnet、GPT-OSS 等） |
+| `/typesafe` / `/ts` | 全部 | **TypeSafe AI 网关控制台**（Ping 探测、模型切换、Key 设置与启用开关） |
+| `/health` / `/sysinfo` | 全部 | **服务器健康看板**（CPU 负载、内存占用、磁盘空间，Fast-Path 毫秒级秒回） |
+| `/note` / `/notes` | 全部 | 随身记事本卡片（`/note add` 新增、`/note del` 删除、`/notes` 展开列表） |
+| `/cron` / `/schedule` | 全部 | 定时提醒与 Cron 任务计划面板（支持自然语言设置倒计时与周期闹钟） |
+| `/memory` | 全部 | 用户个人偏好记忆管理（交互式添加与删除当前用户的个性化偏好） |
+| `/brain` | 全部 | Antigravity 全局跨会话记忆与知识图谱透视看板 |
+| `/context` | 全部 | 查看当前会话 Token 容量、占用水位与上下文滑动窗口状态 |
+| `/quota` | 授权 | 实时探测 Google AI Pro / Antigravity 当前账户剩余额度与配额 |
+| `/clear` | 全部 | 清空当前会话上下文并热重置 Prewarm 进程池，开启全新对话 |
+| `/stop` | 全部 | 紧急叫停当前正在运行的后台任务并清空本会话排队任务 |
+| `/ping` | 全部 | 探测核心服务与网络健康存活状态 |
+| `/status` | 管理员 | 查看 Bot 进程 Uptime、CPU/内存指标、重启计数与近期错误日志摘要 |
+| `/plugins` / `/plugin` | 管理员 | 打开插件中心管理器（查看已挂载插件、切换启用状态、热重载插件） |
+| `/user` | 管理员 | 用户与群聊权限管理控制台（授权、降级、拉黑、分配权限等） |
+| `/auth` | 未授权 | 向系统管理员发送授权申请卡片（显示申请人、群名、申请理由） |
+| `/update` | 管理员 | 检查云端最新版本；输入 `/update confirm` 触发 OTA 无损平滑热升级 |
 
 ---
 
-## 🚀 安装部署
+## 🔐 权限与安全风控机制
 
-### 系统要求
-- Python 3.10+
-- Node.js / npm（仅用于安装 PM2：`npm install -g pm2`）
-- 本机已安装并可用的 Antigravity CLI（`agy` 或 `antigravity`）
+1. **第一私聊自动提权（Auto-Admin）**：
+   - 首次部署启动后，**首个向 Bot 发送私聊消息的用户将自动绑定为系统最高管理员**（群聊不可被自动绑定）。
+2. **三档细粒度授权体系**：
+   - 未授权会话默认保持静默，发送 `/auth` 后，管理员会收到包含申请者信息的审批卡片，支持一键审批：
+     - **基础版（Basic）**：日常文本问答、记事本、简单查询。
+     - **开发版（Dev）**：可使用项目切换、代码查看与受限工具。
+     - **完全版（Full）**：具备终端 Shell 执行与宿主机全权限。
+3. **双层安全防护网**：
+   - **TypeSafe System One**：语义层深度扫描注入与恶意意图，阻断危险行为；
+   - **系统级命令守卫**：对底层 `rm -rf /`、磁盘覆写、系统重启等高危指令进行物理级阻断；`--dangerously-skip-permissions` 仅对受信任的最高管理员生效。
+4. **防刷限流（Rate Limiting）**：
+   - 普通授权用户每分钟最多发送 5 条消息，每日上限 100 次工具执行（管理员不限）。
 
-### 1) 一键脚本（推荐）
+---
+
+## 🚀 安装部署指南
+
+### 环境要求
+- **Linux** (Ubuntu 20.04+ / Debian 11+ / CentOS / Arch 等) 或 macOS
+- **Python 3.10+**
+- **Node.js & PM2**（用于生产环境高可用守护：`npm install -g pm2`）
+- 本机已安装并完成登录认证的 **Antigravity CLI**（`agy` 或 `antigravity`）
+
+---
+
+### 方法 1：一键交互式脚本安装（推荐）
+
+在服务器终端直接执行：
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/Level6me/antigravity-feishu-bot/main/install.sh)
 ```
 
-按提示填入 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 即可。
+脚本将自动引导您输入飞书 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，并自动构建虚拟环境、安装依赖与启动 PM2 守护进程。
 
-本地已 clone 时：
-
+**本地已 Clone 代码时的一键运维：**
 ```bash
 chmod +x install.sh
-./install.sh
-# 升级: ./install.sh update
-# 卸载: ./install.sh uninstall
+./install.sh           # 安装与初始化
+./install.sh update    # 极速拉取并平滑重启
+./install.sh uninstall # 彻底清理后台服务与环境
 ```
 
-### 2) 手动部署
+---
+
+### 方法 2：手动源码部署
 
 ```bash
+# 1. 克隆代码仓库
+git clone https://github.com/Level6me/antigravity-feishu-bot.git
+cd antigravity-feishu-bot
+
+# 2. 创建并激活 Python 虚拟环境
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# 编辑 .env 填入凭证与可选路径配置
 
+# 3. 安装依赖包
+pip install -r requirements.txt
+
+# 4. 配置环境变量
+cp .env.example .env
+nano .env  # 填入飞书凭证，按需配置 TYPESAFE_API_KEY
+
+# 5. 使用 PM2 启动服务（推荐）
 pm2 start venv/bin/python3 --name "feishu-bot" -- main.py
-# 可选：保持 agy 热进程
-pm2 start venv/bin/python3 --name "agy-daemon" -- agy_daemon.py
 pm2 save
+pm2 startup
 ```
 
-### 3) 飞书后台配置（必读）
+---
 
-#### ① 开启 WebSocket 长连接
-
-飞书开放平台 → 你的应用 → **开发配置 → 事件与回调**（或"应用能力"），开启 **WebSocket 长连接** 模式。本项目不依赖 HTTP 回调地址，全部事件与卡片回调均通过 WebSocket 推送。
-
-#### ② 开通权限（权限管理）
-
-以下为本项目运行所需的**全部权限**，按用途列出：
-
-| 权限名称 | 权限代码 | 用途 |
-|---|---|---|
-| 获取与发送单聊、群组消息 | `im:message` | 接收消息、回复消息、发送新消息、更新交互卡片 |
-| 获取消息中图片、文件资源 | `im:message:resource` | 下载用户发送的图片 / 文件 / 音视频 |
-| 上传图片 | `im:image` | 将模型生成的图片作为消息回传 |
-| 上传文件 | `im:file` | 将模型生成的文件作为消息回传 |
-| 获取与更新消息表情回复 | `im:message.reaction` | 任务完成 / 失败时添加与清理表情标记 |
-| 获取群信息 | `im:chat:readonly` | 管理面板显示群聊名称 |
-| 获取用户基本信息 | `contact:user.base:readonly` | 管理面板显示用户飞书昵称 |
-
-#### ③ 订阅事件
-
-- `im.message.receive_v1`：接收消息（WebSocket 模式下开通 `im:message` 权限后自动推送）。
-- `card.action.trigger`：卡片按钮回调（授权审批、用户管理等），无需单独申请权限。
-- 其余事件（如消息已读）未订阅，可忽略。
-
-#### ④ 发布版本与可用范围
-
-- 开通 / 修改权限后，需在 **版本管理与发布** 中创建版本并发布，线上应用才会生效。
-- 确认你的账号位于应用的**可用范围**内，否则 `contact.user.get` / `im.chat.get` 会因可见范围限制而失败。
-
-### 4) Docker Compose
+### 方法 3：Docker / Docker Compose 部署
 
 ```bash
 cp .env.example .env
-# 填入 FEISHU_APP_ID / FEISHU_APP_SECRET
-# 如需挂载宿主机 agy 数据与工作区，可设置 HOST_ANTIGRAVITY_HOME / HOST_WORKSPACE
+# 编辑 .env 配置飞书凭据与挂载目录
 
 docker compose up -d --build
-# 可选 agy 守护进程：
-docker compose --profile daemon up -d
 ```
 
-> Docker 镜像只包含 Bot 运行时。`agy` 二进制与登录态需安装在宿主机并通过 volume 挂载，或在容器内自行安装。
-
 ---
 
-## ⚙️ 环境变量
+## ⚙️ 完整环境变量配置指南
 
-详见 [`.env.example`](.env.example)。常用项：
+编辑项目根目录下的 `.env` 文件：
 
-| 变量 | 说明 |
-|------|------|
-| `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 飞书应用凭证 |
-| `ALLOWED_USERS` / `ALLOWED_CHATS` | 可选白名单（open_id / chat_id，逗号分隔） |
-| `ANTIGRAVITY_BIN` | `agy` 绝对路径；空则自动探测 |
-| `ANTIGRAVITY_HOME` | antigravity-cli 数据根目录，默认 `~/.gemini/antigravity-cli` |
-| `WORKSPACE_ROOT` | 项目管理器默认根目录，默认 `~` |
-| `DANGEROUSLY_SKIP_PERMISSIONS` | 是否向 agy 传跳过权限确认（默认 true，风险高） |
+```env
+# ==========================================
+# 1. 飞书开放平台配置 (必填)
+# ==========================================
+FEISHU_APP_ID=cli_xxxxxxxxxxxx
+FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
----
+# ==========================================
+# 2. 安全与白名单配置 (可选)
+# ==========================================
+# 允许访问的 open_id 或 chat_id，多个用英文逗号分隔；留空则由 /auth 授权机制管理
+ALLOWED_USERS=
+ALLOWED_CHATS=
+# 是否向 agy 传递跳过权限确认标记 (默认 true，仅对管理员生效)
+DANGEROUSLY_SKIP_PERMISSIONS=true
 
-## 🏗 架构
+# ==========================================
+# 3. Antigravity 引擎与工作区配置
+# ==========================================
+# agy 可执行文件绝对路径；留空则系统自动探测
+ANTIGRAVITY_BIN=
+# antigravity-cli 数据存储目录 (默认: ~/.gemini/antigravity-cli)
+ANTIGRAVITY_HOME=
+# 默认公共工作区根目录 (默认: ~)
+WORKSPACE_ROOT=/home/ubuntu
+# 默认大模型 (如: gemini-3.7-flash-low / gemini-3.8-flash-high / claude-sonnet-4-6)
+DEFAULT_MODEL=gemini-3.7-flash-low
 
+# ==========================================
+# 4. TypeSafe AI (System One Jev) 网关配置
+# ==========================================
+# TypeSafe 平台 API 密钥 (留空则自动无缝降级为本地规则兜底，完全不影响系统速度)
+TYPESAFE_API_KEY=
+# 是否启用 TypeSafe 决策网关
+TYPESAFE_ENABLED=true
+# 默认使用的 Jev 决策模型
+TYPESAFE_MODEL=jev-latest
+# TypeSafe 服务基础接口地址
+TYPESAFE_BASE_URL=https://api.typesafe.ai
+
+# ==========================================
+# 5. 语音交互与 TTS 设置
+# ==========================================
+# 是否启用双向语音答复
+ENABLE_VOICE_REPLY=true
+# Edge-TTS 音色 (推荐: zh-CN-XiaoxiaoNeural / zh-CN-YunxiNeural)
+TTS_VOICE=zh-CN-XiaoxiaoNeural
+
+# ==========================================
+# 6. OTA 升级网络镜像源 (可选)
+# ==========================================
+GITEE_MIRROR_URL=
 ```
-飞书客户端
-    │  WebSocket (lark_oapi.ws)
-    ▼
-main.py                 进程入口 / 优雅退出
-    │
-    ├─ handlers/        事件与消息管线
-    │   ├─ events.py        IM 收消息
-    │   ├─ card_actions.py  卡片按钮回调
-    │   ├─ messages.py      指令路由 / 媒体防抖入队
-    │   ├─ pipeline.py      单会话队列与任务执行
-    │   └─ media.py         图 / 文件 / 音视频下载
-    ├─ cards/           交互卡片构建（按场景拆分）
-    ├─ commands.py      Slash 指令实现
-    ├─ executor.py      拉起 agy 子进程、读 transcript
-    ├─ multimodal.py    生成物回传
-    ├─ lark_client.py   飞书 API 封装
-    ├─ database.py      SQLite 会话 / 偏好
-    ├─ config.py        配置与路径解析（可移植）
-    └─ agy_daemon.py    可选 agy 保活守护进程
+
+---
+
+## 📋 飞书开放平台后台配置（极简 4 步）
+
+1. **开启 WebSocket 长连接模式**：
+   - 登录 [飞书开放平台](https://open.feishu.cn/)，进入创建的企业自建应用。
+   - 打开 **开发配置 → 事件与回调**（或“事件订阅”），将接收方式切换为 **WebSocket 长连接**（无需填写公网 URL）。
+2. **开通必要权限（权限管理）**：
+   - `im:message`（获取与发送单聊、群组消息）
+   - `im:message:resource`（获取消息中的图片、富文本与音视频资源）
+   - `im:image`（上传图片）
+   - `im:file`（上传本地文件与生成物）
+   - `im:message.reaction`（消息表情回复状态标记）
+   - `im:chat:readonly`（读取群聊名称）
+   - `contact:user.base:readonly`（读取用户飞书昵称）
+3. **订阅核心事件**：
+   - 添加事件：`im.message.receive_v1`（接收消息事件）
+   - 卡片动作回调：`card.action.trigger`（自动支持，无需额外权限）
+4. **发布应用版本**：
+   - 确认并在 **版本管理与发布** 中创建新版本并发布，确保你的飞书账号位于应用的**可用范围**内。
+
+---
+
+## 🏗️ 核心系统架构
+
+```mermaid
+flowchart TD
+    User["飞书客户端 (用户 / 群聊 / 语音条)"] -->|WebSocket Lark OAPI| Main["main.py (事件分发器)"]
+    Main --> Pre["handlers/messages.py (消息防抖与指令路由)"]
+    Pre -->|Slash 命令 (/project /typesafe 等)| Cmd["commands.py (交互式卡片渲染)"]
+    
+    Pre -->|自然语言请求| Gate{"TypeSafe AI 决策网关\n(System One Jev)"}
+    
+    Gate -->|高频意图| FastPath["Fast-Path 本地极速响应\n(服务器监控/备忘录/闹钟/TS状态)"]
+    FastPath -->|< 200ms 秒回| CardUI["飞书原生交互式卡片"]
+
+    Gate -->|拦截安全隐患| RejectCard["安全风控拦截告警卡片"]
+    
+    Gate -->|复杂工程任务| AgentQueue["会话异步排队队列 (chat_id)"]
+    AgentQueue --> Executor["executor.py (Antigravity CLI 引擎)"]
+    
+    Executor -->|Task Plan 步骤流转| CardUI
+    Executor -->|执行 Shell / 读写代码| HostFS["宿主机操作系统 & 工作区"]
+    Executor -->|产出图像/文件回传| MultiModal["multimodal.py (飞书资源通道)"]
+    MultiModal --> CardUI
+    CardUI --> User
 ```
 
-路径不再写死：`transcript` / OAuth / global memory 均通过 `config.get_*` 解析，可用 `ANTIGRAVITY_HOME` 覆盖。
-
 ---
 
-## 🔒 安全提示
-
-本 Bot 运行在宿主机上，具备近 shell 级能力。上线前建议：
-
-1. 配置 `ALLOWED_USERS` / `ALLOWED_CHATS` 白名单  
-2. 评估是否关闭 `DANGEROUSLY_SKIP_PERMISSIONS`  
-3. 仅在可信网络 / 私聊中使用，勿对公开群无限制开放  
-
----
-
-## 🛠 运维常用命令
+## 🛠️ 常用运维排错命令
 
 ```bash
+# 查看主程序实时运行日志
 pm2 logs feishu-bot
+
+# 检查进程状态与内存占用
+pm2 status
+
+# 重启飞书机器人服务
 pm2 restart feishu-bot
+
+# 停止服务
 pm2 stop feishu-bot
-pm2 logs agy-daemon
 ```
 
 ---
 
-## 📁 仓库结构（精简）
+## 📄 开源许可证
 
-```
-main.py              # 入口
-app_state.py         # 进程内共享状态
-handlers/            # 事件 / 消息 / 队列
-cards/               # 卡片 UI 模块
-card_builder.py      # 兼容旧 import: from card_builder import CardBuilder
-commands.py
-executor.py
-config.py
-database.py
-agy_daemon.py
-Dockerfile
-docker-compose.yml
-install.sh
-requirements.txt
-.env.example
-```
+本项目基于 [MIT License](LICENSE) 协议开源。欢迎提交 Issue 与 Pull Request！

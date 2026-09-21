@@ -112,66 +112,90 @@ async def _process_single_task(chat_id, task):
     if not user_text:
         return
 
-    # 安全沙箱：仅拦截具有明确直接执行意图的高危 shell 命令字符串
-    # 规则：匹配的关键词必须不在代码块、引号、或"帮我写/如何"等意图引导词后面
-    # 目标：拦截"直接执行 rm -rf" 但放行 "帮我写 rm -rf 相关脚本" / "rm -rf 是什么"
-    _text_for_check = user_text
-    # 移除 markdown 代码块内容，避免用户粘贴代码被误判
-    _text_for_check = re.sub(r'```.*?```', '', _text_for_check, flags=re.DOTALL)
-    _text_for_check = re.sub(r'`[^`]+`', '', _text_for_check)
-    
-    # 检测是否明显为请求 AI 生成/分析/解释的上下文（此时放行）
-    _intent_safe_prefixes = [
-        "帮我写", "帮我做", "写个", "写一个", "写一段", "分析", "解释", "是什么", "什么是",
-        "如何", "怎么", "为什么", "问题", "报错", "脚本", "代码", "示例", "举个例子",
-        "怎样", "讲解", "介绍", "说明"
-    ]
-    _has_safe_intent = any(kw in user_text[:80] for kw in _intent_safe_prefixes)
-    
-    dangerous_patterns = [
-        r"\brm\s+-rf\s+/",              # rm -rf / (只拦截针对根目录或绝对路径的)
-        r"\brm\s+-rf\s+\*",             # rm -rf * (通配符全删)
-        r"\bdd\s+if=\s*/dev/",          # dd if=/dev/... (直接写块设备)
-        r"\bmkfs\s*\.",                  # mkfs.xxx (格式化文件系统)
-        r":\(\){\s*:\s*\|\s*:\s*&\s*}\s*;\s*:",  # fork bomb
-        r"\bchmod\s+-R\s+777\s+/",      # chmod -R 777 根目录
-    ]
-    # 关机/重启类：仅在没有安全意图上下文时才拦截
-    if not _has_safe_intent:
-        dangerous_patterns += [
-            r"\bshutdown\s+-[hrP]",     # shutdown -h/-r/-P (直接带参数的关机指令)
-            r"\bpoweroff\b",
-            r"\breboot\b",
-        ]
-    
-    is_dangerous = False
-    for pattern in dangerous_patterns:
-        if re.search(pattern, _text_for_check, re.IGNORECASE):
-            is_dangerous = True
-            break
-            
-    if is_dangerous:
+    # === TypeSafe System One (Jev) Decision Gateway & Guardrail ===
+    from typesafe_gate import evaluate_message_gate
+    from plugin_manager import plugin_manager
+
+    decision = await evaluate_message_gate(user_text)
+
+    # 1. 安全沙箱门禁拦截（基于 TypeSafe Noul 概率评判与置信度兜底）
+    if decision.is_dangerous:
+        log.warning(f"[Security] Intercepted dangerous request: '{user_text}' (prob={decision.danger_prob:.2f})")
         warn_card = CardBuilder.build_security_warning(user_text)
         await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, warn_card))
         return
 
-    # Run plugin on_before_ai hooks
-    from plugin_manager import plugin_manager
+    # 2. 插件极速直达通道 (Fast-Path / 零模型冷启动延迟)
+    if decision.intent == "typesafe_status" and decision.intent_confidence >= 0.65:
+        log.info(f"[TypeSafe FastPath] Direct dispatch typesafe config inquiry for chat {chat_id}")
+        from typesafe_gate import get_typesafe_config_state, test_typesafe_connectivity
+        cfg = get_typesafe_config_state()
+        res = await test_typesafe_connectivity()
+        ts_card = CardBuilder.build_typesafe_config_card(
+            api_key=cfg["api_key"],
+            enabled=cfg["enabled"],
+            model=cfg["model"],
+            base_url=cfg["base_url"],
+            test_result=res
+        )
+        await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, ts_card))
+        return
+
+    elif decision.intent == "server_health" and decision.intent_confidence >= 0.70:
+        health_plugin = plugin_manager.plugins.get("server_health")
+        if health_plugin and health_plugin.enabled:
+            log.info(f"[TypeSafe FastPath] Direct dispatch to server_health plugin for chat {chat_id}")
+            handled = await health_plugin.on_command("/health", "", chat_id, message_id, session_data)
+            if handled:
+                return
+
+    elif decision.intent == "notes" and decision.intent_confidence >= 0.75:
+        notes_plugin = plugin_manager.plugins.get("notes_manager")
+        if notes_plugin and notes_plugin.enabled:
+            # 判断是查看备忘还是新增备忘
+            is_view_notes = any(kw in user_text for kw in ["查看", "列出", "显示", "所有备忘", "所有笔记", "查备忘", "查笔记"])
+            if is_view_notes:
+                log.info(f"[TypeSafe FastPath] Direct dispatch note listing to notes_manager for chat {chat_id}")
+                handled = await notes_plugin.on_command("/notes", "", chat_id, message_id, session_data)
+                if handled:
+                    return
+            else:
+                # 提取笔记文本
+                cleaned_note = re.sub(r'^(请帮我|帮我|请)?(记录|记一下|记下|添加|新增|写下)?(一条)?(备忘|笔记|待办)?[:：\s]*', '', user_text).strip()
+                if cleaned_note:
+                    log.info(f"[TypeSafe FastPath] Direct dispatch add note to notes_manager for chat {chat_id}")
+                    handled = await notes_plugin.on_command("/note", f"add {cleaned_note}", chat_id, message_id, session_data)
+                    if handled:
+                        return
+
+    elif decision.intent == "cron" and decision.intent_confidence >= 0.75:
+        cron_plugin = plugin_manager.plugins.get("cron_scheduler")
+        if cron_plugin and cron_plugin.enabled:
+            try:
+                from plugins.cron_scheduler.scheduler import parse_schedule_intent
+                if parse_schedule_intent(user_text):
+                    log.info(f"[TypeSafe FastPath] Direct dispatch schedule intent to cron_scheduler for chat {chat_id}")
+                    handled = await cron_plugin.on_command("/cron", user_text, chat_id, message_id, session_data)
+                    if handled:
+                        return
+            except Exception as e:
+                log.warning(f"[TypeSafe FastPath] Failed to parse schedule intent: {e}")
+
+    # 3. 运行插件 on_before_ai 钩子
     user_text, session_data = await plugin_manager.dispatch_before_ai(user_text, chat_id, session_data)
     if not user_text or not user_text.strip():
         log.info(f"Message in chat {chat_id} was intercepted and consumed by plugin hook. Skipping AI execution.")
         return
 
-    # 智能意图路由 (Fast Chat vs Deep Agent)
+    # 4. 智能意图路由 (Fast Chat vs Deep Agent)
+    # 严格置信度与终端需求门禁 (Confidence-Gated Routing)：
+    # 只有当明确需要终端操作、或复杂度 >= 1.2、或高置信度 (>=0.85) 的代码工程任务时，才判定为 complex_agent
     is_complex_agent = False
-    agent_keywords = [
-        "代码", "写代码", "改代码", "重构", "修复", "debug", "bug", "报错", 
-        "运行", "执行", "部署", "重启", "编译", "终端", "命令", "脚本", "bash", 
-        "shell", "git", "curl", "npm", "pip", "python", "文件", "创建文件", "读文件", 
-        "搜索", "排查", "项目", "skill", "mcp", "定时", "提醒我", "倒计时", "cron",
-        "选项", "选择"
-    ]
-    if any(kw in user_text.lower() for kw in agent_keywords) or session_data.get("mode") == "agent":
+    if session_data.get("mode") == "agent":
+        is_complex_agent = True
+    elif decision.needs_terminal or decision.complexity_score >= 1.2:
+        is_complex_agent = True
+    elif decision.intent == "code_agent" and decision.intent_confidence >= 0.85 and decision.complexity_score >= 0.8:
         is_complex_agent = True
 
     # Inject protocol into prompt
@@ -191,22 +215,6 @@ async def _process_single_task(chat_id, task):
         "3. 【命令行工具支持】：如需在终端脚本中主动传送文件，可直接运行 `python3 send_to_feishu.py <文件路径>`，该脚本使用官方 Lark API 发送文件到当前会话。\n\n"
     )
 
-    system_instruction += (
-        "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
-        "【必须执行】：只要你根据用户意图，判断当前任务需要调用工具执行操作（如读取或修改代码、执行终端命令、多步骤排错、数据查询分析、生成或导出文件等），你必须在调用任何工具之前，首先在回复的最开始输出一行结构化规划标签：\n"
-        "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | 步骤4名称 [/TASK_PLAN]\n"
-        "规则要求：\n"
-        "1. 规划必须由你基于对任务的真实理解量身定制（3~4步为宜），每一步需精炼并包含具体目标或涉及的关键文件/操作，切忌泛化套话；\n"
-        "2. 输出该行标签后立即调用首个工具开始执行，不要输出任何多余过渡句；\n"
-        "3. 前端界面会自动提取此标签并在飞书卡片中向用户展示步骤清单并逐项打勾 ✅。\n"
-        "（注意：如果是纯技术问答、概念解释、语法教学、闲聊等无需调用工具的任务，严禁输出 [TASK_PLAN]，直接自然回复即可）。\n\n"
-    )
-
-    system_instruction += (
-        "[System Autonomous Execution Directive / 自主执行决策规范]\n"
-        "当遇到需要执行终端命令、修改文件或面对多种技术路径时，请始终自主评估并采用最稳妥、最高效的最优方案直接调用工具执行，严禁主动提出多选方案（如方案一/二/三/四）让用户做选择题，严禁停下来等待用户确认。始终直接自主推进并交付最终结果！\n\n"
-    )
-
     if task.get("message_type") == "audio" or task.get("is_voice_message"):
         system_instruction += (
             "[Voice Interaction Directive / 语音交互规范]\n"
@@ -214,9 +222,21 @@ async def _process_single_task(chat_id, task):
             "请遵循口语化表达：语言自然生动、亲切凝练、避免输出冗长代码块或复杂大表格，重点结论口语化输出。\n\n"
         )
 
-
     if is_complex_agent:
-        # 复杂工程任务：注入全套安全防护与项目上下文
+        # 复杂工程任务：注入步骤规划、自主执行、安全防护与项目上下文
+        system_instruction += (
+            "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
+            "【必须执行】：只要你根据用户意图，判断当前任务需要调用工具执行操作（如读取或修改代码、执行终端命令、多步骤排错、数据查询分析、生成或导出文件等），你必须在调用任何工具之前，首先在回复的最开始输出一行结构化规划标签：\n"
+            "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | 步骤4名称 [/TASK_PLAN]\n"
+            "规则要求：\n"
+            "1. 规划必须由你基于对任务的真实理解量身定制（3~4步为宜），每一步需精炼并包含具体目标或涉及的关键文件/操作，切忌泛化套话；\n"
+            "2. 输出该行标签后立即调用首个工具开始执行，不要输出任何多余过渡句；\n"
+            "3. 前端界面会自动提取此标签并在飞书卡片中向用户展示步骤清单并逐项打勾 ✅。\n\n"
+        )
+        system_instruction += (
+            "[System Autonomous Execution Directive / 自主执行决策规范]\n"
+            "当遇到需要执行终端命令、修改文件或面对多种技术路径时，请始终自主评估并采用最稳妥、最高效的最优方案直接调用工具执行，严禁主动提出多选方案（如方案一/二/三/四）让用户做选择题，严禁停下来等待用户确认。始终直接自主推进并交付最终结果！\n\n"
+        )
         system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
         system_instruction += (
             "[System Execution & Safety Guardrails]\n"
@@ -229,6 +249,13 @@ async def _process_single_task(chat_id, task):
         if current_proj in project_prompts and project_prompts[current_proj]:
             proj_prompt_text = project_prompts[current_proj]
             system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
+    else:
+        # 轻量问答与概念咨询模式：严禁执行任何工具，纯文本秒级回答
+        system_instruction += (
+            "[System Mode Directive: Pure Conversation Mode / 轻量纯文本问答模式]\n"
+            "当前任务经过 TypeSafe 决策网关评估属于普通技术咨询、概念解答或日常对话，严禁调用任何终端命令工具（如 run_command）或文件读写工具！"
+            "请直接针对用户问题组织语言，用凝练清晰的语言直接给出最终解答。\n\n"
+        )
 
     # 注入长期记忆上下文（由 ai_memory 插件提取）
     mem_ctx = session_data.get("memory_context")
