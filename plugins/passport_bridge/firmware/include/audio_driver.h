@@ -4,6 +4,13 @@
 #include "driver/i2s.h"
 #include "config.h"
 
+enum ToneType {
+    TONE_PTT_START,
+    TONE_PTT_END,
+    TONE_CONNECTED,
+    TONE_ALERT
+};
+
 class AudioDriver {
 public:
     AudioDriver();
@@ -15,6 +22,10 @@ public:
     
     // 播放接口 (写入 16kHz 16bit 单声道 PCM 数据)
     size_t writePlayData(const uint8_t* buffer, size_t bytes);
+
+    // 硬件音效与操作听觉反馈接口
+    void playBeep(uint16_t freqHz, uint16_t durationMs, uint8_t volumePercent = 50);
+    void playTone(ToneType type);
 
 private:
     bool initES8311();

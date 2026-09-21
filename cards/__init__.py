@@ -1,5 +1,5 @@
 """Feishu interactive card builders (split modules)."""
-from cards import common, models, indicators, response, projects, system, memory, stats_cards, auth, cron, plugin
+from cards import common, models, indicators, response, projects, system, memory, stats_cards, auth, cron, plugin, typesafe_card
 
 
 class CardBuilder:
@@ -73,4 +73,5 @@ class CardBuilder:
         return _cron.build_cron_created_card(*args, **kwargs)
 
     build_plugin_panel_card = staticmethod(plugin.build_plugin_panel_card)
+    build_typesafe_config_card = staticmethod(typesafe_card.build_typesafe_config_card)
 

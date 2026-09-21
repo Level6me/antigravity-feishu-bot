@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     tts_voice: str = Field(default="zh-CN-XiaoxiaoNeural", alias="TTS_VOICE")
     enable_voice_reply: bool = Field(default=True, alias="ENABLE_VOICE_REPLY")
 
+    # TypeSafe AI (System One Model Jev) settings
+    typesafe_api_key: str = Field(default="", alias="TYPESAFE_API_KEY")
+    typesafe_enabled: bool = Field(default=True, alias="TYPESAFE_ENABLED")
+    typesafe_model: str = Field(default="jev-latest", alias="TYPESAFE_MODEL")
+    typesafe_base_url: Optional[str] = Field(default=None, alias="TYPESAFE_BASE_URL")
+
     model_config = SettingsConfigDict(
         env_file=os.path.join(BASE_DIR, ".env"),
         env_file_encoding="utf-8",
@@ -54,6 +60,12 @@ DEFAULT_MODEL = settings.default_model or "gemini-3.7-flash-low"
 APP_SECRET = settings.feishu_app_secret or settings.app_secret
 TTS_VOICE = settings.tts_voice or "zh-CN-XiaoxiaoNeural"
 ENABLE_VOICE_REPLY = settings.enable_voice_reply
+
+# TypeSafe AI exports
+TYPESAFE_API_KEY = settings.typesafe_api_key or os.getenv("TYPESAFE_API_KEY", "")
+TYPESAFE_ENABLED = settings.typesafe_enabled
+TYPESAFE_MODEL = settings.typesafe_model or "jev-latest"
+TYPESAFE_BASE_URL = settings.typesafe_base_url
 
 
 SESSION_FILE = os.path.join(BASE_DIR, "chat_sessions.json")
@@ -138,8 +150,8 @@ def find_antigravity_bin() -> Optional[str]:
 ANTIGRAVITY_BIN = find_antigravity_bin()
 
 # --- Versioning Configuration ---
-BASE_VERSION_PREFIX = "v3.0."
-VERSION_START_COMMIT = 307  # Used to calculate patch number (commit_count - start_commit)
+BASE_VERSION_PREFIX = "v3.1."
+VERSION_START_COMMIT = 326  # Used to calculate patch number (commit_count - start_commit)
 
 # --- Whitelist & Permission Configuration ---
 ALLOWED_USERS = [uid.strip() for uid in settings.allowed_users.split(",") if uid.strip()]

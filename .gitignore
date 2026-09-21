@@ -65,3 +65,7 @@ github_deploy_key*
 .vscode/
 *.swp
 .update_pending.json
+
+# Hardware / Embedded builds
+.pio/
+*.bin

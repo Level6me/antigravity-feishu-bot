@@ -607,6 +607,118 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_prompt_source(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复源名称与 URL"}})
 
+    elif action_value.get("action") == "prompt_typesafe_key":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该设置仅管理员可用！"}})
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_prompt_ts_key():
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = PendingCommand.TYPESAFE_SET_KEY.value
+                await save_session_async(chat_id, session_data)
+                msg = (
+                    "🔑 **设置 TypeSafe AI API Key**\n\n"
+                    "请在此直接回复您的 TypeSafe API Key（例如：`ts_live_...` 或从 https://console.typesafe.ai/keys 获取的 Key）：\n\n"
+                    "*(系统收到后将自动加密写入本地 .env 并即刻热生效)*"
+                )
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+            asyncio.run_coroutine_threadsafe(do_prompt_ts_key(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请直接回复您的 TypeSafe API Key"}})
+
+    elif action_value.get("action") == "prompt_typesafe_base_url":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该设置仅管理员可用！"}})
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_prompt_ts_url():
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = PendingCommand.TYPESAFE_SET_BASE_URL.value
+                await save_session_async(chat_id, session_data)
+                msg = (
+                    "🌐 **设置 TypeSafe 服务端点 (Base URL)**\n\n"
+                    "请在此直接回复自定义 API 端点（例如：`https://api.typesafe.ai/v1`），回复 `default` 可恢复官方默认："
+                )
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+            asyncio.run_coroutine_threadsafe(do_prompt_ts_url(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复 Base URL"}})
+
+    elif action_value.get("action") == "toggle_typesafe_enabled":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_toggle_ts():
+                from typesafe_gate import get_typesafe_config_state, update_typesafe_env
+                cur = get_typesafe_config_state()
+                new_state = not cur["enabled"]
+                updated = update_typesafe_env(enabled=new_state)
+                new_card = CardBuilder.build_typesafe_config_card(
+                    api_key=updated["api_key"],
+                    enabled=updated["enabled"],
+                    model=updated["model"],
+                    base_url=updated["base_url"]
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+                )
+            asyncio.run_coroutine_threadsafe(do_toggle_ts(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "TypeSafe 网关开关状态已更新！"}})
+
+    elif action_value.get("action") == "set_typesafe_model":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
+        target_model = action_value.get("model", "jev-latest")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_set_ts_model():
+                from typesafe_gate import update_typesafe_env
+                updated = update_typesafe_env(model=target_model)
+                new_card = CardBuilder.build_typesafe_config_card(
+                    api_key=updated["api_key"],
+                    enabled=updated["enabled"],
+                    model=updated["model"],
+                    base_url=updated["base_url"]
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+                )
+            asyncio.run_coroutine_threadsafe(do_set_ts_model(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"System One 模型已切换为 {target_model}"}})
+
+    elif action_value.get("action") == "test_typesafe_ping":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_ts_ping():
+                from typesafe_gate import test_typesafe_connectivity, get_typesafe_config_state
+                cur = get_typesafe_config_state()
+                res = await test_typesafe_connectivity()
+                new_card = CardBuilder.build_typesafe_config_card(
+                    api_key=cur["api_key"],
+                    enabled=cur["enabled"],
+                    model=cur["model"],
+                    base_url=cur["base_url"],
+                    test_result=res
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+                )
+            asyncio.run_coroutine_threadsafe(do_ts_ping(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在发起连通性测试，请查看卡片反馈..."}})
+
+    elif action_value.get("action") == "clear_typesafe_key":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_clear_ts_key():
+                from typesafe_gate import update_typesafe_env
+                updated = update_typesafe_env(api_key="")
+                new_card = CardBuilder.build_typesafe_config_card(
+                    api_key=updated["api_key"],
+                    enabled=updated["enabled"],
+                    model=updated["model"],
+                    base_url=updated["base_url"]
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+                )
+            asyncio.run_coroutine_threadsafe(do_clear_ts_key(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已清除 API Key，恢复降级兜底模式"}})
+
     # Dispatch to plugin manager
     action_name = action_value.get("action", "")
     if action_name and app_state.main_loop and app_state.main_loop.is_running():

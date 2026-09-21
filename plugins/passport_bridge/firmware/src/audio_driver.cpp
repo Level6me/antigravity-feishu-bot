@@ -1,11 +1,12 @@
 #include "audio_driver.h"
+#include <math.h>
 
 AudioDriver audio;
 
 AudioDriver::AudioDriver() {}
 
 bool AudioDriver::init() {
-    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 100000);
+    Wire.begin(BSP_I2C_SDA, BSP_I2C_SCL, 100000);
     delay(50);
     
     if (!initES8311()) {
@@ -24,17 +25,17 @@ bool AudioDriver::init() {
 }
 
 void AudioDriver::writeReg(uint8_t reg, uint8_t val) {
-    Wire.beginTransmission(ES8311_I2C_ADDR);
+    Wire.beginTransmission(BSP_I2C_ES8311_ADDR);
     Wire.write(reg);
     Wire.write(val);
     Wire.endTransmission();
 }
 
 uint8_t AudioDriver::readReg(uint8_t reg) {
-    Wire.beginTransmission(ES8311_I2C_ADDR);
+    Wire.beginTransmission(BSP_I2C_ES8311_ADDR);
     Wire.write(reg);
     Wire.endTransmission();
-    Wire.requestFrom(ES8311_I2C_ADDR, 1);
+    Wire.requestFrom((uint16_t)BSP_I2C_ES8311_ADDR, (uint8_t)1);
     if (Wire.available()) {
         return Wire.read();
     }
@@ -65,7 +66,7 @@ bool AudioDriver::initES8311() {
     writeReg(0x0C, 0x00);
     
     // I2S 音频接口模式 (16bit, 标准飞利浦 I2S 格式)
-    writeReg(0x0D, 0x01); // Master / Slave
+    writeReg(0x0D, 0x01);
     writeReg(0x0E, 0x00);
     writeReg(0x0F, 0x00);
     writeReg(0x10, 0x00);
@@ -102,10 +103,11 @@ bool AudioDriver::initI2S() {
     };
 
     i2s_pin_config_t pin_config = {
-        .bck_io_num = PIN_I2S_BCLK,
-        .ws_io_num = PIN_I2S_WS,
-        .data_out_num = PIN_I2S_DOUT,
-        .data_in_num = PIN_I2S_DIN
+        .mck_io_num = BSP_I2S_MCLK,
+        .bck_io_num = BSP_I2S_BCLK,
+        .ws_io_num = BSP_I2S_WS,
+        .data_out_num = BSP_I2S_DOUT,
+        .data_in_num = BSP_I2S_DIN
     };
 
     esp_err_t err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
@@ -130,4 +132,52 @@ size_t AudioDriver::writePlayData(const uint8_t* buffer, size_t bytes) {
     size_t bytes_written = 0;
     i2s_write(I2S_NUM_0, buffer, bytes, &bytes_written, portMAX_DELAY);
     return bytes_written;
+}
+
+void AudioDriver::playBeep(uint16_t freqHz, uint16_t durationMs, uint8_t volumePercent) {
+    if (freqHz == 0 || durationMs == 0) return;
+    int16_t toneBuf[128];
+    size_t totalSamples = (AUDIO_SAMPLE_RATE * durationMs) / 1000;
+    size_t generated = 0;
+    float phase = 0.0f;
+    float phaseIncrement = 2.0f * (float)M_PI * (float)freqHz / (float)AUDIO_SAMPLE_RATE;
+    int16_t amplitude = (int16_t)(32767.0f * (volumePercent / 100.0f) * 0.4f);
+
+    while (generated < totalSamples) {
+        size_t chunkSize = ((totalSamples - generated) < 128) ? (totalSamples - generated) : 128;
+        for (size_t i = 0; i < chunkSize; i++) {
+            toneBuf[i] = (int16_t)(sinf(phase) * amplitude);
+            phase += phaseIncrement;
+            if (phase >= 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+        }
+        writePlayData((const uint8_t*)toneBuf, chunkSize * sizeof(int16_t));
+        generated += chunkSize;
+    }
+}
+
+void AudioDriver::playTone(ToneType type) {
+    switch (type) {
+        case TONE_PTT_START:
+            // 升调灵动双音，提示开始对讲录音
+            playBeep(880, 45, 50);
+            playBeep(1320, 55, 50);
+            break;
+        case TONE_PTT_END:
+            // 降调轻柔音，提示录音结束已发送
+            playBeep(1100, 35, 40);
+            playBeep(660, 45, 40);
+            break;
+        case TONE_CONNECTED:
+            // 局域网网关连线成功三和弦音
+            playBeep(523, 50, 40);
+            playBeep(659, 50, 40);
+            playBeep(784, 80, 50);
+            break;
+        case TONE_ALERT:
+            // 警报两声
+            playBeep(1500, 70, 60);
+            delay(40);
+            playBeep(1500, 70, 60);
+            break;
+    }
 }

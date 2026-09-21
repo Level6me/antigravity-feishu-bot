@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# FoloToy AI Passport (ESP32-C3) 树莓派/Linux 一键编译、烧录与调试脚本
+# FoloToy AI Passport (ESP32-C3) 树莓派/Linux 一键编译、0x0 合并固件生成与烧录工具
+# 严格遵循 FoloToy 官方 Agent 开发与交付规范
 # ==============================================================================
 
 set -e
@@ -13,53 +14,77 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}================================================================${NC}"
-echo -e "${GREEN}  📟 FoloToy AI Passport × Antigravity 固件一键编译烧录工具      ${NC}"
+echo -e "${GREEN}  📟 FoloToy AI Passport 官方规范固件编译与交付工具              ${NC}"
 echo -e "${CYAN}================================================================${NC}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# 1. 检查 PlatformIO 编译环境
+# 1. 检查 PlatformIO 与 esptool 编译工具链
 if ! command -v pio >/dev/null 2>&1; then
-    echo -e "${YELLOW}[!] 未检测到 PlatformIO 命令行工具，正在自动安装...${NC}"
+    echo -e "${YELLOW}[!] 未检测到 PlatformIO 命令行工具，正在自动准备环境...${NC}"
     pip3 install -U platformio esptool || pip install -U platformio esptool
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-echo -e "${BLUE}[1/4] 检查目标硬件连接状态...${NC}"
-# 查找常见 USB 串口设备节点
-PORTS=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || true)
+# 2. 运行工程编译
+echo -e "\n${BLUE}[1/3] 正在编译工程源码并生成目标二进制...${NC}"
+pio run
 
-if [ -z "$PORTS" ]; then
-    echo -e "${RED}[ERROR] 未检测到连接的 ESP32-C3 设备！${NC}"
-    echo -e "请检查："
-    echo -e " 1. 是否已用 Type-C 数据线将 AI Passport 插入树莓派 USB 口？"
-    echo -e " 2. 数据线是否具备数据传输能力（部分纯充电线无法识别）？"
+BUILD_DIR=".pio/build/esp32-c3"
+if [ ! -f "$BUILD_DIR/firmware.bin" ]; then
+    echo -e "${RED}[ERROR] 编译产物不存在，构建失败！${NC}"
     exit 1
 fi
 
-TARGET_PORT=$(echo "$PORTS" | head -n 1)
-echo -e "${GREEN}[✓] 成功检测到硬件端口: ${CYAN}${TARGET_PORT}${NC}"
+# 3. 按照官方规范生成可从 0x0 刷写的合并固件 (供官方 Web Flasher / esptool 使用)
+echo -e "\n${BLUE}[2/3] 正在合成 0x0 完整可烧录合并镜像 (Merged Image)...${NC}"
+MERGED_BIN="merged_firmware_0x0.bin"
 
-# 串口权限检查与自动修复
-if [ ! -r "$TARGET_PORT" ] || [ ! -w "$TARGET_PORT" ]; then
-    echo -e "${YELLOW}[!] 当前用户对 ${TARGET_PORT} 权限受限，尝试授权...${NC}"
-    sudo chmod 666 "$TARGET_PORT" 2>/dev/null || true
+if command -v esptool.py >/dev/null 2>&1; then
+    esptool.py --chip esp32c3 merge_bin -o "$MERGED_BIN" \
+        --flash_mode dio --flash_freq 80m --flash_size 8MB \
+        0x0 "$BUILD_DIR/bootloader.bin" \
+        0x8000 "$BUILD_DIR/partitions.bin" \
+        0x10000 "$BUILD_DIR/firmware.bin" 2>/dev/null || \
+    python3 -m esptool --chip esp32c3 merge_bin -o "$MERGED_BIN" \
+        --flash_mode dio --flash_freq 80m --flash_size 8MB \
+        0x0 "$BUILD_DIR/bootloader.bin" \
+        0x8000 "$BUILD_DIR/partitions.bin" \
+        0x10000 "$BUILD_DIR/firmware.bin"
+else
+    python3 -m esptool --chip esp32c3 merge_bin -o "$MERGED_BIN" \
+        --flash_mode dio --flash_freq 80m --flash_size 8MB \
+        0x0 "$BUILD_DIR/bootloader.bin" \
+        0x8000 "$BUILD_DIR/partitions.bin" \
+        0x10000 "$BUILD_DIR/firmware.bin"
 fi
 
-# 2. 编译工程源码
-echo -e "\n${BLUE}[2/4] 正在编译固件工程源码...${NC}"
-pio run
+echo -e "${GREEN}[✓] 官方规范合并固件已就绪: ${CYAN}${SCRIPT_DIR}/${MERGED_BIN}${NC}"
+echo -e "   > 支持直接拖拽至官方 Web 刷机工具 (https://ai-passport.folotoy.cn/tools/web-flasher/) 安装！"
 
-# 3. 烧录固件到设备
-echo -e "\n${BLUE}[3/4] 正在向 AI Passport 烧录固件 (波特率 921600)...${NC}"
-pio run --target upload --upload-port "$TARGET_PORT"
+# 4. 检测硬件连接并主动确认是否刷机 (严格遵循规范：未经确认不盲目烧录)
+echo -e "\n${BLUE}[3/3] 检查连接的真实硬件设备...${NC}"
+PORTS=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || true)
 
-echo -e "\n${CYAN}================================================================${NC}"
-echo -e "${GREEN}🎉 固件烧录成功！AI Passport 正在自动重启中...${NC}"
-echo -e "${CYAN}================================================================${NC}"
+if [ -z "$PORTS" ]; then
+    echo -e "${YELLOW}[!] 当前未检测到连接的 AI Passport 设备。${NC}"
+    echo -e "请使用具备数据传输功能的 Type-C 线将 AI Passport 插入电脑/树莓派。"
+    echo -e "你可以将生成的 ${CYAN}${MERGED_BIN}${NC} 上传至官方 Web 刷机工具完成安装。"
+    exit 0
+fi
 
-# 4. 可选：打开串口日志监视
-echo -e "\n${BLUE}[4/4] 启动设备串口实时监视器 (按 Ctrl+C 可退出)...${NC}"
-sleep 1
-pio device monitor -b 115200 --port "$TARGET_PORT"
+TARGET_PORT=$(echo "$PORTS" | head -n 1)
+echo -e "${GREEN}[✓] 检测到硬件设备串口: ${CYAN}${TARGET_PORT}${NC}"
+
+read -p "是否立即向连接的设备 [${TARGET_PORT}] 刷写固件？(y/N): " CONFIRM
+if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
+    echo -e "${BLUE}开始向 ${TARGET_PORT} 烧录固件...${NC}"
+    esptool.py --chip esp32c3 --port "$TARGET_PORT" --baud 921600 write_flash 0x0 "$MERGED_BIN"
+    echo -e "${GREEN}🎉 烧录完成！AI Passport 正在自动重启。${NC}"
+    echo -e "正在启动串口监视器 (按 Ctrl+C 退出)..."
+    sleep 1
+    pio device monitor -b 115200 --port "$TARGET_PORT"
+else
+    echo -e "${YELLOW}[!] 已跳过烧录。固件文件保存在: ${MERGED_BIN}${NC}"
+fi

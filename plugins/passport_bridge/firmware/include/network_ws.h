@@ -4,10 +4,12 @@
 #include <WiFiUdp.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
+#include <HTTPUpdate.h>
 
 #include "config.h"
 #include "display_ui.h"
 #include "audio_driver.h"
+#include "wifi_manager.h"
 
 class NetworkWS {
 public:
@@ -20,6 +22,9 @@ public:
     void sendVoiceStart();
     void sendVoiceEnd();
     void sendAudioChunk(const uint8_t* data, size_t len);
+    void sendInterrupt();
+    void send2FAResponse(const String& actionId, const String& result);
+    void startOTA(const String& url);
 
 private:
     WebSocketsClient wsClient;
@@ -30,7 +35,6 @@ private:
     unsigned long lastDiscoveryAttempt;
     unsigned long lastHeartbeat;
 
-    void connectWiFi();
     bool discoverServer();
     void onWsEvent(WStype_t type, uint8_t * payload, size_t length);
     void handleTextMessage(const char* jsonText);
