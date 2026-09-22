@@ -208,20 +208,20 @@ async def evaluate_message_gate(user_text: str, timeout_seconds: float = 2.0) ->
                     "notes": "Creating, reading, adding, or listing notes, memos, or todo items",
                     "cron": "Setting a scheduled reminder, timer, recurring alarm, or cron job",
                     "server_health": "Querying current host system stats, CPU load, memory, disk usage, or server health",
-                    "code_agent": "Writing, debugging, executing bash commands, reading/editing code, running tests, git operations, or software deployment",
-                    "general_chat": "Conceptual discussion, general Q&A, translations, advice, reasoning, or chat without executing tools",
+                    "code_agent": "Writing, generating, modifying, debugging, or analyzing code, scripts, algorithms, software logic, terminal commands, or software development",
+                    "general_chat": "Pure conversation, greetings, simple definitions, translation, or general Q&A with no programming or code generation",
                 }
             ),
             "complexity": Score(
-                instructions="How complex is the execution required for this request",
+                instructions="Assess the cognitive complexity and execution depth required for this request",
                 criteria=[
-                    "Trivial answer or instant lookup requiring no multi-step tools",
-                    "Moderate inquiry or single file/status operation",
-                    "Deep engineering task requiring multiple terminal tools, iterative file edits, or troubleshooting",
+                    "Trivial greeting, superficial fact lookup, or casual chat requiring no programming or multi-step logic",
+                    "Moderate reasoning, code generation, script writing, single-file edits, or focused technical analysis",
+                    "Deep architectural engineering, complex algorithms, multi-step debugging, environment operations, or refactoring",
                 ]
             ),
             "needs_terminal": Noul(
-                instructions="Does fulfilling this request require running command-line tools or terminal scripts on the machine?"
+                instructions="Does fulfilling this request require running command-line tools, modifying files, or terminal scripts on the machine?"
             )
         }
 
@@ -548,17 +548,44 @@ def get_typesafe_config_state() -> Dict[str, Any]:
 
 
 def evaluate_adaptive_tier(decision: TypeSafeDecision) -> str:
-    """Evaluate adaptive reasoning effort tier: Low | Medium | High based on Jev decision."""
+    """Evaluate adaptive reasoning effort tier: Low | Medium | High based on cognitive decision analysis.
+    
+    Principles:
+    - Code generation and software engineering demand at least Medium/High reasoning verification.
+    - Low is strictly restricted to light conversational chat and trivial lookups with no code logic.
+    """
     import config
     auto_enabled = getattr(config, "TYPESAFE_AUTO_MODE", True)
     if not auto_enabled:
         return ""
+
+    # 1. 优先判定 High:
+    # - 涉及终端命令或文件修改 (needs_terminal)
+    # - 高复杂度认知负荷 (complexity_score >= 0.8)
+    # - 代码编写/工程任务且复杂度达到深入分析 (intent == "code_agent" and complexity_score >= 0.8)
+    if decision.needs_terminal:
+        return "High"
+    if decision.complexity_score >= 0.8:
+        return "High"
+    if decision.intent == "code_agent" and decision.complexity_score >= 0.8:
+        return "High"
+
+    # 2. 判定 Medium:
+    # - 只要涉及代码/编程（intent == "code_agent"），底线必须是 Medium，绝不降入 Low
+    # - 或一般性任务达到中等分析复杂度 (complexity_score >= 0.4)
+    if decision.intent == "code_agent":
+        return "Medium"
+    if decision.complexity_score >= 0.4:
+        return "Medium"
+
+    # 3. 判定 Low:
+    # - 降级状态（若无代码任务）
+    # - 严格限制为非代码的日常轻量闲聊 (general_chat) 且低复杂度
     if decision.is_fallback:
         return "Low"
-    if decision.needs_terminal or decision.complexity_score >= 1.0 or (decision.intent == "code_agent" and decision.complexity_score >= 0.8):
-        return "High"
-    if decision.intent == "general_chat" or decision.complexity_score < 0.4:
+    if decision.intent == "general_chat" and decision.complexity_score < 0.4:
         return "Low"
+
     return "Medium"
 
 
