@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     typesafe_model: str = Field(default="jev-latest", alias="TYPESAFE_MODEL")
     typesafe_base_url: Optional[str] = Field(default=None, alias="TYPESAFE_BASE_URL")
     typesafe_tier: str = Field(default="gateway", alias="TYPESAFE_TIER")  # gateway | sentry | copilot
+    typesafe_auto_mode: bool = Field(default=True, alias="TYPESAFE_AUTO_MODE")
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(BASE_DIR, ".env"),
@@ -68,6 +69,7 @@ TYPESAFE_ENABLED = settings.typesafe_enabled
 TYPESAFE_MODEL = settings.typesafe_model or "jev-latest"
 TYPESAFE_BASE_URL = settings.typesafe_base_url
 TYPESAFE_TIER = settings.typesafe_tier or os.getenv("TYPESAFE_TIER", "gateway")
+TYPESAFE_AUTO_MODE = getattr(settings, "typesafe_auto_mode", True)
 
 
 SESSION_FILE = os.path.join(BASE_DIR, "chat_sessions.json")

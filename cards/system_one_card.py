@@ -10,11 +10,13 @@ def build_typesafe_config_card(
     model: str = "jev-latest",
     base_url: Optional[str] = None,
     test_result: Optional[Dict[str, Any]] = None,
-    tier: Optional[str] = None
+    tier: Optional[str] = None,
+    auto_mode: Optional[bool] = None
 ) -> dict:
     """Build minimalist, modern configuration card for TypeSafe AI Gateway (Main Console)."""
     import config
     current_tier = tier or getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+    current_auto_mode = auto_mode if auto_mode is not None else getattr(config, "TYPESAFE_AUTO_MODE", True)
     has_key = bool(api_key and api_key.strip())
     masked_key = f"{api_key[:4]}...{api_key[-4:]}" if (has_key and len(api_key) > 8) else ("已配置" if has_key else "未配置")
 
@@ -41,11 +43,13 @@ def build_typesafe_config_card(
 
     switch_text = "已开启 (True)" if enabled else "已关闭 (False)"
     endpoint_text = f"`{base_url}`" if base_url else "`https://api.typesafe.ai/v1` (官方默认)"
+    auto_mode_text = "⚡️ 自动调度 (Low/Med/High)" if current_auto_mode else "锁定手动模式"
 
     content_lines = [
         "⚡ **System One (Jev) 决策网关控制中心**\n",
         f"• **网关状态**: {status_badge}",
         f"• **决策级别**: ⚡️ `{cur_tier_display}`",
+        f"• **模式自适应**: `{auto_mode_text}`",
         f"• **主导模型**: `{model or 'jev-latest'}`",
         f"• **API Key**: `{masked_key}`",
         f"• **网关开关**: `{switch_text}`",
@@ -118,6 +122,15 @@ def build_typesafe_config_card(
                     "text": {"tag": "plain_text", "content": "测试连通性 (Ping)"},
                     "type": "default",
                     "value": {"action": "test_typesafe_ping"}
+                },
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "自适应：已开启" if current_auto_mode else "自适应：已关闭"
+                    },
+                    "type": "primary" if current_auto_mode else "default",
+                    "value": {"action": "toggle_typesafe_auto_mode"}
                 }
             ]
         },
