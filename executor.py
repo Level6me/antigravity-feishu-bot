@@ -841,6 +841,8 @@ async def execute_antigravity(
                                     try:
                                         from system_one_gate import evaluate_tool_execution
                                         tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
+                                        if not tool_dec.is_fallback:
+                                            session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
                                         if not tool_dec.is_allowed:
                                             log.critical(f"[TypeSafe Co-Pilot] CRITICAL RISK DETECTED! Physical blocking: {cmd_target} -> {tool_dec.reason}")
                                             typesafe_blocked_info = {
@@ -1081,6 +1083,7 @@ async def execute_antigravity(
                         if raw_err:
                             diag_res = await evaluate_tool_error(command=str(err_target), error_output=raw_err)
                             if diag_res and not diag_res.is_fallback:
+                                session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
                                 diag_note = (
                                     f"\n\n🔍 **[System One 故障诊断]**\n"
                                     f"- **故障分类**：`{diag_res.error_category}` (置信度 {diag_res.confidence:.0%})\n"
@@ -1199,30 +1202,39 @@ async def execute_antigravity(
                 try:
                     from system_one_gate import evaluate_output_guard
                     guard_res = await evaluate_output_guard(reply_text)
+                    if not guard_res.is_fallback:
+                        session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
                     if not guard_res.is_safe:
                         log.warning(f"[TypeSafe Sentry] Output blocked: {guard_res.reason}")
                         reply_text = f"🛡️ **[System One 内容安全拦截]**\n\n系统检测到本次生成内容存在不合规或敏感项：{guard_res.reason}。\n为保护数据与敏感凭证安全，该部分内容已被拦截。"
                 except Exception as e:
                     log.warning(f"[TypeSafe Sentry] Egress guard hook error: {e}")
 
-            # 生成 TypeSafe 全链路审计摘要（存入 session_data 供卡片底部渲染展示）
+            # 生成 System One 全链路审计摘要（存入 session_data 供卡片底部渲染展示）
             try:
                 import config
                 ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
                 ts_enabled = getattr(config, "TYPESAFE_ENABLED", True)
+                total_decisions = session_data.get("typesafe_decision_count", 0)
+
                 if ts_enabled:
                     if typesafe_blocked_info:
                         session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策 · 高危操作已拦截"
                     elif ts_tier == "copilot":
-                        n_audited = len(typesafe_tool_audits)
-                        if n_audited > 0:
-                            session_data["typesafe_audit_summary"] = f"⚡️S1：L3全流程决策x{n_audited}次"
+                        if total_decisions > 0:
+                            session_data["typesafe_audit_summary"] = f"⚡️S1：L3全流程决策x{total_decisions}次"
                         else:
-                            session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策"
+                            session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策x0"
                     elif ts_tier == "sentry":
-                        session_data["typesafe_audit_summary"] = "⚡️S1：L2双向决策"
+                        if total_decisions > 0:
+                            session_data["typesafe_audit_summary"] = f"⚡️S1：L2双向决策x{total_decisions}次"
+                        else:
+                            session_data["typesafe_audit_summary"] = "⚡️S1：L2双向决策x0"
                     elif ts_tier == "gateway":
-                        session_data["typesafe_audit_summary"] = "⚡️S1：L1入口决策"
+                        if total_decisions > 0:
+                            session_data["typesafe_audit_summary"] = f"⚡️S1：L1入口决策x{total_decisions}次"
+                        else:
+                            session_data["typesafe_audit_summary"] = "⚡️S1：L1入口决策x0"
                 else:
                     session_data.pop("typesafe_audit_summary", None)
             except Exception as e:
