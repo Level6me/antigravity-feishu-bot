@@ -286,3 +286,9 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
         },
         "elements": elements
     }
+
+
+# Standard System One aliases
+build_system_one_config_card = build_typesafe_config_card
+build_system_one_tier_menu_card = build_typesafe_tier_menu_card
+

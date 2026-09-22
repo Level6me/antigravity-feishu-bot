@@ -839,7 +839,7 @@ async def execute_antigravity(
                                 if call_key and call_key not in evaluated_tool_calls and cmd_target:
                                     evaluated_tool_calls.add(call_key)
                                     try:
-                                        from typesafe_gate import evaluate_tool_execution
+                                        from system_one_gate import evaluate_tool_execution
                                         tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
                                         if not tool_dec.is_allowed:
                                             log.critical(f"[TypeSafe Co-Pilot] CRITICAL RISK DETECTED! Physical blocking: {cmd_target} -> {tool_dec.reason}")
@@ -1075,7 +1075,7 @@ async def execute_antigravity(
                 import config
                 if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
                     try:
-                        from typesafe_gate import evaluate_tool_error
+                        from system_one_gate import evaluate_tool_error
                         err_target = last_tool_action or (completed_tool_steps[-1] if completed_tool_steps else "unknown_tool")
                         raw_err = stream_error_msg or stderr_text or reply_text[:300]
                         if raw_err:
@@ -1197,7 +1197,7 @@ async def execute_antigravity(
             # Level 2 & 3: TypeSafe Egress Guard (出口安全质检与凭证泄露防护)
             if reply_text and not typesafe_blocked_info:
                 try:
-                    from typesafe_gate import evaluate_output_guard
+                    from system_one_gate import evaluate_output_guard
                     guard_res = await evaluate_output_guard(reply_text)
                     if not guard_res.is_safe:
                         log.warning(f"[TypeSafe Sentry] Output blocked: {guard_res.reason}")
