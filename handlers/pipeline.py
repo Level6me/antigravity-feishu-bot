@@ -122,6 +122,13 @@ async def _process_single_task(chat_id, task):
     else:
         session_data["typesafe_decision_count"] = 0
 
+    from system_one_gate import evaluate_adaptive_tier
+    adaptive_tier = evaluate_adaptive_tier(decision)
+    if adaptive_tier:
+        session_data["typesafe_adaptive_tier"] = adaptive_tier
+    else:
+        session_data.pop("typesafe_adaptive_tier", None)
+
     # 1. 安全沙箱门禁拦截（基于 TypeSafe Noul 概率评判与置信度兜底）
     if decision.is_dangerous:
         log.warning(f"[Security] Intercepted dangerous request: '{user_text}' (prob={decision.danger_prob:.2f})")
@@ -280,6 +287,24 @@ async def _process_single_task(chat_id, task):
     if notes:
         notes_block = "\n".join([f"- {note}" for note in notes])
         system_instruction += f"[User's Permanent Notes / 备忘录]\n{notes_block}\n\n"
+
+    # 注入 System One 自适应思考模式指令 (Adaptive Reasoning Effort: Low / Medium / High)
+    adaptive_effort = session_data.get("typesafe_adaptive_tier")
+    if adaptive_effort == "Low":
+        system_instruction += (
+            "[System One Adaptive Reasoning: LOW]\n"
+            "当前任务判定为轻量日常问答或闲聊，请以极简快速思考直接给出精炼回答，避免冗长思考与过度分析。\n\n"
+        )
+    elif adaptive_effort == "High":
+        system_instruction += (
+            "[System One Adaptive Reasoning: HIGH]\n"
+            "当前任务判定为多步复杂工程或系统操作，请开启深度思考推理与严谨边界校验。\n\n"
+        )
+    elif adaptive_effort == "Medium":
+        system_instruction += (
+            "[System One Adaptive Reasoning: MEDIUM]\n"
+            "当前任务判定为常规工程开发，兼顾思考深度与响应效率。\n\n"
+        )
     
     # Load long-term memory if this is a new conversation
     final_prompt = user_text

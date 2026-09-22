@@ -536,13 +536,30 @@ def get_typesafe_config_state() -> Dict[str, Any]:
     model = config.TYPESAFE_MODEL or "jev-latest"
     base_url = config.TYPESAFE_BASE_URL
     tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+    auto_mode = getattr(config, "TYPESAFE_AUTO_MODE", True)
     return {
         "api_key": api_key,
         "enabled": enabled,
         "model": model,
         "base_url": base_url,
         "tier": tier,
+        "auto_mode": auto_mode,
     }
+
+
+def evaluate_adaptive_tier(decision: TypeSafeDecision) -> str:
+    """Evaluate adaptive reasoning effort tier: Low | Medium | High based on Jev decision."""
+    import config
+    auto_enabled = getattr(config, "TYPESAFE_AUTO_MODE", True)
+    if not auto_enabled:
+        return ""
+    if decision.is_fallback:
+        return "Low"
+    if decision.needs_terminal or decision.complexity_score >= 1.0 or (decision.intent == "code_agent" and decision.complexity_score >= 0.8):
+        return "High"
+    if decision.intent == "general_chat" or decision.complexity_score < 0.4:
+        return "Low"
+    return "Medium"
 
 
 def update_typesafe_env(
@@ -551,6 +568,7 @@ def update_typesafe_env(
     model: Optional[str] = None,
     base_url: Optional[str] = None,
     tier: Optional[str] = None,
+    auto_mode: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Persist updated TypeSafe settings to .env and synchronize runtime objects."""
     import config
@@ -585,6 +603,11 @@ def update_typesafe_env(
             updates["TYPESAFE_TIER"] = norm_tier
             config.TYPESAFE_TIER = norm_tier
             os.environ["TYPESAFE_TIER"] = norm_tier
+    if auto_mode is not None:
+        updates["TYPESAFE_AUTO_MODE"] = "true" if auto_mode else "false"
+        config.TYPESAFE_AUTO_MODE = bool(auto_mode)
+        os.environ["TYPESAFE_AUTO_MODE"] = "true" if auto_mode else "false"
+
 
     # Invalidate client so next call recreates it with new config
     global _async_client

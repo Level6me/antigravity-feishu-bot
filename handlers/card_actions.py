@@ -659,7 +659,30 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
                 )
             asyncio.run_coroutine_threadsafe(do_toggle_ts(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "TypeSafe 网关开关状态已更新！"}})
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "System One 网关开关状态已更新！"}})
+
+    elif action_value.get("action") == "toggle_typesafe_auto_mode":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_toggle_auto():
+                from system_one_gate import get_typesafe_config_state, update_typesafe_env
+                cur = get_typesafe_config_state()
+                new_auto = not cur.get("auto_mode", True)
+                updated = update_typesafe_env(auto_mode=new_auto)
+                new_card = CardBuilder.build_typesafe_config_card(
+                    api_key=updated["api_key"],
+                    enabled=updated["enabled"],
+                    model=updated["model"],
+                    base_url=updated["base_url"],
+                    tier=updated.get("tier"),
+                    auto_mode=updated.get("auto_mode", True)
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+                )
+            asyncio.run_coroutine_threadsafe(do_toggle_auto(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "自适应思考模式状态已更新！"}})
 
     elif action_value.get("action") == "open_typesafe_tier_menu":
         if app_state.main_loop and app_state.main_loop.is_running():

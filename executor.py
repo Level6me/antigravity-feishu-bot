@@ -1216,23 +1216,25 @@ async def execute_antigravity(
                 ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
                 ts_enabled = getattr(config, "TYPESAFE_ENABLED", True)
                 total_decisions = session_data.get("typesafe_decision_count", 0)
+                adaptive_tier = session_data.get("typesafe_adaptive_tier")
+                tier_suffix = f" · {adaptive_tier}" if adaptive_tier else ""
 
                 if ts_enabled:
                     if typesafe_blocked_info:
                         session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策 · 高危操作已拦截"
                     elif ts_tier == "copilot":
                         if total_decisions > 0:
-                            session_data["typesafe_audit_summary"] = f"⚡️S1：L3全流程决策x{total_decisions}次"
+                            session_data["typesafe_audit_summary"] = f"⚡️S1：L3全流程决策x{total_decisions}次{tier_suffix}"
                         else:
                             session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策x0"
                     elif ts_tier == "sentry":
                         if total_decisions > 0:
-                            session_data["typesafe_audit_summary"] = f"⚡️S1：L2双向决策x{total_decisions}次"
+                            session_data["typesafe_audit_summary"] = f"⚡️S1：L2双向决策x{total_decisions}次{tier_suffix}"
                         else:
                             session_data["typesafe_audit_summary"] = "⚡️S1：L2双向决策x0"
                     elif ts_tier == "gateway":
                         if total_decisions > 0:
-                            session_data["typesafe_audit_summary"] = f"⚡️S1：L1入口决策x{total_decisions}次"
+                            session_data["typesafe_audit_summary"] = f"⚡️S1：L1入口决策x{total_decisions}次{tier_suffix}"
                         else:
                             session_data["typesafe_audit_summary"] = "⚡️S1：L1入口决策x0"
                 else:
