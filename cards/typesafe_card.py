@@ -19,9 +19,9 @@ def build_typesafe_config_card(
     masked_key = f"{api_key[:4]}...{api_key[-4:]}" if (has_key and len(api_key) > 8) else ("已配置" if has_key else "未配置")
 
     tier_names = {
-        "gateway": "Level 1 · 边缘网关 (Gateway)",
-        "sentry": "Level 2 · 双向守卫 (Sentry)",
-        "copilot": "Level 3 · 全链路副驾 (Co-Pilot)"
+        "gateway": "基础级 · 基础防护",
+        "sentry": "增强级 · 双向防护",
+        "copilot": "严格级 · 全程防护"
     }
     cur_tier_display = tier_names.get(current_tier, tier_names["gateway"])
 
@@ -42,7 +42,7 @@ def build_typesafe_config_card(
     content_lines = [
         "**System One 决策网关控制台**\n",
         f"- **网关状态**：`{status_badge}`",
-        f"- **治理深度**：`{cur_tier_display}`",
+        f"- **安全等级**：`{cur_tier_display}`",
         f"- **主导模型**：`{model or 'jev-latest'}`",
         f"- **API Key**：`{masked_key}`",
         f"- **网关开关**：`{'已开启' if enabled else '已关闭'}`",
@@ -69,7 +69,7 @@ def build_typesafe_config_card(
         {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": "🛡️ **治理深度配置**："
+            "content": "🛡️ **防护等级管理**："
         },
         {
             "tag": "action",
@@ -79,7 +79,7 @@ def build_typesafe_config_card(
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "🛡️ 治理深度级别设置 →"
+                        "content": "🛡️ 安全防护等级设置 →"
                     },
                     "type": "primary",
                     "value": {"action": "open_typesafe_tier_menu"}
@@ -173,23 +173,23 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
     current_tier = tier or getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
 
     tier_names = {
-        "gateway": "Level 1 · 边缘网关",
-        "sentry": "Level 2 · 智能哨兵",
-        "copilot": "Level 3 · 全链路副驾"
+        "gateway": "基础级 · 基础防护",
+        "sentry": "增强级 · 双向防护",
+        "copilot": "严格级 · 全程防护"
     }
     cur_tier_display = tier_names.get(current_tier, tier_names["gateway"])
 
     elements = [
         {
             "tag": "markdown",
-            "content": f"🛡️ **当前生效治理深度**：`{cur_tier_display}`"
+            "content": f"🛡️ **当前防护等级**：`{cur_tier_display}`"
         },
         {"tag": "hr"},
-        # --- Level 1 ---
+        # --- Level: Gateway ---
         {
             "tag": "markdown",
             "content": (
-                "**Level 1 · 边缘网关 (Gateway)**\n"
+                "**基础级 · 基础防护 (Gateway)**\n"
                 "• **核心能力**：前置恶意请求拦截与插件任务快速分流\n"
                 "• **适用场景**：日常对话、轻量级问答与低延迟交互"
             )
@@ -202,7 +202,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "当前生效：L1 边缘网关" if current_tier == "gateway" else "切换至 L1 边缘网关"
+                        "content": "当前生效：基础防护" if current_tier == "gateway" else "切换至基础防护"
                     },
                     "type": "primary" if current_tier == "gateway" else "default",
                     "value": {"action": "set_typesafe_tier", "tier": "gateway", "from_sub_menu": True}
@@ -210,12 +210,12 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
             ]
         },
         {"tag": "hr"},
-        # --- Level 2 ---
+        # --- Level: Sentry ---
         {
             "tag": "markdown",
             "content": (
-                "**Level 2 · 智能哨兵 (Sentry)**\n"
-                "• **核心能力**：包含 Level 1 能力，增加输出内容敏感密钥与凭证防泄露审查\n"
+                "**增强级 · 双向防护 (Sentry)**\n"
+                "• **核心能力**：包含基础防护能力，增加输出内容敏感密钥与凭证防泄露审查\n"
                 "• **适用场景**：代码审查、常规工程开发与配置管理"
             )
         },
@@ -227,7 +227,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "当前生效：L2 智能哨兵" if current_tier == "sentry" else "切换至 L2 智能哨兵"
+                        "content": "当前生效：双向防护" if current_tier == "sentry" else "切换至双向防护"
                     },
                     "type": "primary" if current_tier == "sentry" else "default",
                     "value": {"action": "set_typesafe_tier", "tier": "sentry", "from_sub_menu": True}
@@ -235,12 +235,12 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
             ]
         },
         {"tag": "hr"},
-        # --- Level 3 ---
+        # --- Level: Co-Pilot ---
         {
             "tag": "markdown",
             "content": (
-                "**Level 3 · 全链路副驾 (Co-Pilot)**\n"
-                "• **核心能力**：包含 Level 2 能力，增加终端命令执行前风险评估与异常根因诊断\n"
+                "**严格级 · 全程防护 (Co-Pilot)**\n"
+                "• **核心能力**：包含双向防护能力，增加终端命令执行前风险评估与异常自愈诊断\n"
                 "• **适用场景**：系统运维操作、长任务排查与自动化脚本执行"
             )
         },
@@ -252,7 +252,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "当前生效：L3 全链路副驾" if current_tier == "copilot" else "切换至 L3 全链路副驾"
+                        "content": "当前生效：全程防护" if current_tier == "copilot" else "切换至全程防护"
                     },
                     "type": "primary" if current_tier == "copilot" else "default",
                     "value": {"action": "set_typesafe_tier", "tier": "copilot", "from_sub_menu": True}
@@ -281,7 +281,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "System One · 治理深度级别设置"},
+            "title": {"tag": "plain_text", "content": "System One · 安全防护等级设置"},
             "template": "blue"
         },
         "elements": elements
