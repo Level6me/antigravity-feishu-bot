@@ -25,41 +25,41 @@ def build_typesafe_config_card(
     }
     cur_tier_display = tier_names.get(current_tier, tier_names["gateway"])
 
-    # Status badges without colorful circle emojis
+    # Status badges with classic, intuitive emojis
     if not enabled:
         header_template = "grey"
-        status_badge = "[DISABLED] 已停用"
+        status_badge = "🔴 已停用 (DISABLED)"
         mode_desc = "网关已手动停用，系统当前使用本地规则兜底。"
     elif not has_key:
         header_template = "orange"
-        status_badge = "[FALLBACK] 启发式降级模式"
+        status_badge = "🟡 启发式降级模式 (FALLBACK)"
         mode_desc = "未配置 API Key，已自动激活本地启发式安全与意图规则。"
     else:
         header_template = "blue"
-        status_badge = "[ACTIVE] 正常运行中"
-        mode_desc = "System One 决策网关处于运行状态，负责请求安全与意图分流。"
+        status_badge = "🟢 正常运行中 (ACTIVE)"
+        mode_desc = "System One 毫秒级决策引擎已全面接管安全门禁、插件直通与复杂度路由。"
+
+    switch_text = "已开启 (True)" if enabled else "已关闭 (False)"
+    endpoint_text = f"`{base_url}`" if base_url else "`https://api.typesafe.ai/v1` (官方默认)"
 
     content_lines = [
-        "**System One 决策网关控制台**\n",
-        f"- **网关状态**：`{status_badge}`",
-        f"- **决策级别**：`{cur_tier_display}`",
-        f"- **主导模型**：`{model or 'jev-latest'}`",
-        f"- **API Key**：`{masked_key}`",
-        f"- **网关开关**：`{'已开启' if enabled else '已关闭'}`",
+        "⚡ **System One (Jev) 决策网关控制中心**\n",
+        f"• **网关状态**: {status_badge}",
+        f"• **决策级别**: ⚡️ `{cur_tier_display}`",
+        f"• **主导模型**: `{model or 'jev-latest'}`",
+        f"• **API Key**: `{masked_key}`",
+        f"• **网关开关**: `{switch_text}`",
+        f"• **服务端点**: {endpoint_text}",
     ]
-    if base_url:
-        content_lines.append(f"- **服务端点**：`{base_url}`")
-    else:
-        content_lines.append("- **服务端点**：`https://api.typesafe.ai/v1` (官方默认)")
 
     if test_result:
-        status_text = "[OK] 连通正常" if test_result.get("status") == "ok" else "[FAIL] 连接异常"
-        content_lines.append(f"\n**连通性测试结果 ({status_text})：**")
+        status_text = "🟢 连通正常 (OK)" if test_result.get("status") == "ok" else "🔴 连接异常 (FAIL)"
+        content_lines.append(f"\n📡 **连通性测试结果 ({status_text})：**")
         if "latency_ms" in test_result:
-            content_lines.append(f"- 端到端延迟：`{test_result['latency_ms']} ms`")
-        content_lines.append(f"- 返回信息：{test_result.get('message', '')}")
+            content_lines.append(f"• 端到端延迟：`{test_result['latency_ms']} ms`")
+        content_lines.append(f"• 返回信息：{test_result.get('message', '')}")
     else:
-        content_lines.append(f"\n**运行说明**：{mode_desc}")
+        content_lines.append(f"\n💡 **运行说明**: {mode_desc}")
 
     elements = [
         {
@@ -69,7 +69,7 @@ def build_typesafe_config_card(
         {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": "🛡️ **决策级别管理**："
+            "content": "⚡ **决策级别管理**："
         },
         {
             "tag": "action",
@@ -79,7 +79,7 @@ def build_typesafe_config_card(
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "🛡️ 决策级别配置与说明 →"
+                        "content": "⚡ 决策级别配置与说明 →"
                     },
                     "type": "primary",
                     "value": {"action": "open_typesafe_tier_menu"}
@@ -160,7 +160,7 @@ def build_typesafe_config_card(
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "System One · 决策网关控制台"},
+            "title": {"tag": "plain_text", "content": "⚡ System One 决策网关控制台"},
             "template": header_template
         },
         "elements": elements
@@ -281,7 +281,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "System One · 决策级别配置"},
+            "title": {"tag": "plain_text", "content": "⚡ System One · 决策级别配置"},
             "template": "blue"
         },
         "elements": elements
