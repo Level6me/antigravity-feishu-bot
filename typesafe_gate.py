@@ -67,6 +67,16 @@ class TypeSafeToolDecision:
     is_fallback: bool = False
 
 
+@dataclass
+class TypeSafeErrorDiagnosis:
+    """Diagnostic feedback returned by TypeSafe tool error evaluation (Level 3 Post-Tool)."""
+    error_category: str = "general_error"  # missing_dependency | permission_denied | syntax_or_arg_error | network_timeout | dead_end | general_error
+    confidence: float = 1.0
+    suggestion: str = ""
+    is_fallback: bool = False
+    latency_ms: float = 0.0
+
+
 _async_client: Optional[Any] = None
 
 
@@ -446,6 +456,76 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         log.warning(f"[TypeSafe Co-Pilot] evaluate_tool_execution error: {e}")
         return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=elapsed_ms, is_fallback=True)
+
+
+async def evaluate_tool_error(command: str, error_output: str, timeout_seconds: float = 2.0) -> TypeSafeErrorDiagnosis:
+    """Level 3 (Co-Pilot): Diagnose execution failures and provide root cause classification."""
+    import config
+    tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+    if tier != "copilot" or not getattr(config, "TYPESAFE_ENABLED", True):
+        return TypeSafeErrorDiagnosis(error_category="general_error", is_fallback=True)
+
+    client = get_typesafe_client()
+    if not client:
+        err_lower = error_output.lower()
+        if any(k in err_lower for k in ["command not found", "no such file", "modulenotfound", "cannot find module"]):
+            cat = "missing_dependency"
+        elif "permission denied" in err_lower:
+            cat = "permission_denied"
+        elif any(k in err_lower for k in ["syntaxerror", "invalid option", "unrecognized argument"]):
+            cat = "syntax_or_arg_error"
+        elif any(k in err_lower for k in ["connection refused", "timeout", "timed out", "temporary failure in name resolution"]):
+            cat = "network_timeout"
+        else:
+            cat = "general_error"
+        return TypeSafeErrorDiagnosis(error_category=cat, is_fallback=True)
+
+    start_t = time.perf_counter()
+    try:
+        eval_state = f"Command: {command}\nError Output: {error_output[:500]}"
+        questions = {
+            "error_category": Choice(
+                instructions="Classify the root cause of this execution failure into the most accurate diagnostic category",
+                criteria={
+                    "missing_dependency": "Command, executable, library, package, or required resource is not installed or not in PATH",
+                    "permission_denied": "File permission, socket permission, or elevated root/sudo privileges required",
+                    "syntax_or_arg_error": "Invalid command arguments, flags, syntax error, or unparseable parameters",
+                    "network_timeout": "DNS lookup failed, remote server unreachable, connection refused or request timed out",
+                    "dead_end": "Fatal logical loop, empty result where file was expected, or irrecoverable environment state",
+                    "general_error": "Runtime application exception, unhandled error, or uncategorized standard failure"
+                }
+            )
+        }
+        res = await asyncio.wait_for(
+            client.system_one(
+                state=eval_state,
+                questions=questions,
+                model=getattr(config, "TYPESAFE_MODEL", "jev-latest")
+            ),
+            timeout=timeout_seconds
+        )
+        elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+        cat = str(res.answers["error_category"].choice) if "error_category" in res.answers else "general_error"
+        conf = float(res.answers["error_category"].confidence) if ("error_category" in res.answers and res.answers["error_category"].confidence is not None) else 1.0
+
+        suggestions_map = {
+            "missing_dependency": "缺少依赖或可执行文件，建议检查 PATH 或安装对应包",
+            "permission_denied": "权限受限，建议检查文件读写权限或确认执行身份",
+            "syntax_or_arg_error": "命令参数或语法有误，建议核对工具参数规格",
+            "network_timeout": "网络连接超时或目标主机不可达，建议检查网络或稍后重试",
+            "dead_end": "陷入死循环或环境状态缺失，建议切换策略或重置上下文",
+            "general_error": "程序执行异常，建议检查详细日志输出"
+        }
+        return TypeSafeErrorDiagnosis(
+            error_category=cat,
+            confidence=conf,
+            suggestion=suggestions_map.get(cat, "请检查执行日志排查原因"),
+            latency_ms=elapsed_ms
+        )
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+        log.warning(f"[TypeSafe Co-Pilot] evaluate_tool_error error: {e}")
+        return TypeSafeErrorDiagnosis(error_category="general_error", latency_ms=elapsed_ms, is_fallback=True)
 
 
 def get_typesafe_config_state() -> Dict[str, Any]:

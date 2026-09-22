@@ -118,9 +118,14 @@ def build_ai_response(reply_text, choice_card_data=None, current_model="Default"
 
         context_str = f"🧠 上下文剩余: {free_pct_str}% ({format_k(free_tokens)}/{format_k(max_tokens)})"
 
+        ts_summary = session_data.get("typesafe_audit_summary") if session_data else None
+        meta_parts = [f"🤖 模型: {current_model}", f"🗂️ 项目: {project_name_only}", context_str]
+        if ts_summary:
+            meta_parts.append(ts_summary)
+
         elements.append({
             "tag": "markdown",
-            "content": f"<font color='grey'>🤖 模型: {current_model} | 🗂️ 项目: {project_name_only} | {context_str}</font>"
+            "content": f"<font color='grey'>{' | '.join(meta_parts)}</font>"
         })
 
     # 4. Quota Actions

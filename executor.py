@@ -749,6 +749,9 @@ async def execute_antigravity(
             last_tool_action = ""
             completed_tool_steps = []
             current_tool_action = ""
+            typesafe_tool_audits = []
+            typesafe_blocked_info = None
+            evaluated_tool_calls = set()
             last_patched_card_sig = ""
             STALL_TIMEOUT = 300
             STALL_HARD_TIMEOUT = 600
@@ -821,6 +824,42 @@ async def execute_antigravity(
                                     )
                                 from plugin_manager import plugin_manager
                                 await plugin_manager.dispatch_tool_call(act, {})
+
+                            # Level 3 (Co-Pilot): 工具执行前安全核验与高危物理阻断
+                            import config
+                            ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+                            if ts_tier == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
+                                cmd_target = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
+                                if not cmd_target:
+                                    if t_name in ["write_to_file", "replace_file_content"]:
+                                        cmd_target = f"{t_name} target={t_params.get('TargetFile', '')}"
+                                    elif t_name:
+                                        cmd_target = f"tool:{t_name}"
+                                call_key = step_up.get("call_id") or step_up.get("tool_call_id") or f"{t_name}:{cmd_target[:100]}"
+                                if call_key and call_key not in evaluated_tool_calls and cmd_target:
+                                    evaluated_tool_calls.add(call_key)
+                                    try:
+                                        from typesafe_gate import evaluate_tool_execution
+                                        tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
+                                        if not tool_dec.is_allowed:
+                                            log.critical(f"[TypeSafe Co-Pilot] CRITICAL RISK DETECTED! Physical blocking: {cmd_target} -> {tool_dec.reason}")
+                                            typesafe_blocked_info = {
+                                                "tool": t_name,
+                                                "target": cmd_target,
+                                                "reason": tool_dec.reason or "Jev 判定为严重系统破坏性操作",
+                                                "risk_level": tool_dec.risk_level
+                                            }
+                                            await sess.close()
+                                            should_break = True
+                                            break
+                                        else:
+                                            typesafe_tool_audits.append({
+                                                "tool": t_name,
+                                                "risk": tool_dec.risk_level,
+                                                "latency_ms": tool_dec.latency_ms
+                                            })
+                                    except Exception as e:
+                                        log.warning(f"[TypeSafe Co-Pilot] Tool execution evaluation error: {e}")
                     elif event_type == "result":
                         if current_tool_action:
                             if current_tool_action not in completed_tool_steps:
@@ -982,10 +1021,24 @@ async def execute_antigravity(
             is_error = (process.returncode != 0 and process.returncode is not None)
             session_data["last_execution_error"] = is_error
 
+            if typesafe_blocked_info:
+                is_error = True
+                session_data["last_execution_error"] = True
+                final_reply = (
+                    f"🛡️ **[TypeSafe Co-Pilot 物理阻断]**\n\n"
+                    f"检测到本次任务尝试执行高危破坏性操作，TypeSafe AI 决策网关（Jev 模型）已物理熔断执行流，保护宿主服务器安全：\n"
+                    f"- **拦截操作**：`{typesafe_blocked_info['target'][:150]}`\n"
+                    f"- **风险评级**：`{typesafe_blocked_info['risk_level']}`\n"
+                    f"- **阻断原因**：{typesafe_blocked_info['reason']}\n\n"
+                    f"💡 *安全提示：如需执行此类破坏性或特权运维指令，请通过终端直接操作或提升操作权限。*"
+                )
+
             transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
 
             # 优先从本轮直接实时接收到的流式文本 / 最终 result 中提取回答，完全避免读取到历史轮次的 transcript
-            if stream_result_response and stream_result_response.strip():
+            if typesafe_blocked_info:
+                pass
+            elif stream_result_response and stream_result_response.strip():
                 final_reply = stream_result_response.strip()
             elif accumulated_text and accumulated_text.strip():
                 final_reply = accumulated_text.strip()
@@ -1011,11 +1064,32 @@ async def execute_antigravity(
             reply_text = final_reply or accumulated_text.strip() or ""
             reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
             reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
-            if not is_quota_exhausted:
+            if not is_quota_exhausted and not typesafe_blocked_info:
                 reply_text = extract_final_chinese_response(reply_text)
 
             from plugin_manager import plugin_manager
             reply_text = await plugin_manager.dispatch_after_ai(reply_text, chat_id, session_data)
+
+            # Level 3 (Co-Pilot): 任务执行异常时的自愈根因诊断
+            if is_error and not is_quota_exhausted and not typesafe_blocked_info:
+                import config
+                if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
+                    try:
+                        from typesafe_gate import evaluate_tool_error
+                        err_target = last_tool_action or (completed_tool_steps[-1] if completed_tool_steps else "unknown_tool")
+                        raw_err = stream_error_msg or stderr_text or reply_text[:300]
+                        if raw_err:
+                            diag_res = await evaluate_tool_error(command=str(err_target), error_output=raw_err)
+                            if diag_res and not diag_res.is_fallback:
+                                diag_note = (
+                                    f"\n\n🔍 **[TypeSafe Jev 故障根因诊断]**\n"
+                                    f"- **根因分类**：`{diag_res.error_category}` (置信度 {diag_res.confidence:.0%})\n"
+                                    f"- **排查建议**：{diag_res.suggestion}"
+                                )
+                                if diag_note not in reply_text:
+                                    reply_text = (reply_text + diag_note).strip()
+                    except Exception as diag_e:
+                        log.warning(f"[TypeSafe Co-Pilot] evaluate_tool_error in executor failed: {diag_e}")
             
             if not is_quota_exhausted and transcript_path and os.path.exists(transcript_path):
                 try:
@@ -1121,7 +1195,7 @@ async def execute_antigravity(
                     log.error(f"[Executor] Typewriter streaming failed: {e}")
 
             # Level 2 & 3: TypeSafe Egress Guard (出口安全质检与凭证泄露防护)
-            if reply_text:
+            if reply_text and not typesafe_blocked_info:
                 try:
                     from typesafe_gate import evaluate_output_guard
                     guard_res = await evaluate_output_guard(reply_text)
@@ -1130,6 +1204,29 @@ async def execute_antigravity(
                         reply_text = f"🛡️ **[TypeSafe 安全护栏拦截]**\n\n系统检测到本次生成内容存在高风险项：{guard_res.reason}。\n为保护服务器安全与敏感凭证，该部分输出已被安全沙箱拦截。"
                 except Exception as e:
                     log.warning(f"[TypeSafe Sentry] Egress guard hook error: {e}")
+
+            # 生成 TypeSafe 全链路审计摘要（存入 session_data 供卡片底部渲染展示）
+            try:
+                import config
+                ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+                ts_enabled = getattr(config, "TYPESAFE_ENABLED", True)
+                if ts_enabled:
+                    if typesafe_blocked_info:
+                        session_data["typesafe_audit_summary"] = "🛡️ Jev [L3副驾] · 物理熔断阻断"
+                    elif ts_tier == "copilot":
+                        n_audited = len(typesafe_tool_audits)
+                        if n_audited > 0:
+                            session_data["typesafe_audit_summary"] = f"🛡️ Jev [L3副驾] · {n_audited}次工具核验通过 · 出口质检通过"
+                        else:
+                            session_data["typesafe_audit_summary"] = "🛡️ Jev [L3副驾] · 会话护航 · 出口质检通过"
+                    elif ts_tier == "sentry":
+                        session_data["typesafe_audit_summary"] = "🛡️ Jev [L2哨兵] · 出口质检通过"
+                    elif ts_tier == "gateway":
+                        session_data["typesafe_audit_summary"] = "🛡️ Jev [L1网关] · 入口决策完成"
+                else:
+                    session_data.pop("typesafe_audit_summary", None)
+            except Exception as e:
+                log.warning(f"[TypeSafe] Failed to build audit summary: {e}")
 
             final_card = CardBuilder.build_ai_response(
                 reply_text, 
