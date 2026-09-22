@@ -619,3 +619,10 @@ def update_typesafe_env(
 
     log.info(f"[TypeSafe] Updated configuration in .env: {list(updates.keys())}")
     return get_typesafe_config_state()
+
+
+# System One standard aliases
+get_system_one_config_state = get_typesafe_config_state
+update_system_one_env = update_typesafe_env
+test_system_one_connectivity = test_typesafe_connectivity
+

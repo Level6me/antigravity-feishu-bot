@@ -645,7 +645,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_toggle_ts():
-                from typesafe_gate import get_typesafe_config_state, update_typesafe_env
+                from system_one_gate import get_typesafe_config_state, update_typesafe_env
                 cur = get_typesafe_config_state()
                 new_state = not cur["enabled"]
                 updated = update_typesafe_env(enabled=new_state)
@@ -664,7 +664,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     elif action_value.get("action") == "open_typesafe_tier_menu":
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_open_tier_menu():
-                from typesafe_gate import get_typesafe_config_state
+                from system_one_gate import get_typesafe_config_state
                 cur = get_typesafe_config_state()
                 tier_card = CardBuilder.build_typesafe_tier_menu_card(tier=cur.get("tier", "gateway"))
                 await asyncio.get_running_loop().run_in_executor(
@@ -676,7 +676,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     elif action_value.get("action") == "open_typesafe_main_card":
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_open_main_card():
-                from typesafe_gate import get_typesafe_config_state
+                from system_one_gate import get_typesafe_config_state
                 cur = get_typesafe_config_state()
                 main_card = CardBuilder.build_typesafe_config_card(
                     api_key=cur["api_key"],
@@ -704,7 +704,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         disp_name = tier_names.get(target_tier, target_tier)
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_set_ts_tier():
-                from typesafe_gate import update_typesafe_env
+                from system_one_gate import update_typesafe_env
                 updated = update_typesafe_env(tier=target_tier)
                 if from_sub_menu:
                     new_card = CardBuilder.build_typesafe_tier_menu_card(tier=updated.get("tier", target_tier))
@@ -728,7 +728,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         target_model = action_value.get("model", "jev-latest")
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_set_ts_model():
-                from typesafe_gate import update_typesafe_env
+                from system_one_gate import update_typesafe_env
                 updated = update_typesafe_env(model=target_model)
                 new_card = CardBuilder.build_typesafe_config_card(
                     api_key=updated["api_key"],
@@ -746,7 +746,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     elif action_value.get("action") == "test_typesafe_ping":
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_ts_ping():
-                from typesafe_gate import test_typesafe_connectivity, get_typesafe_config_state
+                from system_one_gate import test_typesafe_connectivity, get_typesafe_config_state
                 cur = get_typesafe_config_state()
                 res = await test_typesafe_connectivity()
                 new_card = CardBuilder.build_typesafe_config_card(
@@ -768,7 +768,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_clear_ts_key():
-                from typesafe_gate import update_typesafe_env
+                from system_one_gate import update_typesafe_env
                 updated = update_typesafe_env(api_key="")
                 new_card = CardBuilder.build_typesafe_config_card(
                     api_key=updated["api_key"],

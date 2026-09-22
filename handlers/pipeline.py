@@ -112,8 +112,8 @@ async def _process_single_task(chat_id, task):
     if not user_text:
         return
 
-    # === TypeSafe System One (Jev) Decision Gateway & Guardrail ===
-    from typesafe_gate import evaluate_message_gate
+    # === System One (Jev) Decision Gateway & Guardrail ===
+    from system_one_gate import evaluate_message_gate
     from plugin_manager import plugin_manager
 
     decision = await evaluate_message_gate(user_text)
@@ -128,7 +128,7 @@ async def _process_single_task(chat_id, task):
     # 2. 插件极速直达通道 (Fast-Path / 零模型冷启动延迟)
     if decision.intent == "typesafe_status" and decision.intent_confidence >= 0.65:
         log.info(f"[TypeSafe FastPath] Direct dispatch typesafe config inquiry for chat {chat_id}")
-        from typesafe_gate import get_typesafe_config_state, test_typesafe_connectivity
+        from system_one_gate import get_typesafe_config_state, test_typesafe_connectivity
         cfg = get_typesafe_config_state()
         res = await test_typesafe_connectivity()
         ts_card = CardBuilder.build_typesafe_config_card(

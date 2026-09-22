@@ -463,7 +463,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             new_key = user_text.strip()
             session_data.pop("pending_command", None)
             await save_session_async(chat_id, session_data)
-            from typesafe_gate import update_typesafe_env
+            from system_one_gate import update_typesafe_env
             cfg = update_typesafe_env(api_key=new_key)
             card = CardBuilder.build_typesafe_config_card(
                 api_key=cfg["api_key"],
@@ -483,7 +483,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 new_url = ""
             session_data.pop("pending_command", None)
             await save_session_async(chat_id, session_data)
-            from typesafe_gate import update_typesafe_env
+            from system_one_gate import update_typesafe_env
             cfg = update_typesafe_env(base_url=new_url)
             card = CardBuilder.build_typesafe_config_card(
                 api_key=cfg["api_key"],
@@ -885,7 +885,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         return True, user_text
 
     elif first_word in ["/s1", "/sys1", "/system1"]:
-        from typesafe_gate import get_typesafe_config_state
+        from system_one_gate import get_typesafe_config_state
         cfg = get_typesafe_config_state()
         ts_card = CardBuilder.build_typesafe_config_card(
             api_key=cfg["api_key"],
