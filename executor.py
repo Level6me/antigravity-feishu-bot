@@ -1249,7 +1249,8 @@ async def execute_antigravity(
                 current_project=session_data.get('project', '默认'),
                 is_error=is_error,
                 is_streaming=False,
-                session_data=session_data
+                session_data=session_data,
+                is_quota=is_quota_exhausted
             )
             if bot_reply_msg_id:
                 patch_ok = await _feishu_call(

@@ -122,12 +122,17 @@ async def _process_single_task(chat_id, task):
     else:
         session_data["typesafe_decision_count"] = 0
 
-    from system_one_gate import evaluate_adaptive_tier
+    from system_one_gate import evaluate_adaptive_tier, resolve_adaptive_model
     adaptive_tier = evaluate_adaptive_tier(decision)
     if adaptive_tier:
         session_data["typesafe_adaptive_tier"] = adaptive_tier
+        base_model = session_data.get("base_model") or session_data.get("model", "")
+        session_data["base_model"] = base_model
+        session_data["model"] = resolve_adaptive_model(base_model, adaptive_tier)
     else:
         session_data.pop("typesafe_adaptive_tier", None)
+        if "base_model" in session_data:
+            session_data["model"] = session_data["base_model"]
 
     # 1. 安全沙箱门禁拦截（基于 TypeSafe Noul 概率评判与置信度兜底）
     if decision.is_dangerous:
@@ -329,11 +334,9 @@ async def _process_single_task(chat_id, task):
             timeout=43200.0
         )
     except asyncio.TimeoutError:
-        from logger import log
         log.error(f"[Pipeline] execute_antigravity hard timeout (43200s / 12h) for chat {chat_id}")
         is_error = True
     except Exception as e:
-        from logger import log
         log.error(f"[Pipeline] execute_antigravity raised for chat {chat_id}: {e}")
         is_error = True
     

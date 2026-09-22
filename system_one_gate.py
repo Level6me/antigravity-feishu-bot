@@ -562,6 +562,31 @@ def evaluate_adaptive_tier(decision: TypeSafeDecision) -> str:
     return "Medium"
 
 
+def resolve_adaptive_model(base_model: str, adaptive_tier: str) -> str:
+    """Resolve model ID with adapted thinking depth within current model family.
+    
+    Guarantees:
+    - Stays strictly within current model family (never shifts across vendors, e.g. never switches to Claude).
+    - Adapts effort suffix (-low, -medium, -high) if the model family supports thinking tiers.
+    """
+    if not adaptive_tier or not base_model:
+        return base_model
+        
+    m = base_model.lower().strip()
+    tier = adaptive_tier.lower().strip()
+    
+    for prefix in ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]:
+        if prefix in m:
+            return f"{prefix}-{tier}"
+            
+    if "gemini-3.1-pro" in m:
+        target_tier = "low" if tier == "low" else "high"
+        return f"gemini-3.1-pro-{target_tier}"
+        
+    return base_model
+
+
+
 def update_typesafe_env(
     api_key: Optional[str] = None,
     enabled: Optional[bool] = None,

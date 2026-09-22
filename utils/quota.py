@@ -229,8 +229,13 @@ def get_reset_duration_for_model(quota_data: Optional[dict], model_name: str = "
     if not quota_data or "response" not in quota_data or "groups" not in quota_data["response"]:
         return None
 
+    from config import DEFAULT_MODEL
+    effective_model = model_name
+    if not effective_model or effective_model in ("Default", "默认"):
+        effective_model = DEFAULT_MODEL
+
     groups = quota_data["response"].get("groups", [])
-    model_lower = (model_name or "").lower()
+    model_lower = (effective_model or "").lower()
 
     target_groups = []
     for g in groups:
@@ -244,7 +249,8 @@ def get_reset_duration_for_model(quota_data: Optional[dict], model_name: str = "
                 target_groups.append(g)
 
     if not target_groups:
-        target_groups = groups
+        # Default to Gemini group if not specifically requested Claude/GPT
+        target_groups = [g for g in groups if "gemini" in g.get("displayName", "").lower()] or groups
 
     now_utc = datetime.now(timezone.utc)
     soonest_seconds = None
@@ -342,10 +348,14 @@ async def detect_and_format_quota_error(raw_text: str = "", model: str = "") -> 
     # If still not detected or no duration, check live quota API
     if not quota_detected:
         try:
+            from config import DEFAULT_MODEL
+            effective_model = model
+            if not effective_model or effective_model in ("Default", "默认"):
+                effective_model = DEFAULT_MODEL
             quota_data = await asyncio.get_running_loop().run_in_executor(None, fetch_quota)
             if quota_data and "response" in quota_data and "groups" in quota_data["response"]:
                 groups = quota_data["response"].get("groups", [])
-                model_lower = (model or "").lower()
+                model_lower = (effective_model or "").lower()
                 for g in groups:
                     d_name = g.get("displayName", "").lower()
                     desc = g.get("description", "").lower()
@@ -353,8 +363,6 @@ async def detect_and_format_quota_error(raw_text: str = "", model: str = "") -> 
                     if "gemini" in model_lower and ("gemini" in d_name or "gemini" in desc):
                         match_group = True
                     elif any(k in model_lower for k in ["claude", "gpt", "3p"]) and any(k in d_name or k in desc for k in ["claude", "gpt", "3p"]):
-                        match_group = True
-                    elif not model_lower:
                         match_group = True
                     if match_group:
                         for b in g.get("buckets", []):
