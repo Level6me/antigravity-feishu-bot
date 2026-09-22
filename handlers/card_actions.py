@@ -697,9 +697,9 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         target_tier = action_value.get("tier", "gateway")
         from_sub_menu = action_value.get("from_sub_menu", False)
         tier_names = {
-            "gateway": "基础级 · 基础防护",
-            "sentry": "增强级 · 双向防护",
-            "copilot": "严格级 · 全程防护",
+            "gateway": "入口决策",
+            "sentry": "双向决策",
+            "copilot": "全流程决策",
         }
         disp_name = tier_names.get(target_tier, target_tier)
         if app_state.main_loop and app_state.main_loop.is_running():
@@ -720,7 +720,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
                 )
             asyncio.run_coroutine_threadsafe(do_set_ts_tier(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"防护等级已切换为 {disp_name}"}})
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"决策级别已切换为 {disp_name}"}})
 
     elif action_value.get("action") == "set_typesafe_model":
         if not is_admin(chat_id):
