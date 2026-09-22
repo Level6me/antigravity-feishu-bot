@@ -23,6 +23,45 @@ chat_queues = app_state.chat_queues
 chat_workers = app_state.chat_workers
 
 
+def _is_operational_command(text: str) -> bool:
+    """检测用户输入是否属于需要自主执行的操作命令/执行诉求，而非纯文本提问."""
+    if not text:
+        return False
+    clean = text.strip()
+
+    # 1. 优先排除以疑问词开头的纯技术原理/科普咨询（除非包含强烈的委托执行动作如“帮我”、“执行”、“修改”）
+    question_starters = ("什么是", "为什么", "为何", "怎么看", "如何理解", "有哪些区别", "区别是什么", "介绍一下", "讲解一下", "科普一下", "如何", "怎么", "怎样")
+    if any(clean.startswith(qs) for qs in question_starters) and not any(kw in clean for kw in ("帮我", "请帮我", "麻烦帮我", "执行", "修改", "改一下", "启动", "排查")):
+        return False
+
+    # 2. 快捷确认与授权执行指令 (例如上下文讨论后的快速授权)
+    confirm_patterns = [
+        r"^(可以|行|好|好的|没问题|ok|yes)?[,，\s]*(改吧|更新吧|执行吧|执行|确认|就这样改|就按这样改|就这样做|这样改|帮我改|直接改|做吧|搞起|推吧|发吧|跑一下|开始吧|继续|搞一下|弄一下|好|好的|好啊|行|行的|没问题|ok|yes|go)[\s!！。.]*$",
+        r"(就这样|就按这|按这|照这|按照你|按你|照你).*(改|做|办|执行|更新)",
+        r"(按照|按|照)(你说的|建议|方案|思路)(改|执行|做|更新|处理)",
+        r"(直接|帮我|请帮我)(改|更新|执行|跑|做|提交|推送|部署)",
+    ]
+    for pat in confirm_patterns:
+        if re.search(pat, clean, re.IGNORECASE):
+            return True
+
+    # 3. 明确的操作动词与系统命令请求
+    action_keywords = [
+        "帮我", "请帮我", "麻烦帮我", "替我", "给我",
+        "启动", "运行", "执行", "重启", "停止", "杀死", "关闭",
+        "修改", "改写", "修复", "改一下", "重构", "优化代码",
+        "排查", "排错", "查一下", "看一下", "看下", "看日志", "查看日志",
+        "部署", "安装", "编译", "构建", "配置", "上线",
+        "推送到", "提交代码", "git push", "git commit", "git pull",
+        "创建文件", "写入", "生成", "导出", "下载", "删除",
+        "测试", "压测", "跑测试"
+    ]
+    if any(kw in clean for kw in action_keywords):
+        return True
+
+    return False
+
+
 async def process_chat_queue(chat_id):
     queue = chat_queues[chat_id]
     try:
@@ -204,15 +243,19 @@ async def _process_single_task(chat_id, task):
         log.info(f"Message in chat {chat_id} was intercepted and consumed by plugin hook. Skipping AI execution.")
         return
 
-    # 4. 智能意图路由 (Fast Chat vs Deep Agent)
-    # 严格置信度与终端需求门禁 (Confidence-Gated Routing)：
-    # 只有当明确需要终端操作、或复杂度 >= 1.2、或高置信度 (>=0.85) 的代码工程任务时，才判定为 complex_agent
+    # 4. 智能意图路由与人机交互规范 (严格贯彻：区分提问与命令)
+    # 提问/咨询：纯文本高效解答，不无端调用工具
+    # 命令/操作：自主决策并调用工具执行到底，绝对严禁推诿让用户手动在终端执行！
     is_complex_agent = False
     if session_data.get("mode") == "agent":
         is_complex_agent = True
-    elif decision.needs_terminal or decision.complexity_score >= 1.2:
+    elif decision.needs_terminal:
         is_complex_agent = True
-    elif decision.intent == "code_agent" and decision.intent_confidence >= 0.85 and decision.complexity_score >= 0.8:
+    elif decision.intent in ("code_agent", "server_health", "cron", "notes"):
+        is_complex_agent = True
+    elif decision.complexity_score >= 0.5:
+        is_complex_agent = True
+    elif _is_operational_command(user_text):
         is_complex_agent = True
 
     # Inject protocol into prompt
@@ -239,8 +282,30 @@ async def _process_single_task(chat_id, task):
             "请遵循口语化表达：语言自然生动、亲切凝练、避免输出冗长代码块或复杂大表格，重点结论口语化输出。\n\n"
         )
 
+    # 注入当前工作空间上下文与安全防线（全模式常驻保障）
+    system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
+    system_instruction += (
+        "[System Execution & Safety Guardrails]\n"
+        "1. 【全指令强制超时保护】：使用 `run_command` 工具执行命令时必须前缀 `timeout <秒数>`。\n"
+        "2. 【受限递归与大目录避让】：严禁在系统全盘或依赖目录中执行无限制的大范围递归搜索。\n"
+        "3. 【严禁自杀式重启自身服务】：严禁执行重启当前飞书机器人自身进程的操作。\n"
+        "4. 【计划任务调度能力】：当用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
+    )
+    import config
+    if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot":
+        system_instruction += (
+            "[System One Co-Pilot Safety & Reflection Directive / 全链路执行与自愈规则]\n"
+            "当前系统处于 System One Level 3 (全链路保护) 模式。\n"
+            "1. 【工具调用前审慎】：在调用任何终端工具前，自主核验命令参数的安全性与受控性，严禁执行超出项目目录的不可逆破坏操作。\n"
+            "2. 【报错自愈反思】：当命令执行失败或退出码非 0 时，必须深入分析错误根因，自愈提出修正方案，严禁机械重复失败命令。\n\n"
+        )
+    project_prompts = session_data.get("project_prompts", {})
+    if current_proj in project_prompts and project_prompts[current_proj]:
+        proj_prompt_text = project_prompts[current_proj]
+        system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
+
     if is_complex_agent:
-        # 复杂工程任务：注入步骤规划、自主执行、安全防护与项目上下文
+        # 复杂工程任务与操作指令模式
         system_instruction += (
             "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
             "【必须执行】：只要你根据用户意图，判断当前任务需要调用工具执行操作（如读取或修改代码、执行终端命令、多步骤排错、数据查询分析、生成或导出文件等），你必须在调用任何工具之前，首先在回复的最开始输出一行结构化规划标签：\n"
@@ -251,35 +316,18 @@ async def _process_single_task(chat_id, task):
             "3. 前端界面会自动提取此标签并在飞书卡片中向用户展示步骤清单并逐项打勾 ✅。\n\n"
         )
         system_instruction += (
-            "[System Autonomous Execution Directive / 自主执行决策规范]\n"
-            "当遇到需要执行终端命令、修改文件或面对多种技术路径时，请始终自主评估并采用最稳妥、最高效的最优方案直接调用工具执行，严禁主动提出多选方案（如方案一/二/三/四）让用户做选择题，严禁停下来等待用户确认。始终直接自主推进并交付最终结果！\n\n"
+            "[System Autonomous Execution Directive / 自主执行决策规范：区分提问与命令]\n"
+            "用户核心准则：【严格区分提问与命令】。\n"
+            "1. 【命令必须自主执行并交付】：对于用户的操作、修改、运行、测试、排查等执行诉求（包括“改吧”、“执行”等简短授权），你必须作为全功能 Autonomous Agent 自主调用相应工具（如 run_command、replace_file_content、view_file、write_to_file）直接执行并交付最终结果！\n"
+            "2. 【绝对严禁推诿与二次确认】：严禁让用户在服务器或本地终端手动运行命令；严禁抛出多选方案让用户做选择题；严禁停下来等待用户确认；绝对严禁以“受安全策略限制”或“处于轻量模式”等借口拒绝执行命令！\n\n"
         )
-        system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
-        system_instruction += (
-            "[System Execution & Safety Guardrails]\n"
-            "1. 【全指令强制超时保护】：使用 `run_command` 工具执行命令时必须前缀 `timeout <秒数>`。\n"
-            "2. 【受限递归与大目录避让】：严禁在系统全盘或依赖目录中执行无限制的大范围递归搜索。\n"
-            "3. 【严禁自杀式重启自身服务】：严禁执行重启当前飞书机器人自身进程的操作。\n"
-            "4. 【计划任务调度能力】：当用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
-        )
-        import config
-        if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot":
-            system_instruction += (
-                "[System One Co-Pilot Safety & Reflection Directive / 全链路执行与自愈规则]\n"
-                "当前系统处于 System One Level 3 (全链路保护) 模式。\n"
-                "1. 【工具调用前审慎】：在调用任何终端工具前，自主核验命令参数的安全性与受控性，严禁执行超出项目目录的不可逆破坏操作。\n"
-                "2. 【报错自愈反思】：当命令执行失败或退出码非 0 时，必须深入分析错误根因，自愈提出修正方案，严禁机械重复失败命令。\n\n"
-            )
-        project_prompts = session_data.get("project_prompts", {})
-        if current_proj in project_prompts and project_prompts[current_proj]:
-            proj_prompt_text = project_prompts[current_proj]
-            system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
     else:
-        # 轻量问答与概念咨询模式：严禁执行任何工具，纯文本秒级回答
+        # 轻量问答与概念咨询模式：纯文本高效解答，但绝不推诿操作诉求
         system_instruction += (
-            "[System Mode Directive: Pure Conversation Mode / 轻量纯文本问答模式]\n"
-            "当前任务经由 System One 决策网关评估属于常规技术咨询或日常对话，严禁调用任何终端命令工具（如 run_command）或文件读写工具！"
-            "请直接针对用户问题组织语言，用凝练清晰的语言直接给出最终解答。\n\n"
+            "[System Interaction Directive / 问答交互规范：区分提问与命令]\n"
+            "用户核心准则：【严格区分提问与命令】。\n"
+            "1. 【提问秒回纯文本】：当用户提出的是概念咨询、原理解释、方案探讨或日常闲聊时，无需调用工具，直接针对问题组织语言，用凝练、专业、清晰的语言进行解答。\n"
+            "2. 【操作绝不推诿拒执】：若用户意图中含有明确的操作诉求（如查看代码、排查错误、修改配置、运行命令等），你依然拥有完整的全套 Agent 工具调用能力，必须自主调用工具完成任务，绝对严禁以“处于轻量纯文本交互模式”或“受安全策略限制”为由拒绝执行，绝对严禁推诿让用户去终端手动操作！\n\n"
         )
 
     # 注入长期记忆上下文（由 ai_memory 插件提取）

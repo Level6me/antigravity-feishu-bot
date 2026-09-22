@@ -159,7 +159,8 @@ def _fallback_heuristic_eval(user_text: str, reason: str) -> TypeSafeDecision:
             "代码", "写代码", "改代码", "重构", "修复", "debug", "bug", "报错",
             "运行", "执行", "部署", "重启", "编译", "终端", "命令", "脚本", "bash",
             "shell", "git", "curl", "npm", "pip", "python", "文件", "创建文件", "读文件",
-            "搜索", "排查", "项目", "skill", "mcp"
+            "搜索", "排查", "项目", "skill", "mcp", "启动", "杀死", "关闭", "构建",
+            "推送", "提交", "改吧", "更新吧", "查一下", "看日志", "跑一下", "测试"
         ]
         if any(kw in lower_text for kw in agent_keywords):
             intent = "code_agent"
@@ -252,9 +253,9 @@ async def evaluate_message_gate(user_text: str, timeout_seconds: float = 2.0) ->
         complexity_score = float(complexity_ans.score) if complexity_ans else 0.0
         complexity_conf = float(complexity_ans.confidence) if (complexity_ans and complexity_ans.confidence is not None) else 1.0
 
-        # Read needs_terminal
+        # Read needs_terminal (threshold >= 0.45 for sensitive operational detection)
         term_ans = answers.get("needs_terminal")
-        needs_terminal = float(term_ans.noul) >= 0.70 if term_ans else False
+        needs_terminal = float(term_ans.noul) >= 0.45 if term_ans else False
 
         log.info(
             f"[TypeSafe] Decision in {elapsed_ms:.1f}ms: "
