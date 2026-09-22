@@ -37,12 +37,12 @@ def build_typesafe_config_card(
     else:
         header_template = "blue"
         status_badge = "[ACTIVE] 正常运行中"
-        mode_desc = "System One 毫秒级决策引擎已全面接管。"
+        mode_desc = "System One 决策网关处于运行状态，负责请求安全与意图分流。"
 
     content_lines = [
-        "**System One · 认知决策网关控制台**\n",
+        "**System One 决策网关控制台**\n",
         f"- **网关状态**：`{status_badge}`",
-        f"- **介入级别**：`{cur_tier_display}` *(点击下方设置进入二级说明)*",
+        f"- **治理深度**：`{cur_tier_display}`",
         f"- **主导模型**：`{model or 'jev-latest'}`",
         f"- **API Key**：`{masked_key}`",
         f"- **网关开关**：`{'已开启' if enabled else '已关闭'}`",
@@ -69,7 +69,7 @@ def build_typesafe_config_card(
         {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": "🛡️ **接入深度管理**："
+            "content": "🛡️ **治理深度配置**："
         },
         {
             "tag": "action",
@@ -79,7 +79,7 @@ def build_typesafe_config_card(
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "🛡️ 介入深度级别设置与详细说明 →"
+                        "content": "🛡️ 治理深度级别设置 →"
                     },
                     "type": "primary",
                     "value": {"action": "open_typesafe_tier_menu"}
@@ -89,7 +89,7 @@ def build_typesafe_config_card(
         {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": "⚙️ **常规参数与运维操作**："
+            "content": "⚙️ **参数与管理操作**："
         },
         {
             "tag": "action",
@@ -189,9 +189,9 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
         {
             "tag": "markdown",
             "content": (
-                "**Level 1 · 边缘网关 (Gateway)** `[毫秒级 · 零侵入]`\n"
-                "• **核心能力**：前置恶意注入拦截 + 插件秒级直达分流\n"
-                "• **适用场景**：高频对话、轻量问答、对首字响应延迟要求极高的日常交流"
+                "**Level 1 · 边缘网关 (Gateway)**\n"
+                "• **核心能力**：前置恶意请求拦截与插件任务快速分流\n"
+                "• **适用场景**：日常对话、轻量级问答与低延迟交互"
             )
         },
         {
@@ -202,7 +202,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "✓ 当前已激活 (L1 边缘网关)" if current_tier == "gateway" else "切换至 L1 边缘网关"
+                        "content": "当前生效：L1 边缘网关" if current_tier == "gateway" else "切换至 L1 边缘网关"
                     },
                     "type": "primary" if current_tier == "gateway" else "default",
                     "value": {"action": "set_typesafe_tier", "tier": "gateway", "from_sub_menu": True}
@@ -214,9 +214,9 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
         {
             "tag": "markdown",
             "content": (
-                "**Level 2 · 智能哨兵 (Sentry)** `[双向闭环 · 凭证防泄]`\n"
-                "• **核心能力**：L1 全部能力 + 出口防敏感密钥/私钥/密码外泄审查\n"
-                "• **适用场景**：代码审查、日常工程调试、涉及敏感配置与环境变量的操作"
+                "**Level 2 · 智能哨兵 (Sentry)**\n"
+                "• **核心能力**：包含 Level 1 能力，增加输出内容敏感密钥与凭证防泄露审查\n"
+                "• **适用场景**：代码审查、常规工程开发与配置管理"
             )
         },
         {
@@ -227,7 +227,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "✓ 当前已激活 (L2 智能哨兵)" if current_tier == "sentry" else "切换至 L2 智能哨兵"
+                        "content": "当前生效：L2 智能哨兵" if current_tier == "sentry" else "切换至 L2 智能哨兵"
                     },
                     "type": "primary" if current_tier == "sentry" else "default",
                     "value": {"action": "set_typesafe_tier", "tier": "sentry", "from_sub_menu": True}
@@ -239,9 +239,9 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
         {
             "tag": "markdown",
             "content": (
-                "**Level 3 · 全链路副驾 (Co-Pilot)** `[端到端守护 · 故障自愈]`\n"
-                "• **核心能力**：L2 全部能力 + 高危命令物理熔断 + 报错自愈根因诊断\n"
-                "• **适用场景**：复杂系统运维、长任务自主排错、高自主性全自动工程任务"
+                "**Level 3 · 全链路副驾 (Co-Pilot)**\n"
+                "• **核心能力**：包含 Level 2 能力，增加终端命令执行前风险评估与异常根因诊断\n"
+                "• **适用场景**：系统运维操作、长任务排查与自动化脚本执行"
             )
         },
         {
@@ -252,7 +252,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "✓ 当前已激活 (L3 全链路副驾)" if current_tier == "copilot" else "切换至 L3 全链路副驾"
+                        "content": "当前生效：L3 全链路副驾" if current_tier == "copilot" else "切换至 L3 全链路副驾"
                     },
                     "type": "primary" if current_tier == "copilot" else "default",
                     "value": {"action": "set_typesafe_tier", "tier": "copilot", "from_sub_menu": True}
