@@ -40,7 +40,7 @@ def build_typesafe_config_card(
         mode_desc = "System One 毫秒级决策引擎已全面接管。"
 
     content_lines = [
-        "**TypeSafe AI (System One Jev) 决策网关控制台**\n",
+        "**System One · 认知决策网关控制台**\n",
         f"- **网关状态**：`{status_badge}`",
         f"- **介入级别**：`{cur_tier_display}` *(点击下方设置进入二级说明)*",
         f"- **主导模型**：`{model or 'jev-latest'}`",
@@ -160,7 +160,7 @@ def build_typesafe_config_card(
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "TypeSafe AI 决策网关控制台"},
+            "title": {"tag": "plain_text", "content": "System One · 决策网关控制台"},
             "template": header_template
         },
         "elements": elements
@@ -281,7 +281,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "TypeSafe AI · 治理深度级别设置"},
+            "title": {"tag": "plain_text", "content": "System One · 治理深度级别设置"},
             "template": "blue"
         },
         "elements": elements
