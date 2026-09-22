@@ -117,6 +117,10 @@ async def _process_single_task(chat_id, task):
     from plugin_manager import plugin_manager
 
     decision = await evaluate_message_gate(user_text)
+    if not decision.is_fallback:
+        session_data["typesafe_decision_count"] = 1
+    else:
+        session_data["typesafe_decision_count"] = 0
 
     # 1. 安全沙箱门禁拦截（基于 TypeSafe Noul 概率评判与置信度兜底）
     if decision.is_dangerous:
