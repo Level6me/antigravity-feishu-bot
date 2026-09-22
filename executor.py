@@ -1025,12 +1025,12 @@ async def execute_antigravity(
                 is_error = True
                 session_data["last_execution_error"] = True
                 final_reply = (
-                    f"🛡️ **[TypeSafe Co-Pilot 物理阻断]**\n\n"
-                    f"检测到本次任务尝试执行高危破坏性操作，TypeSafe AI 决策网关（Jev 模型）已物理熔断执行流，保护宿主服务器安全：\n"
+                    f"🛡️ **[System One 安全策略拦截]**\n\n"
+                    f"系统检测到本次任务尝试执行高危操作，已根据安全策略中止执行流：\n"
                     f"- **拦截操作**：`{typesafe_blocked_info['target'][:150]}`\n"
                     f"- **风险评级**：`{typesafe_blocked_info['risk_level']}`\n"
-                    f"- **阻断原因**：{typesafe_blocked_info['reason']}\n\n"
-                    f"💡 *安全提示：如需执行此类破坏性或特权运维指令，请通过终端直接操作或提升操作权限。*"
+                    f"- **拦截原因**：{typesafe_blocked_info['reason']}\n\n"
+                    f"💡 *安全提示：如需执行该类操作，请在受控环境中通过终端直接执行。*"
                 )
 
             transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
@@ -1082,8 +1082,8 @@ async def execute_antigravity(
                             diag_res = await evaluate_tool_error(command=str(err_target), error_output=raw_err)
                             if diag_res and not diag_res.is_fallback:
                                 diag_note = (
-                                    f"\n\n🔍 **[TypeSafe Jev 故障根因诊断]**\n"
-                                    f"- **根因分类**：`{diag_res.error_category}` (置信度 {diag_res.confidence:.0%})\n"
+                                    f"\n\n🔍 **[System One 故障诊断]**\n"
+                                    f"- **故障分类**：`{diag_res.error_category}` (置信度 {diag_res.confidence:.0%})\n"
                                     f"- **排查建议**：{diag_res.suggestion}"
                                 )
                                 if diag_note not in reply_text:
@@ -1201,7 +1201,7 @@ async def execute_antigravity(
                     guard_res = await evaluate_output_guard(reply_text)
                     if not guard_res.is_safe:
                         log.warning(f"[TypeSafe Sentry] Output blocked: {guard_res.reason}")
-                        reply_text = f"🛡️ **[TypeSafe 安全护栏拦截]**\n\n系统检测到本次生成内容存在高风险项：{guard_res.reason}。\n为保护服务器安全与敏感凭证，该部分输出已被安全沙箱拦截。"
+                        reply_text = f"🛡️ **[System One 内容安全拦截]**\n\n系统检测到本次生成内容存在不合规或敏感项：{guard_res.reason}。\n为保护数据与敏感凭证安全，该部分内容已被拦截。"
                 except Exception as e:
                     log.warning(f"[TypeSafe Sentry] Egress guard hook error: {e}")
 
@@ -1212,17 +1212,17 @@ async def execute_antigravity(
                 ts_enabled = getattr(config, "TYPESAFE_ENABLED", True)
                 if ts_enabled:
                     if typesafe_blocked_info:
-                        session_data["typesafe_audit_summary"] = "🛡️ System One [L3副驾] · 物理熔断阻断"
+                        session_data["typesafe_audit_summary"] = "🛡️ System One [L3] · 高危操作已拦截"
                     elif ts_tier == "copilot":
                         n_audited = len(typesafe_tool_audits)
                         if n_audited > 0:
-                            session_data["typesafe_audit_summary"] = f"🛡️ System One [L3副驾] · {n_audited}次工具核验通过 · 出口质检通过"
+                            session_data["typesafe_audit_summary"] = f"🛡️ System One [L3] · {n_audited}次工具核验通过 · 出口质检通过"
                         else:
-                            session_data["typesafe_audit_summary"] = "🛡️ System One [L3副驾] · 会话护航 · 出口质检通过"
+                            session_data["typesafe_audit_summary"] = "🛡️ System One [L3] · 执行守护 · 出口质检通过"
                     elif ts_tier == "sentry":
-                        session_data["typesafe_audit_summary"] = "🛡️ System One [L2哨兵] · 出口质检通过"
+                        session_data["typesafe_audit_summary"] = "🛡️ System One [L2] · 出口质检通过"
                     elif ts_tier == "gateway":
-                        session_data["typesafe_audit_summary"] = "🛡️ System One [L1网关] · 入口决策完成"
+                        session_data["typesafe_audit_summary"] = "🛡️ System One [L1] · 入口决策完成"
                 else:
                     session_data.pop("typesafe_audit_summary", None)
             except Exception as e:

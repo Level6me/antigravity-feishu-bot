@@ -249,8 +249,8 @@ async def _process_single_task(chat_id, task):
         import config
         if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot":
             system_instruction += (
-                "[TypeSafe Co-Pilot Safety & Reflection Directive / 全链路副驾规则]\n"
-                "当前系统处于 TypeSafe Level 3 (全链路副驾) 保护模式。\n"
+                "[System One Co-Pilot Safety & Reflection Directive / 全链路执行与自愈规则]\n"
+                "当前系统处于 System One Level 3 (全链路保护) 模式。\n"
                 "1. 【工具调用前审慎】：在调用任何终端工具前，自主核验命令参数的安全性与受控性，严禁执行超出项目目录的不可逆破坏操作。\n"
                 "2. 【报错自愈反思】：当命令执行失败或退出码非 0 时，必须深入分析错误根因，自愈提出修正方案，严禁机械重复失败命令。\n\n"
             )
@@ -262,7 +262,7 @@ async def _process_single_task(chat_id, task):
         # 轻量问答与概念咨询模式：严禁执行任何工具，纯文本秒级回答
         system_instruction += (
             "[System Mode Directive: Pure Conversation Mode / 轻量纯文本问答模式]\n"
-            "当前任务经过 TypeSafe 决策网关评估属于普通技术咨询、概念解答或日常对话，严禁调用任何终端命令工具（如 run_command）或文件读写工具！"
+            "当前任务经由 System One 决策网关评估属于常规技术咨询或日常对话，严禁调用任何终端命令工具（如 run_command）或文件读写工具！"
             "请直接针对用户问题组织语言，用凝练清晰的语言直接给出最终解答。\n\n"
         )
 

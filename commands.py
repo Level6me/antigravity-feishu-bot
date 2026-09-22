@@ -884,7 +884,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             )
         return True, user_text
 
-    elif first_word in ["/s1", "/sys1", "/system1", "/tc", "/typesafe", "/ts"]:
+    elif first_word in ["/s1", "/sys1", "/system1"]:
         from typesafe_gate import get_typesafe_config_state
         cfg = get_typesafe_config_state()
         ts_card = CardBuilder.build_typesafe_config_card(
