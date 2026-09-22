@@ -697,9 +697,9 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         target_tier = action_value.get("tier", "gateway")
         from_sub_menu = action_value.get("from_sub_menu", False)
         tier_names = {
-            "gateway": "入口决策",
-            "sentry": "双向决策",
-            "copilot": "全流程决策",
+            "gateway": "L1 · 入口决策",
+            "sentry": "L2 · 双向决策",
+            "copilot": "L3 · 全流程决策",
         }
         disp_name = tier_names.get(target_tier, target_tier)
         if app_state.main_loop and app_state.main_loop.is_running():

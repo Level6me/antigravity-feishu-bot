@@ -1212,17 +1212,17 @@ async def execute_antigravity(
                 ts_enabled = getattr(config, "TYPESAFE_ENABLED", True)
                 if ts_enabled:
                     if typesafe_blocked_info:
-                        session_data["typesafe_audit_summary"] = "🛡️ System One [全流程决策] · 高危操作已拦截"
+                        session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策 · 高危操作已拦截"
                     elif ts_tier == "copilot":
                         n_audited = len(typesafe_tool_audits)
                         if n_audited > 0:
-                            session_data["typesafe_audit_summary"] = f"🛡️ System One [全流程决策] · {n_audited}次工具核验通过 · 出口质检通过"
+                            session_data["typesafe_audit_summary"] = f"⚡️S1：L3全流程决策x{n_audited}次"
                         else:
-                            session_data["typesafe_audit_summary"] = "🛡️ System One [全流程决策] · 执行守护 · 出口质检通过"
+                            session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策"
                     elif ts_tier == "sentry":
-                        session_data["typesafe_audit_summary"] = "🛡️ System One [双向决策] · 出口质检通过"
+                        session_data["typesafe_audit_summary"] = "⚡️S1：L2双向决策"
                     elif ts_tier == "gateway":
-                        session_data["typesafe_audit_summary"] = "🛡️ System One [入口决策] · 准入完成"
+                        session_data["typesafe_audit_summary"] = "⚡️S1：L1入口决策"
                 else:
                     session_data.pop("typesafe_audit_summary", None)
             except Exception as e:

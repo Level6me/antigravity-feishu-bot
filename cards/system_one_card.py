@@ -19,9 +19,9 @@ def build_typesafe_config_card(
     masked_key = f"{api_key[:4]}...{api_key[-4:]}" if (has_key and len(api_key) > 8) else ("已配置" if has_key else "未配置")
 
     tier_names = {
-        "gateway": "入口决策",
-        "sentry": "双向决策",
-        "copilot": "全流程决策"
+        "gateway": "L1 · 入口决策",
+        "sentry": "L2 · 双向决策",
+        "copilot": "L3 · 全流程决策"
     }
     cur_tier_display = tier_names.get(current_tier, tier_names["gateway"])
 
@@ -173,23 +173,23 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
     current_tier = tier or getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
 
     tier_names = {
-        "gateway": "入口决策",
-        "sentry": "双向决策",
-        "copilot": "全流程决策"
+        "gateway": "L1 · 入口决策",
+        "sentry": "L2 · 双向决策",
+        "copilot": "L3 · 全流程决策"
     }
     cur_tier_display = tier_names.get(current_tier, tier_names["gateway"])
 
     elements = [
         {
             "tag": "markdown",
-            "content": f"🛡️ **当前生效级别**：`{cur_tier_display}`"
+            "content": f"⚡️ **当前生效级别**：`{cur_tier_display}`"
         },
         {"tag": "hr"},
         # --- Level: Gateway ---
         {
             "tag": "markdown",
             "content": (
-                "**入口决策 (Gateway)**\n"
+                "**L1 · 入口决策 (Gateway)**\n"
                 "• **核心决策机制**：在用户请求输入端进行意图分类、插件指令快速分流与恶意破坏性请求拦截。\n"
                 "• **适用场景**：日常对话交互、低延迟轻量问答与常规指令直达。"
             )
@@ -202,7 +202,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "当前生效：入口决策" if current_tier == "gateway" else "切换至入口决策"
+                        "content": "当前生效：L1·入口决策" if current_tier == "gateway" else "切换至 L1·入口决策"
                     },
                     "type": "primary" if current_tier == "gateway" else "default",
                     "value": {"action": "set_typesafe_tier", "tier": "gateway", "from_sub_menu": True}
@@ -214,7 +214,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
         {
             "tag": "markdown",
             "content": (
-                "**双向决策 (Sentry)**\n"
+                "**L2 · 双向决策 (Sentry)**\n"
                 "• **核心决策机制**：涵盖入口决策能力，并在模型输出端执行敏感凭据（Token/密钥/密码）防泄露审查。\n"
                 "• **适用场景**：代码审查开发、环境配置管理与团队共享协作场景。"
             )
@@ -227,7 +227,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "当前生效：双向决策" if current_tier == "sentry" else "切换至双向决策"
+                        "content": "当前生效：L2·双向决策" if current_tier == "sentry" else "切换至 L2·双向决策"
                     },
                     "type": "primary" if current_tier == "sentry" else "default",
                     "value": {"action": "set_typesafe_tier", "tier": "sentry", "from_sub_menu": True}
@@ -239,7 +239,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
         {
             "tag": "markdown",
             "content": (
-                "**全流程决策 (Co-Pilot)**\n"
+                "**L3 · 全流程决策 (Co-Pilot)**\n"
                 "• **核心决策机制**：覆盖输入、输出及执行全链路，增加终端命令执行前风险评估阻断与执行报错自愈根因诊断。\n"
                 "• **适用场景**：复杂系统运维、长任务排查与自动化高权限脚本执行。"
             )
@@ -252,7 +252,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "当前生效：全流程决策" if current_tier == "copilot" else "切换至全流程决策"
+                        "content": "当前生效：L3·全流程决策" if current_tier == "copilot" else "切换至 L3·全流程决策"
                     },
                     "type": "primary" if current_tier == "copilot" else "default",
                     "value": {"action": "set_typesafe_tier", "tier": "copilot", "from_sub_menu": True}
