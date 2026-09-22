@@ -48,11 +48,11 @@ def build_typesafe_config_card(
     content_lines = [
         "⚡ **System One (Jev) 决策网关控制中心**\n",
         f"• **网关状态**: {status_badge}",
-        f"• **决策级别**: ⚡️ `{cur_tier_display}`",
-        f"• **模式自适应**: `{auto_mode_text}`",
+        f"• **决策级别**: ⚡️ {cur_tier_display}",
+        f"• **模式自适应**: {auto_mode_text}",
         f"• **主导模型**: `{model or 'jev-latest'}`",
         f"• **API Key**: `{masked_key}`",
-        f"• **网关开关**: `{switch_text}`",
+        f"• **网关开关**: {switch_text}",
         f"• **服务端点**: {endpoint_text}",
     ]
 
@@ -73,31 +73,32 @@ def build_typesafe_config_card(
         {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": "⚡ **决策级别管理**："
+            "content": "⚡ **核心功能与决策调度**："
         },
         {
             "tag": "action",
-            "layout": "flow",
+            "layout": "bisect",
             "actions": [
                 {
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "⚡ 决策级别配置与说明 →"
+                        "content": "⚡ 自适应：已开启" if current_auto_mode else "⚡ 自适应：已关闭"
                     },
-                    "type": "primary",
-                    "value": {"action": "open_typesafe_tier_menu"}
+                    "type": "primary" if current_auto_mode else "default",
+                    "value": {"action": "toggle_typesafe_auto_mode"}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "📡 连通性测试 (Ping)"},
+                    "type": "default",
+                    "value": {"action": "test_typesafe_ping"}
                 }
             ]
         },
-        {"tag": "hr"},
-        {
-            "tag": "markdown",
-            "content": "⚙️ **参数与管理操作**："
-        },
         {
             "tag": "action",
-            "layout": "flow",
+            "layout": "bisect",
             "actions": [
                 {
                     "tag": "button",
@@ -116,21 +117,6 @@ def build_typesafe_config_card(
                     },
                     "type": "primary" if model == "jev-1.13.0" else "default",
                     "value": {"action": "set_typesafe_model", "model": "jev-1.13.0"}
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "测试连通性 (Ping)"},
-                    "type": "default",
-                    "value": {"action": "test_typesafe_ping"}
-                },
-                {
-                    "tag": "button",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": "自适应：已开启" if current_auto_mode else "自适应：已关闭"
-                    },
-                    "type": "primary" if current_auto_mode else "default",
-                    "value": {"action": "toggle_typesafe_auto_mode"}
                 }
             ]
         },
@@ -140,28 +126,54 @@ def build_typesafe_config_card(
             "actions": [
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "设置 API Key"},
-                    "type": "primary",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "🎛️ 决策级别配置与说明 →"
+                    },
+                    "type": "default",
+                    "value": {"action": "open_typesafe_tier_menu"}
+                }
+            ]
+        },
+        {"tag": "hr"},
+        {
+            "tag": "markdown",
+            "content": "⚙️ **系统配置与凭据管理**："
+        },
+        {
+            "tag": "action",
+            "layout": "bisect",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔑 设置 API Key"},
+                    "type": "default",
                     "value": {"action": "prompt_typesafe_key"}
                 },
                 {
                     "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🌐 设置 Base URL"},
+                    "type": "default",
+                    "value": {"action": "prompt_typesafe_base_url"}
+                }
+            ]
+        },
+        {
+            "tag": "action",
+            "layout": "bisect",
+            "actions": [
+                {
+                    "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "停用网关" if enabled else "启用网关"
+                        "content": "🛑 停用网关" if enabled else "🟢 启用网关"
                     },
-                    "type": "default",
+                    "type": "default" if enabled else "primary",
                     "value": {"action": "toggle_typesafe_enabled"}
                 },
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "设置 Base URL"},
-                    "type": "default",
-                    "value": {"action": "prompt_typesafe_base_url"}
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "清除 Key"},
+                    "text": {"tag": "plain_text", "content": "🗑️ 清除 Key"},
                     "type": "danger",
                     "value": {"action": "clear_typesafe_key"}
                 }
@@ -195,7 +207,7 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
     elements = [
         {
             "tag": "markdown",
-            "content": f"⚡️ **当前生效级别**：`{cur_tier_display}`"
+            "content": f"⚡️ **当前生效级别**：{cur_tier_display}"
         },
         {"tag": "hr"},
         # --- Level: Gateway ---

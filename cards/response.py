@@ -12,7 +12,7 @@ from cards.common import create_footer
 MAX_MARKDOWN_CHARS = 25000
 TRUNCATION_NOTICE = "\n\n_(回复过长已截断，完整内容请在工作区查看)_"
 
-def build_ai_response(reply_text, choice_card_data=None, current_model="Default", current_project="默认", is_error=False, is_streaming=False, session_data=None):
+def build_ai_response(reply_text, choice_card_data=None, current_model="Default", current_project="默认", is_error=False, is_streaming=False, session_data=None, is_quota=None):
     elements = []
     
     # 1. Main Text
@@ -129,7 +129,10 @@ def build_ai_response(reply_text, choice_card_data=None, current_model="Default"
         })
 
     # 4. Quota Actions
-    is_quota = is_quota_error(reply_text)
+    if is_quota is None:
+        is_quota = is_error and is_quota_error(reply_text)
+    else:
+        is_quota = bool(is_quota)
     if is_quota:
         elements.append({"tag": "hr"})
         elements.append({

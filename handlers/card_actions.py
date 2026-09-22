@@ -79,6 +79,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 session_data = await get_session_async(chat_id)
                 old_model = session_data.get("model", "Default")
                 session_data["model"] = new_model
+                session_data["base_model"] = new_model
                 await save_session_async(chat_id, session_data)
                 log.info(f"Switched model to {new_model} in chat {chat_id}")
                 try:
