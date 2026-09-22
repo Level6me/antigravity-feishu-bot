@@ -136,7 +136,8 @@ async def _process_single_task(chat_id, task):
             enabled=cfg["enabled"],
             model=cfg["model"],
             base_url=cfg["base_url"],
-            test_result=res
+            test_result=res,
+            tier=cfg.get("tier")
         )
         await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, ts_card))
         return
@@ -245,6 +246,14 @@ async def _process_single_task(chat_id, task):
             "3. 【严禁自杀式重启自身服务】：严禁执行重启当前飞书机器人自身进程的操作。\n"
             "4. 【计划任务调度能力】：当用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
         )
+        import config
+        if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot":
+            system_instruction += (
+                "[TypeSafe Co-Pilot Safety & Reflection Directive / 全链路副驾规则]\n"
+                "当前系统处于 TypeSafe Level 3 (全链路副驾) 保护模式。\n"
+                "1. 【工具调用前审慎】：在调用任何终端工具前，自主核验命令参数的安全性与受控性，严禁执行超出项目目录的不可逆破坏操作。\n"
+                "2. 【报错自愈反思】：当命令执行失败或退出码非 0 时，必须深入分析错误根因，自愈提出修正方案，严禁机械重复失败命令。\n\n"
+            )
         project_prompts = session_data.get("project_prompts", {})
         if current_proj in project_prompts and project_prompts[current_proj]:
             proj_prompt_text = project_prompts[current_proj]

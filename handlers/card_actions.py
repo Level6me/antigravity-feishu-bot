@@ -661,6 +661,33 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_toggle_ts(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "TypeSafe 网关开关状态已更新！"}})
 
+    elif action_value.get("action") == "set_typesafe_tier":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
+        target_tier = action_value.get("tier", "gateway")
+        tier_names = {
+            "gateway": "Level 1 · 边缘网关",
+            "sentry": "Level 2 · 双向守卫",
+            "copilot": "Level 3 · 全链路副驾",
+        }
+        disp_name = tier_names.get(target_tier, target_tier)
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_set_ts_tier():
+                from typesafe_gate import update_typesafe_env
+                updated = update_typesafe_env(tier=target_tier)
+                new_card = CardBuilder.build_typesafe_config_card(
+                    api_key=updated["api_key"],
+                    enabled=updated["enabled"],
+                    model=updated["model"],
+                    base_url=updated["base_url"],
+                    tier=updated.get("tier", target_tier)
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+                )
+            asyncio.run_coroutine_threadsafe(do_set_ts_tier(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"介入深度已切换为 {disp_name}"}})
+
     elif action_value.get("action") == "set_typesafe_model":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
@@ -673,7 +700,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     api_key=updated["api_key"],
                     enabled=updated["enabled"],
                     model=updated["model"],
-                    base_url=updated["base_url"]
+                    base_url=updated["base_url"],
+                    tier=updated.get("tier")
                 )
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
@@ -692,7 +720,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     enabled=cur["enabled"],
                     model=cur["model"],
                     base_url=cur["base_url"],
-                    test_result=res
+                    test_result=res,
+                    tier=cur.get("tier")
                 )
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
@@ -711,7 +740,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     api_key=updated["api_key"],
                     enabled=updated["enabled"],
                     model=updated["model"],
-                    base_url=updated["base_url"]
+                    base_url=updated["base_url"],
+                    tier=updated.get("tier")
                 )
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: patch_interactive_card_sdk(card_message_id, new_card)

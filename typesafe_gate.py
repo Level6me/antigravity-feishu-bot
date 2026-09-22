@@ -15,7 +15,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
-from config import TYPESAFE_API_KEY, TYPESAFE_ENABLED, TYPESAFE_MODEL, TYPESAFE_BASE_URL
+from config import TYPESAFE_API_KEY, TYPESAFE_ENABLED, TYPESAFE_MODEL, TYPESAFE_BASE_URL, TYPESAFE_TIER
 from logger import log
 
 try:
@@ -28,7 +28,7 @@ except ImportError:
 
 @dataclass
 class TypeSafeDecision:
-    """Structured decision returned by TypeSafe System One gateway."""
+    """Structured decision returned by TypeSafe System One gateway (Level 1 Ingress)."""
     is_dangerous: bool
     danger_prob: float
     intent: str
@@ -41,6 +41,30 @@ class TypeSafeDecision:
     is_fallback: bool = False
     fallback_reason: Optional[str] = None
     raw_answers: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TypeSafeOutputDecision:
+    """Decision returned by TypeSafe output guard (Level 2 & 3 Egress)."""
+    is_safe: bool
+    secret_leak_prob: float = 0.0
+    harmful_prob: float = 0.0
+    latency_ms: float = 0.0
+    is_fallback: bool = False
+    fallback_reason: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@dataclass
+class TypeSafeToolDecision:
+    """Decision returned by TypeSafe tool supervisor (Level 3 In-Flight)."""
+    is_allowed: bool
+    risk_level: str = "low_risk"  # low_risk | medium_risk | critical_risk
+    risk_confidence: float = 1.0
+    critical_prob: float = 0.0
+    latency_ms: float = 0.0
+    reason: Optional[str] = None
+    is_fallback: bool = False
 
 
 _async_client: Optional[Any] = None
@@ -299,6 +323,131 @@ async def test_typesafe_connectivity() -> Dict[str, Any]:
         }
 
 
+async def evaluate_output_guard(response_text: str, timeout_seconds: float = 2.0) -> TypeSafeOutputDecision:
+    """Level 2 & 3 (Sentry / Co-Pilot): Evaluate bot-generated response before delivery.
+    
+    Checks for sensitive credential leaks (tokens, private keys) and destructive advice.
+    """
+    import config
+    tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+    if tier not in ("sentry", "copilot") or not getattr(config, "TYPESAFE_ENABLED", True):
+        return TypeSafeOutputDecision(is_safe=True)
+
+    client = get_typesafe_client()
+    if not client:
+        # Fallback regex check for obvious secrets
+        has_secret = bool(re.search(r'(-----BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY-----|ghp_[a-zA-Z0-9]{36}|ey[a-zA-Z0-9_\-]{30,}\.ey[a-zA-Z0-9_\-]{30,})', response_text))
+        return TypeSafeOutputDecision(is_safe=not has_secret, secret_leak_prob=0.99 if has_secret else 0.01, is_fallback=True)
+
+    start_t = time.perf_counter()
+    try:
+        sample_text = response_text[:1500] if len(response_text) > 1500 else response_text
+        questions = {
+            "secret_leak": Noul(
+                instructions="Does this generated message inadvertently reveal raw private secrets, production passwords, active OAuth tokens, or unmasked private keys?"
+            ),
+            "harmful_payload": Noul(
+                instructions="Does this generated output contain dangerous malicious exploit code, unsolicited destructive wiping commands, or security evasion?"
+            )
+        }
+        res = await asyncio.wait_for(
+            client.system_one(
+                state=sample_text,
+                questions=questions,
+                model=getattr(config, "TYPESAFE_MODEL", "jev-latest")
+            ),
+            timeout=timeout_seconds
+        )
+        elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+        secret_p = float(res.answers["secret_leak"].noul) if "secret_leak" in res.answers else 0.0
+        harmful_p = float(res.answers["harmful_payload"].noul) if "harmful_payload" in res.answers else 0.0
+
+        is_safe = (secret_p < 0.85) and (harmful_p < 0.85)
+        reason = None
+        if not is_safe:
+            reasons = []
+            if secret_p >= 0.85:
+                reasons.append(f"检测到潜在敏感凭证暴露 (风险概率: {secret_p:.2f})")
+            if harmful_p >= 0.85:
+                reasons.append(f"检测到高危破坏性指令生成 (风险概率: {harmful_p:.2f})")
+            reason = "，".join(reasons)
+            log.warning(f"[TypeSafe Sentry] Output blocked: {reason}")
+
+        return TypeSafeOutputDecision(
+            is_safe=is_safe,
+            secret_leak_prob=secret_p,
+            harmful_prob=harmful_p,
+            latency_ms=elapsed_ms,
+            reason=reason
+        )
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+        log.warning(f"[TypeSafe Sentry] evaluate_output_guard error: {e}")
+        return TypeSafeOutputDecision(is_safe=True, latency_ms=elapsed_ms, is_fallback=True, fallback_reason=str(e))
+
+
+async def evaluate_tool_execution(command: str, context: str = "", timeout_seconds: float = 2.0) -> TypeSafeToolDecision:
+    """Level 3 (Co-Pilot): Evaluate a shell command before execution."""
+    import config
+    tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+    if tier != "copilot" or not getattr(config, "TYPESAFE_ENABLED", True):
+        return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk")
+
+    client = get_typesafe_client()
+    if not client:
+        is_crit = bool(re.search(r'\b(rm\s+-rf\s+/|mkfs|:\(\)\{|dd\s+if=/dev/)\b', command))
+        return TypeSafeToolDecision(
+            is_allowed=not is_crit,
+            risk_level="critical_risk" if is_crit else "low_risk",
+            is_fallback=True
+        )
+
+    start_t = time.perf_counter()
+    try:
+        eval_state = f"Command: {command}\nContext: {context[:400]}"
+        questions = {
+            "risk_assessment": Choice(
+                instructions="Assess the operational risk of executing this terminal command in the current environment",
+                criteria={
+                    "low_risk": "Standard read-only query, status inspection, build, testing, or harmless file creation/viewing",
+                    "medium_risk": "Modifying application code, installing standard packages, restarting non-critical service, git checkout/commit",
+                    "critical_risk": "Irreversible data deletion, disk formatting, killing essential host daemon processes, network disconnection, or security sandbox escape"
+                }
+            ),
+            "is_critical": Noul(
+                instructions="Is this command catastrophic or destructive with irreversible consequence on host operating system?"
+            )
+        }
+        res = await asyncio.wait_for(
+            client.system_one(
+                state=eval_state,
+                questions=questions,
+                model=getattr(config, "TYPESAFE_MODEL", "jev-latest")
+            ),
+            timeout=timeout_seconds
+        )
+        elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+        risk_choice = str(res.answers["risk_assessment"].choice) if "risk_assessment" in res.answers else "low_risk"
+        risk_conf = float(res.answers["risk_assessment"].confidence) if ("risk_assessment" in res.answers and res.answers["risk_assessment"].confidence is not None) else 1.0
+        crit_prob = float(res.answers["is_critical"].noul) if "is_critical" in res.answers else 0.0
+
+        is_allowed = (risk_choice != "critical_risk") and (crit_prob < 0.80)
+        reason = None if is_allowed else f"Jev 判定为高危破坏性指令 ({risk_choice}, 破坏概率: {crit_prob:.2f})"
+
+        return TypeSafeToolDecision(
+            is_allowed=is_allowed,
+            risk_level=risk_choice,
+            risk_confidence=risk_conf,
+            critical_prob=crit_prob,
+            latency_ms=elapsed_ms,
+            reason=reason
+        )
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+        log.warning(f"[TypeSafe Co-Pilot] evaluate_tool_execution error: {e}")
+        return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=elapsed_ms, is_fallback=True)
+
+
 def get_typesafe_config_state() -> Dict[str, Any]:
     """Get current TypeSafe configuration parameters."""
     import config
@@ -306,11 +455,13 @@ def get_typesafe_config_state() -> Dict[str, Any]:
     enabled = config.TYPESAFE_ENABLED
     model = config.TYPESAFE_MODEL or "jev-latest"
     base_url = config.TYPESAFE_BASE_URL
+    tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
     return {
         "api_key": api_key,
         "enabled": enabled,
         "model": model,
         "base_url": base_url,
+        "tier": tier,
     }
 
 
@@ -318,7 +469,8 @@ def update_typesafe_env(
     api_key: Optional[str] = None,
     enabled: Optional[bool] = None,
     model: Optional[str] = None,
-    base_url: Optional[str] = None
+    base_url: Optional[str] = None,
+    tier: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Persist updated TypeSafe settings to .env and synchronize runtime objects."""
     import config
@@ -347,6 +499,12 @@ def update_typesafe_env(
         updates["TYPESAFE_BASE_URL"] = base_url.strip()
         config.TYPESAFE_BASE_URL = base_url.strip()
         os.environ["TYPESAFE_BASE_URL"] = base_url.strip()
+    if tier is not None:
+        norm_tier = tier.strip().lower()
+        if norm_tier in ("gateway", "sentry", "copilot"):
+            updates["TYPESAFE_TIER"] = norm_tier
+            config.TYPESAFE_TIER = norm_tier
+            os.environ["TYPESAFE_TIER"] = norm_tier
 
     # Invalidate client so next call recreates it with new config
     global _async_client
