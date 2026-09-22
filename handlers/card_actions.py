@@ -661,10 +661,41 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_toggle_ts(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "TypeSafe 网关开关状态已更新！"}})
 
+    elif action_value.get("action") == "open_typesafe_tier_menu":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_open_tier_menu():
+                from typesafe_gate import get_typesafe_config_state
+                cur = get_typesafe_config_state()
+                tier_card = CardBuilder.build_typesafe_tier_menu_card(tier=cur.get("tier", "gateway"))
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, tier_card)
+                )
+            asyncio.run_coroutine_threadsafe(do_open_tier_menu(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已载入介入深度级别说明与设置面板"}})
+
+    elif action_value.get("action") == "open_typesafe_main_card":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_open_main_card():
+                from typesafe_gate import get_typesafe_config_state
+                cur = get_typesafe_config_state()
+                main_card = CardBuilder.build_typesafe_config_card(
+                    api_key=cur["api_key"],
+                    enabled=cur["enabled"],
+                    model=cur["model"],
+                    base_url=cur["base_url"],
+                    tier=cur.get("tier", "gateway")
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, main_card)
+                )
+            asyncio.run_coroutine_threadsafe(do_open_main_card(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已返回主控制台"}})
+
     elif action_value.get("action") == "set_typesafe_tier":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
         target_tier = action_value.get("tier", "gateway")
+        from_sub_menu = action_value.get("from_sub_menu", False)
         tier_names = {
             "gateway": "Level 1 · 边缘网关",
             "sentry": "Level 2 · 双向守卫",
@@ -675,13 +706,16 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             async def do_set_ts_tier():
                 from typesafe_gate import update_typesafe_env
                 updated = update_typesafe_env(tier=target_tier)
-                new_card = CardBuilder.build_typesafe_config_card(
-                    api_key=updated["api_key"],
-                    enabled=updated["enabled"],
-                    model=updated["model"],
-                    base_url=updated["base_url"],
-                    tier=updated.get("tier", target_tier)
-                )
+                if from_sub_menu:
+                    new_card = CardBuilder.build_typesafe_tier_menu_card(tier=updated.get("tier", target_tier))
+                else:
+                    new_card = CardBuilder.build_typesafe_config_card(
+                        api_key=updated["api_key"],
+                        enabled=updated["enabled"],
+                        model=updated["model"],
+                        base_url=updated["base_url"],
+                        tier=updated.get("tier", target_tier)
+                    )
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
                 )

@@ -74,4 +74,5 @@ class CardBuilder:
 
     build_plugin_panel_card = staticmethod(plugin.build_plugin_panel_card)
     build_typesafe_config_card = staticmethod(typesafe_card.build_typesafe_config_card)
+    build_typesafe_tier_menu_card = staticmethod(typesafe_card.build_typesafe_tier_menu_card)
 

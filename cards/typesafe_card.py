@@ -12,30 +12,20 @@ def build_typesafe_config_card(
     test_result: Optional[Dict[str, Any]] = None,
     tier: Optional[str] = None
 ) -> dict:
-    """Build minimalist, modern configuration card for TypeSafe AI Gateway."""
+    """Build minimalist, modern configuration card for TypeSafe AI Gateway (Main Console)."""
     import config
     current_tier = tier or getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
     has_key = bool(api_key and api_key.strip())
     masked_key = f"{api_key[:4]}...{api_key[-4:]}" if (has_key and len(api_key) > 8) else ("已配置" if has_key else "未配置")
 
-    # Tier labels & descriptions
-    tier_info = {
-        "gateway": {
-            "name": "Level 1 · 边缘网关 (Gateway)",
-            "desc": "专注前置拦截：破坏性指令防御、插件秒级直达与快慢模态切换",
-        },
-        "sentry": {
-            "name": "Level 2 · 双向守卫 (Sentry)",
-            "desc": "包含 L1 全部能力 + 出口安全质检与敏感凭证泄露防护",
-        },
-        "copilot": {
-            "name": "Level 3 · 全链路副驾 (Co-Pilot)",
-            "desc": "包含 L2 全部能力 + 工具执行前风险微决策与执行报错反思",
-        }
+    tier_names = {
+        "gateway": "Level 1 · 边缘网关 (Gateway)",
+        "sentry": "Level 2 · 双向守卫 (Sentry)",
+        "copilot": "Level 3 · 全链路副驾 (Co-Pilot)"
     }
-    cur_tier_meta = tier_info.get(current_tier, tier_info["gateway"])
+    cur_tier_display = tier_names.get(current_tier, tier_names["gateway"])
 
-    # Determine status badge without colorful circle emojis
+    # Status badges without colorful circle emojis
     if not enabled:
         header_template = "grey"
         status_badge = "[DISABLED] 已停用"
@@ -52,7 +42,7 @@ def build_typesafe_config_card(
     content_lines = [
         "**TypeSafe AI (System One Jev) 决策网关控制台**\n",
         f"- **网关状态**：`{status_badge}`",
-        f"- **介入级别**：`{cur_tier_meta['name']}`",
+        f"- **介入级别**：`{cur_tier_display}` *(点击下方设置进入二级说明)*",
         f"- **主导模型**：`{model or 'jev-latest'}`",
         f"- **API Key**：`{masked_key}`",
         f"- **网关开关**：`{'已开启' if enabled else '已关闭'}`",
@@ -62,8 +52,6 @@ def build_typesafe_config_card(
     else:
         content_lines.append("- **服务端点**：`https://api.typesafe.ai/v1` (官方默认)")
 
-    content_lines.append(f"\n**级别能力说明**：{cur_tier_meta['desc']}")
-
     if test_result:
         status_text = "[OK] 连通正常" if test_result.get("status") == "ok" else "[FAIL] 连接异常"
         content_lines.append(f"\n**连通性测试结果 ({status_text})：**")
@@ -71,7 +59,7 @@ def build_typesafe_config_card(
             content_lines.append(f"- 端到端延迟：`{test_result['latency_ms']} ms`")
         content_lines.append(f"- 返回信息：{test_result.get('message', '')}")
     else:
-        content_lines.append(f"**运行状态说明**：{mode_desc}")
+        content_lines.append(f"\n**运行说明**：{mode_desc}")
 
     elements = [
         {
@@ -81,7 +69,7 @@ def build_typesafe_config_card(
         {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": "⚡ **介入深度级别切换 (三级阶梯模式)**："
+            "content": "🛡️ **接入深度管理**："
         },
         {
             "tag": "action",
@@ -91,35 +79,17 @@ def build_typesafe_config_card(
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "✓ L1 边缘网关" if current_tier == "gateway" else "切为 L1 边缘网关"
+                        "content": "🛡️ 介入深度级别设置与详细说明 →"
                     },
-                    "type": "primary" if current_tier == "gateway" else "default",
-                    "value": {"action": "set_typesafe_tier", "tier": "gateway"}
-                },
-                {
-                    "tag": "button",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": "✓ L2 双向守卫" if current_tier == "sentry" else "切为 L2 双向守卫"
-                    },
-                    "type": "primary" if current_tier == "sentry" else "default",
-                    "value": {"action": "set_typesafe_tier", "tier": "sentry"}
-                },
-                {
-                    "tag": "button",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": "✓ L3 全链路副驾" if current_tier == "copilot" else "切为 L3 全链路副驾"
-                    },
-                    "type": "primary" if current_tier == "copilot" else "default",
-                    "value": {"action": "set_typesafe_tier", "tier": "copilot"}
+                    "type": "primary",
+                    "value": {"action": "open_typesafe_tier_menu"}
                 }
             ]
         },
         {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": "⚙️ **模型与参数配置**："
+            "content": "⚙️ **常规参数与运维操作**："
         },
         {
             "tag": "action",
@@ -192,6 +162,111 @@ def build_typesafe_config_card(
         "header": {
             "title": {"tag": "plain_text", "content": "TypeSafe AI 决策网关控制台"},
             "template": header_template
+        },
+        "elements": elements
+    }
+
+
+def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
+    """Build dedicated secondary menu card for TypeSafe AI tier configuration with rich explanations."""
+    import config
+    current_tier = tier or getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+
+    tier_names = {
+        "gateway": "Level 1 · 边缘网关 (Gateway)",
+        "sentry": "Level 2 · 双向守卫 (Sentry)",
+        "copilot": "Level 3 · 全链路副驾 (Co-Pilot)"
+    }
+    cur_tier_display = tier_names.get(current_tier, tier_names["gateway"])
+
+    desc_markdown = (
+        f"**当前生效介入深度**：`{cur_tier_display}`\n\n"
+        "--- \n"
+        "### 1. Level 1 · 边缘网关 (Gateway Tier)\n"
+        "- **核心定位**：前置安全拦截与意图分流\n"
+        "- **运作机制**：在用户消息刚进入系统时，Jev 毫秒级通过 `Noul` 拦截恶意注入攻击与破坏性系统调用；通过 `Choice` 进行 6 类精准意图分类；通过 `Score` 评估执行复杂度。高置信度的插件请求（如记笔记、查健康、定时提醒）秒级直达返回，彻底跳过大模型冷启动。\n"
+        "- **适用场景**：轻量级咨询问答、高频对话、对首字响应延迟要求极高的日常交流场景。\n"
+        "- **系统开销**：零侵入执行层，单次请求增加判定延迟 < 500ms。\n\n"
+        "--- \n"
+        "### 2. Level 2 · 双向守卫 (Sentry Tier)\n"
+        "- **核心定位**：双向闭环与出口数据安全防护\n"
+        "- **运作机制**：包含 L1 全部能力。在大模型生成回复交付给飞书前，Jev 并发审查输出内容，一旦检测到无意泄漏的 API Key、SSH 私钥、Token、密码或破坏性脚本诱导，立即安全阻断防护。\n"
+        "- **适用场景**：包含代码查看、数据查询、涉及敏感凭证与服务器环境的日常工程调试。\n"
+        "- **系统开销**：仅在最终回复发送前增加单次并发审查，全面杜绝敏感数据泄漏。\n\n"
+        "--- \n"
+        "### 3. Level 3 · 全链路副驾 (Co-Pilot Tier)\n"
+        "- **核心定位**：端到端全生命周期执行守护与报错自愈\n"
+        "- **运作机制**：包含 L2 全部能力。深度渗透进 Agent 工具执行层：在执行终端 Shell 命令前对当前上下文进行实时风险评级（高危即时阻断）；命令报错时深度归因并强制引导大模型自愈反思，杜绝机械死循环。\n"
+        "- **适用场景**：复杂系统运维、长任务重构、自主 Bug 排查与自动化生产操作。\n"
+        "- **系统开销**：工具调用增加毫秒微决策开销，但大幅减少试错与走弯路时间，复杂任务交付总速度显著加快。"
+    )
+
+    elements = [
+        {
+            "tag": "markdown",
+            "content": desc_markdown
+        },
+        {"tag": "hr"},
+        {
+            "tag": "markdown",
+            "content": "⚡ **点击下方按钮即时切换介入级别**："
+        },
+        {
+            "tag": "action",
+            "layout": "flow",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "✓ 当前生效: L1 边缘网关" if current_tier == "gateway" else "切换至 L1 边缘网关"
+                    },
+                    "type": "primary" if current_tier == "gateway" else "default",
+                    "value": {"action": "set_typesafe_tier", "tier": "gateway", "from_sub_menu": True}
+                },
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "✓ 当前生效: L2 双向守卫" if current_tier == "sentry" else "切换至 L2 双向守卫"
+                    },
+                    "type": "primary" if current_tier == "sentry" else "default",
+                    "value": {"action": "set_typesafe_tier", "tier": "sentry", "from_sub_menu": True}
+                },
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "✓ 当前生效: L3 全链路副驾" if current_tier == "copilot" else "切换至 L3 全链路副驾"
+                    },
+                    "type": "primary" if current_tier == "copilot" else "default",
+                    "value": {"action": "set_typesafe_tier", "tier": "copilot", "from_sub_menu": True}
+                }
+            ]
+        },
+        {
+            "tag": "action",
+            "layout": "flow",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "⬅ 返回主控制台"
+                    },
+                    "type": "default",
+                    "value": {"action": "open_typesafe_main_card"}
+                }
+            ]
+        },
+        create_footer()
+    ]
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "TypeSafe AI · 接入深度级别管理与说明"},
+            "template": "blue"
         },
         "elements": elements
     }
