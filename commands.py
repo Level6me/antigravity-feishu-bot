@@ -469,7 +469,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 api_key=cfg["api_key"],
                 enabled=cfg["enabled"],
                 model=cfg["model"],
-                base_url=cfg["base_url"]
+                base_url=cfg["base_url"],
+                tier=cfg.get("tier")
             )
             await asyncio.get_running_loop().run_in_executor(
                 None, lambda: send_interactive_card_sdk(message_id, card)
@@ -488,7 +489,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 api_key=cfg["api_key"],
                 enabled=cfg["enabled"],
                 model=cfg["model"],
-                base_url=cfg["base_url"]
+                base_url=cfg["base_url"],
+                tier=cfg.get("tier")
             )
             await asyncio.get_running_loop().run_in_executor(
                 None, lambda: send_interactive_card_sdk(message_id, card)
@@ -889,7 +891,8 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             api_key=cfg["api_key"],
             enabled=cfg["enabled"],
             model=cfg["model"],
-            base_url=cfg["base_url"]
+            base_url=cfg["base_url"],
+            tier=cfg.get("tier")
         )
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, ts_card))
         return True, user_text

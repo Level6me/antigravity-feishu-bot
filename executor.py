@@ -1120,6 +1120,17 @@ async def execute_antigravity(
                 except Exception as e:
                     log.error(f"[Executor] Typewriter streaming failed: {e}")
 
+            # Level 2 & 3: TypeSafe Egress Guard (出口安全质检与凭证泄露防护)
+            if reply_text:
+                try:
+                    from typesafe_gate import evaluate_output_guard
+                    guard_res = await evaluate_output_guard(reply_text)
+                    if not guard_res.is_safe:
+                        log.warning(f"[TypeSafe Sentry] Output blocked: {guard_res.reason}")
+                        reply_text = f"🛡️ **[TypeSafe 安全护栏拦截]**\n\n系统检测到本次生成内容存在高风险项：{guard_res.reason}。\n为保护服务器安全与敏感凭证，该部分输出已被安全沙箱拦截。"
+                except Exception as e:
+                    log.warning(f"[TypeSafe Sentry] Egress guard hook error: {e}")
+
             final_card = CardBuilder.build_ai_response(
                 reply_text, 
                 choice_card_data=choice_card_data,
