@@ -1,10 +1,10 @@
-"""Per-chat async queue and single-task execution pipeline."""
+import os
 import asyncio
 import re
 
 from database import delete_pending_task, get_session_async, get_profile_async, save_session_async
 from card_builder import CardBuilder
-from lark_client import send_interactive_card_sdk, set_emoji_sdk, delete_emoji_sdk
+from lark_client import send_interactive_card_sdk, patch_interactive_card_sdk, set_emoji_sdk, delete_emoji_sdk
 from executor import execute_antigravity
 from logger import log
 import stats
@@ -23,43 +23,151 @@ chat_queues = app_state.chat_queues
 chat_workers = app_state.chat_workers
 
 
-def _is_operational_command(text: str) -> bool:
-    """检测用户输入是否属于需要自主执行的操作命令/执行诉求，而非纯文本提问."""
-    if not text:
-        return False
-    clean = text.strip()
+def get_recent_conversation_context(session_data: dict, max_chars: int = 600) -> str:
+    """提取前一轮对话上下文（待办任务、AI提出的方案或最近交互），用于决策网关评估."""
+    if not isinstance(session_data, dict):
+        return ""
+    # 1. 优先使用已持久化记录的上一轮 AI 输出摘要
+    last_summary = session_data.get("last_ai_summary")
+    if last_summary and isinstance(last_summary, str) and last_summary.strip():
+        last_user = session_data.get("last_user_query", "")
+        if last_user:
+            return f"Previous User Request: {last_user[:150]}\nPrevious AI Response/Plan: {last_summary.strip()[:max_chars]}"
+        return last_summary.strip()[:max_chars]
 
-    # 1. 优先排除以疑问词开头的纯技术原理/科普咨询（除非包含强烈的委托执行动作如“帮我”、“执行”、“修改”）
-    question_starters = ("什么是", "为什么", "为何", "怎么看", "如何理解", "有哪些区别", "区别是什么", "介绍一下", "讲解一下", "科普一下", "如何", "怎么", "怎样")
-    if any(clean.startswith(qs) for qs in question_starters) and not any(kw in clean for kw in ("帮我", "请帮我", "麻烦帮我", "执行", "修改", "改一下", "启动", "排查")):
-        return False
+    # 2. 兜底从 transcript.jsonl 中快速读取最近的 PLANNER_RESPONSE
+    conv_id = session_data.get("conversation")
+    if not conv_id:
+        return ""
 
-    # 2. 快捷确认与授权执行指令 (例如上下文讨论后的快速授权)
-    confirm_patterns = [
-        r"^(可以|行|好|好的|没问题|ok|yes)?[,，\s]*(改吧|更新吧|执行吧|执行|确认|就这样改|就按这样改|就这样做|这样改|帮我改|直接改|做吧|搞起|推吧|发吧|跑一下|开始吧|继续|搞一下|弄一下|好|好的|好啊|行|行的|没问题|ok|yes|go)[\s!！。.]*$",
-        r"(就这样|就按这|按这|照这|按照你|按你|照你).*(改|做|办|执行|更新)",
-        r"(按照|按|照)(你说的|建议|方案|思路)(改|执行|做|更新|处理)",
-        r"(直接|帮我|请帮我)(改|更新|执行|跑|做|提交|推送|部署)",
+    from config import get_transcript_path
+    transcript_path = get_transcript_path(conv_id)
+    if not os.path.exists(transcript_path):
+        return ""
+
+    try:
+        import json
+        with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        for line in reversed(lines[-200:]):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                if data.get("type") == "PLANNER_RESPONSE" and data.get("content"):
+                    content = str(data["content"]).strip()
+                    if content:
+                        clean_content = re.sub(r'```.*?```', '[代码块]', content, flags=re.DOTALL)
+                        clean_content = re.sub(r'[\r\n]+', ' ', clean_content).strip()
+                        return clean_content[:max_chars]
+            except Exception:
+                continue
+    except Exception as e:
+        log.warning(f"[Pipeline] Failed to read recent transcript context: {e}")
+
+    return ""
+
+
+CREDENTIAL_SENSITIVE_PATTERN = re.compile(
+    r'(?:密码|password|token|令牌|ghp_|ssh|端口|port|root|ip\s*[:：地址\d]|服务器|server|vps|nas|macmini)',
+    re.IGNORECASE
+)
+
+BROAD_QUERY_PATTERN = re.compile(
+    r'(?:所有服务器|全部服务器|服务器列表|备忘录|每台服务器|所有主机|全部主机|密码本|服务器密码|列出凭证|所有凭证|凭证列表)',
+    re.IGNORECASE
+)
+
+
+def extract_note_identifiers(note: str) -> list:
+    """从一条凭证/服务器备忘录中提取出用于检索匹配的关键实体词、IP或域名."""
+    identifiers = set()
+
+    # 1. 提取 IPv4 地址
+    ips = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', note)
+    for ip in ips:
+        identifiers.add(ip.lower())
+
+    # 2. 提取域名
+    domains = re.findall(r'\b[a-zA-Z0-9.-]+\.(?:pw|com|cn|org|net|xyz|top|me|cc|io)\b', note)
+    for d in domains:
+        identifiers.add(d.lower())
+
+    # 3. 常见知名品牌、主机类型与代码托管平台
+    known_targets = [
+        "搬瓦工", "腾讯云", "阿里云", "华为云", "百度云", "飞牛", "群晖",
+        "macmini", "mac mini", "树莓派", "raspberry", "github", "gitlab", "gitee"
     ]
-    for pat in confirm_patterns:
-        if re.search(pat, clean, re.IGNORECASE):
-            return True
+    note_lower = note.lower()
+    for kt in known_targets:
+        if kt in note_lower:
+            identifiers.add(kt)
+            if kt == "macmini":
+                identifiers.add("mac mini")
+            elif kt == "mac mini":
+                identifiers.add("macmini")
 
-    # 3. 明确的操作动词与系统命令请求
-    action_keywords = [
-        "帮我", "请帮我", "麻烦帮我", "替我", "给我",
-        "启动", "运行", "执行", "重启", "停止", "杀死", "关闭",
-        "修改", "改写", "修复", "改一下", "重构", "优化代码",
-        "排查", "排错", "查一下", "看一下", "看下", "看日志", "查看日志",
-        "部署", "安装", "编译", "构建", "配置", "上线",
-        "推送到", "提交代码", "git push", "git commit", "git pull",
-        "创建文件", "写入", "生成", "导出", "下载", "删除",
-        "测试", "压测", "跑测试"
-    ]
-    if any(kw in clean for kw in action_keywords):
-        return True
+    # 4. 提取 "...服务器" / "...主机" / "...nas" / "...令牌" 前缀中的关键词
+    prefix_matches = re.findall(r'([\u4e00-\u9fa5a-zA-Z0-9]{2,12})(?:服务器|主机|nas|令牌|token)', note)
+    for m in prefix_matches:
+        identifiers.add(m.lower())
+        for brand in ["腾讯云", "阿里云", "华为云"]:
+            if brand in m:
+                identifiers.add(brand)
+                region = m.replace(brand, "")
+                if len(region) >= 2:
+                    identifiers.add(region)
 
-    return False
+    if "github" in note_lower or "ghp_" in note_lower:
+        identifiers.add("github")
+        identifiers.add("ghp_")
+
+    return [i for i in identifiers if i]
+
+
+def filter_relevant_notes(notes: list, query: str, context: str = "") -> list:
+    """
+    JIT Credential & Note Injection (按需敏感凭证挂载):
+    1. 非敏感的普通偏好/常规备忘：默认安全放行保留；
+    2. 含有账号密码/SSH/IP/Token的高危凭证：
+       - 当用户意图明确涉及该特定目标（如提及主机名、IP、域名、特定云厂商或Git推送等）时，才精准动态挂载对应凭证；
+       - 若为泛化查询所有备忘录/服务器信息，全量挂载；
+       - 本地常规工程、CSS调整、业务逻辑开发、闲聊问答，100% 屏蔽敏感凭证，杜绝隐私泄露与 Prompt 臃肿！
+    """
+    if not notes:
+        return []
+
+    combined_text = f"{query} {context}".lower()
+
+    # 若用户明确查询全部凭证或备忘录清单
+    if BROAD_QUERY_PATTERN.search(combined_text):
+        return list(notes)
+
+    filtered = []
+    for note in notes:
+        # 非敏感常规提醒，安全保留
+        if not CREDENTIAL_SENSITIVE_PATTERN.search(note):
+            filtered.append(note)
+            continue
+
+        # 敏感凭证：按需匹配
+        identifiers = extract_note_identifiers(note)
+        matched = False
+        for ident in identifiers:
+            if ident in combined_text:
+                matched = True
+                break
+
+        # 对 github 令牌的额外友好语义匹配（用户说 push / 推送代码 / git 推送 时自动按需注入）
+        if not matched and ("github" in note.lower() or "ghp_" in note.lower()):
+            if any(k in combined_text for k in ["git push", "push代码", "推送代码", "推送到远程", "提交到远程", "push 到"]):
+                matched = True
+
+        if matched:
+            filtered.append(note)
+
+    return filtered
 
 
 async def process_chat_queue(chat_id):
@@ -151,18 +259,55 @@ async def _process_single_task(chat_id, task):
     if not user_text:
         return
 
+    # 🚀 极致性能优化：抢先下发首张打字机/思考交互卡片（秒回卡片）
+    # 彻底杜绝因等待 TypeSafe Jev 远程认知网关（~2s）、插件初始化或会话锁导致的前端卡片延迟
+    is_voice_message = bool(
+        task.get("message_type") == "audio" or 
+        task.get("is_voice_message")
+    )
+    if not bot_reply_msg_id and not is_resumed:
+        init_card = CardBuilder.build_typing_indicator(
+            downloaded_file_name, download_success, user_text, is_voice=is_voice_message
+        )
+        try:
+            bot_reply_msg_id = await app_state.run_feishu_sync(
+                loop, lambda: send_interactive_card_sdk(message_id, init_card)
+            )
+            if bot_reply_msg_id:
+                task["bot_reply_msg_id"] = bot_reply_msg_id
+                try:
+                    save_pending_task(chat_id, task)
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning(f"[Pipeline] Failed to send early typing card for chat {chat_id}: {e}")
+
+    # 并行异步预热后台运行进程，消除模型冷启动等待
+    try:
+        from session_pool import session_pool
+        model_to_warm = session_data.get("model", "Default")
+        proj_val = session_data.get("project")
+        cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
+        conv_id_to_resume = session_data.get("conversation", "") if not is_resumed else ""
+        asyncio.create_task(session_pool.prewarm(chat_id, model_to_warm, cwd_dir, conversation_id=conv_id_to_resume))
+    except Exception:
+        pass
+
     # === System One (Jev) Decision Gateway & Guardrail ===
     from system_one_gate import evaluate_message_gate
     from plugin_manager import plugin_manager
 
-    decision = await evaluate_message_gate(user_text)
+    recent_context = get_recent_conversation_context(session_data)
+    decision = await evaluate_message_gate(user_text, context=recent_context)
     if not decision.is_fallback:
         session_data["typesafe_decision_count"] = 1
     else:
         session_data["typesafe_decision_count"] = 0
 
     from system_one_gate import evaluate_adaptive_tier, resolve_adaptive_model
+    # 纯语义判定自适应思考层级（基于 System One 对上下文与待办任务的认知评估）
     adaptive_tier = evaluate_adaptive_tier(decision)
+
     if adaptive_tier:
         session_data["typesafe_adaptive_tier"] = adaptive_tier
         base_model = session_data.get("base_model") or session_data.get("model", "")
@@ -173,11 +318,16 @@ async def _process_single_task(chat_id, task):
         if "base_model" in session_data:
             session_data["model"] = session_data["base_model"]
 
+    session_data["bot_reply_msg_id"] = bot_reply_msg_id
+
     # 1. 安全沙箱门禁拦截（基于 TypeSafe Noul 概率评判与置信度兜底）
     if decision.is_dangerous:
         log.warning(f"[Security] Intercepted dangerous request: '{user_text}' (prob={decision.danger_prob:.2f})")
         warn_card = CardBuilder.build_security_warning(user_text)
-        await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, warn_card))
+        if bot_reply_msg_id:
+            await app_state.run_feishu_sync(loop, lambda: patch_interactive_card_sdk(bot_reply_msg_id, warn_card))
+        else:
+            await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, warn_card))
         return
 
     # 2. 插件极速直达通道 (Fast-Path / 零模型冷启动延迟)
@@ -194,7 +344,10 @@ async def _process_single_task(chat_id, task):
             test_result=res,
             tier=cfg.get("tier")
         )
-        await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, ts_card))
+        if bot_reply_msg_id:
+            await app_state.run_feishu_sync(loop, lambda: patch_interactive_card_sdk(bot_reply_msg_id, ts_card))
+        else:
+            await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, ts_card))
         return
 
     elif decision.intent == "server_health" and decision.intent_confidence >= 0.70:
@@ -249,120 +402,144 @@ async def _process_single_task(chat_id, task):
     is_complex_agent = False
     if session_data.get("mode") == "agent":
         is_complex_agent = True
-    elif decision.needs_terminal:
+    elif decision.is_operation or decision.action_type == "execute_task":
         is_complex_agent = True
-    elif decision.intent in ("code_agent", "server_health", "cron", "notes"):
+    elif decision.needs_terminal and decision.complexity_score >= 0.4:
         is_complex_agent = True
-    elif decision.complexity_score >= 0.5:
+    elif decision.intent in ("server_health", "cron", "notes"):
         is_complex_agent = True
-    elif _is_operational_command(user_text):
+    elif decision.complexity_score >= 0.6:
         is_complex_agent = True
 
     # Inject protocol into prompt
     current_proj = session_data.get("project", "默认")
-    system_instruction = (
-        "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
-        "Any English text in the response must be limited to code syntax or technical names only. "
-        "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles. "
-        "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
+    
+    # 极速轻量模式判定：非操作、无需终端、且属于日常寒暄/致谢/身份咨询或超低复杂度问答
+    is_lightweight_chat = (
+        not decision.is_operation
+        and not decision.needs_terminal
+        and (
+            decision.action_type == "casual_greeting"
+            or decision.complexity_score < 0.25
+        )
+        and session_data.get("mode") != "agent"
     )
 
-    system_instruction += (
-        "[System Feishu Resource Delivery / 飞书文件传送规范]\n"
-        "1. 【严禁使用 antigravity 私自发文件】：严禁在 antigravity 中编写外部脚本、使用 curl 或 webhook 尝试私自向飞书发送文件。\n"
-        "2. 【统一使用飞书 Lark API 推送】：向用户提供文件时，请在最终回复中直接以标准 Markdown 链接输出该文件的本地绝对路径（例如 `[导出报告.xlsx](/path/to/file.xlsx)`、`📄 [文档.md](/path/to/doc.md)` 或 `[发送文件: script.py](/path/to/script.py)`）。\n"
-        "   请注意：用户在飞书客户端无法直接点击打开 Linux 本地磁盘路径，系统后台会自动拦截你链接的文件路径，统一使用飞书官方 Lark API（im.v1.file.create）将该文件原生推送到当前飞书会话中供用户点击预览与下载。\n"
-        "3. 【命令行工具支持】：如需在终端脚本中主动传送文件，可直接运行 `python3 send_to_feishu.py <文件路径>`，该脚本使用官方 Lark API 发送文件到当前会话。\n\n"
-    )
-
-    if task.get("message_type") == "audio" or task.get("is_voice_message"):
-        system_instruction += (
-            "[Voice Interaction Directive / 语音交互规范]\n"
-            "用户正在通过飞书原生语音与你对话。本系统会将你的文本回复自动合成为高拟真语音消息发送给用户。\n"
-            "请遵循口语化表达：语言自然生动、亲切凝练、避免输出冗长代码块或复杂大表格，重点结论口语化输出。\n\n"
-        )
-
-    # 注入当前工作空间上下文与安全防线（全模式常驻保障）
-    system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
-    system_instruction += (
-        "[System Execution & Safety Guardrails]\n"
-        "1. 【全指令强制超时保护】：使用 `run_command` 工具执行命令时必须前缀 `timeout <秒数>`。\n"
-        "2. 【受限递归与大目录避让】：严禁在系统全盘或依赖目录中执行无限制的大范围递归搜索。\n"
-        "3. 【严禁自杀式重启自身服务】：严禁执行重启当前飞书机器人自身进程的操作。\n"
-        "4. 【计划任务调度能力】：当用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
-    )
-    import config
-    if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot":
-        system_instruction += (
-            "[System One Co-Pilot Safety & Reflection Directive / 全链路执行与自愈规则]\n"
-            "当前系统处于 System One Level 3 (全链路保护) 模式。\n"
-            "1. 【工具调用前审慎】：在调用任何终端工具前，自主核验命令参数的安全性与受控性，严禁执行超出项目目录的不可逆破坏操作。\n"
-            "2. 【报错自愈反思】：当命令执行失败或退出码非 0 时，必须深入分析错误根因，自愈提出修正方案，严禁机械重复失败命令。\n\n"
-        )
-    project_prompts = session_data.get("project_prompts", {})
-    if current_proj in project_prompts and project_prompts[current_proj]:
-        proj_prompt_text = project_prompts[current_proj]
-        system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
-
-    if is_complex_agent:
-        # 复杂工程任务与操作指令模式
-        system_instruction += (
-            "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
-            "【必须执行】：只要你根据用户意图，判断当前任务需要调用工具执行操作（如读取或修改代码、执行终端命令、多步骤排错、数据查询分析、生成或导出文件等），你必须在调用任何工具之前，首先在回复的最开始输出一行结构化规划标签：\n"
-            "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | 步骤4名称 [/TASK_PLAN]\n"
-            "规则要求：\n"
-            "1. 规划必须由你基于对任务的真实理解量身定制（3~4步为宜），每一步需精炼并包含具体目标或涉及的关键文件/操作，切忌泛化套话；\n"
-            "2. 输出该行标签后立即调用首个工具开始执行，不要输出任何多余过渡句；\n"
-            "3. 前端界面会自动提取此标签并在飞书卡片中向用户展示步骤清单并逐项打勾 ✅。\n\n"
-        )
-        system_instruction += (
-            "[System Autonomous Execution Directive / 自主执行决策规范：区分提问与命令]\n"
-            "用户核心准则：【严格区分提问与命令】。\n"
-            "1. 【命令必须自主执行并交付】：对于用户的操作、修改、运行、测试、排查等执行诉求（包括“改吧”、“执行”等简短授权），你必须作为全功能 Autonomous Agent 自主调用相应工具（如 run_command、replace_file_content、view_file、write_to_file）直接执行并交付最终结果！\n"
-            "2. 【绝对严禁推诿与二次确认】：严禁让用户在服务器或本地终端手动运行命令；严禁抛出多选方案让用户做选择题；严禁停下来等待用户确认；绝对严禁以“受安全策略限制”或“处于轻量模式”等借口拒绝执行命令！\n\n"
-        )
-    else:
-        # 轻量问答与概念咨询模式：纯文本高效解答，但绝不推诿操作诉求
-        system_instruction += (
-            "[System Interaction Directive / 问答交互规范：区分提问与命令]\n"
-            "用户核心准则：【严格区分提问与命令】。\n"
-            "1. 【提问秒回纯文本】：当用户提出的是概念咨询、原理解释、方案探讨或日常闲聊时，无需调用工具，直接针对问题组织语言，用凝练、专业、清晰的语言进行解答。\n"
-            "2. 【操作绝不推诿拒执】：若用户意图中含有明确的操作诉求（如查看代码、排查错误、修改配置、运行命令等），你依然拥有完整的全套 Agent 工具调用能力，必须自主调用工具完成任务，绝对严禁以“处于轻量纯文本交互模式”或“受安全策略限制”为由拒绝执行，绝对严禁推诿让用户去终端手动操作！\n\n"
-        )
-
-    # 注入长期记忆上下文（由 ai_memory 插件提取）
-    mem_ctx = session_data.get("memory_context")
-    if mem_ctx:
-        system_instruction += f"[User Long-Term Memory / 用户长期偏好与记忆]\n{mem_ctx}\n\n"
-
-    # 注入用户备忘录 Notes
-    notes = session_data.get("notes", [])
-    if notes:
-        notes_block = "\n".join([f"- {note}" for note in notes])
-        system_instruction += f"[User's Permanent Notes / 备忘录]\n{notes_block}\n\n"
-
-    # 注入 System One 自适应思考模式指令 (Adaptive Reasoning Effort: Low / Medium / High)
-    adaptive_effort = session_data.get("typesafe_adaptive_tier")
-    if adaptive_effort == "Low":
-        system_instruction += (
+    if is_lightweight_chat:
+        # 极速轻量模式：剥离厚重的工程上下文、代码工具定义与服务器备忘录，实现毫秒级闲聊响应
+        system_instruction = (
+            "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
+            "Any English text in the response must be limited to code syntax or technical names only. "
+            "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles. "
+            "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
+            "[Role: A friendly, concise and warm AI assistant. Reply naturally and warmly in 1-2 natural sentences without calling tools or explaining technical rules.]\n\n"
             "[System One Adaptive Reasoning: LOW]\n"
             "当前任务判定为轻量日常问答或闲聊，请以极简快速思考直接给出精炼回答，避免冗长思考与过度分析。\n\n"
         )
-    elif adaptive_effort == "High":
-        system_instruction += (
-            "[System One Adaptive Reasoning: HIGH]\n"
-            "当前任务判定为多步复杂工程或系统操作，请开启深度思考推理与严谨边界校验。\n\n"
+        if task.get("message_type") == "audio" or task.get("is_voice_message"):
+            system_instruction += (
+                "[Voice Interaction Directive / 语音交互规范]\n"
+                "用户正在通过飞书原生语音与你对话，请遵循口语化表达，语言自然亲切、凝练生动。\n\n"
+            )
+    else:
+        system_instruction = (
+            "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
+            "Any English text in the response must be limited to code syntax or technical names only. "
+            "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles. "
+            "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
         )
-    elif adaptive_effort == "Medium":
+
         system_instruction += (
-            "[System One Adaptive Reasoning: MEDIUM]\n"
-            "当前任务判定为常规工程开发，兼顾思考深度与响应效率。\n\n"
+            "[System Feishu Resource Delivery / 飞书文件传送规范]\n"
+            "1. 【统一使用飞书官方推送】：向用户提供文件时，请在最终回复中直接以标准 Markdown 链接输出该文件的本地绝对路径（例如 `[导出报告.xlsx](/path/to/file.xlsx)` 或 `📄 [文档.md](/path/to/doc.md)`），系统后台会自动拦截该路径并调用飞书官方 API 原生推送到当前会话供用户点击下载。严禁在脚本中私自 curl/webhook 传文件。\n"
+            "2. 【命令行主动发送】：在终端脚本中如需主动传送文件，可直接运行 `python3 send_to_feishu.py <文件路径>`。\n\n"
         )
+
+        if task.get("message_type") == "audio" or task.get("is_voice_message"):
+            system_instruction += (
+                "[Voice Interaction Directive / 语音交互规范]\n"
+                "用户正在通过飞书原生语音与你对话，回复将合成为语音消息。请遵循口语化表达，语言自然生动、亲切凝练、避免长代码块或复杂大表格。\n\n"
+            )
+
+        # 注入当前工作空间上下文与安全防线（全模式常驻保障）
+        system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
+        system_instruction += (
+            "[System Execution & Safety Guardrails]\n"
+            "1. 【全指令强制超时】：终端执行必须前缀 `timeout <秒数>`。\n"
+            "2. 【受限递归与安全避让】：严禁系统全盘无限制递归搜索；严禁重启当前飞书机器人自身进程。\n"
+            "3. 【计划任务调度能力】：用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
+        )
+        import config
+        if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot":
+            system_instruction += (
+                "[System One Co-Pilot Safety & Reflection Directive / 全链路执行与自愈规则]\n"
+                "当前系统处于 System One Level 3 (全链路保护) 模式。\n"
+                "1. 【工具调用前审慎】：核验命令参数的安全性与受控性，严禁超出项目目录的不可逆破坏操作。\n"
+                "2. 【报错自愈反思】：命令执行失败退出码非 0 时，深入分析根因自愈修正，严禁机械重复失败命令。\n\n"
+            )
+        project_prompts = session_data.get("project_prompts", {})
+        if current_proj in project_prompts and project_prompts[current_proj]:
+            proj_prompt_text = project_prompts[current_proj]
+            system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
+
+        if is_complex_agent:
+            # 复杂工程任务与操作指令模式
+            system_instruction += (
+                "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
+                "【必须执行】：只要你判断当前任务需要调用工具执行操作（读写代码、运行终端命令、多步排错、生成导出文件等），必须在回复的最开始输出一行结构化规划标签：\n"
+                "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | 步骤4名称 [/TASK_PLAN]\n"
+                "规则要求：规划精炼定制（3~4步为宜），输出标签后立即调用首个工具开始执行，不要输出任何多余过渡句；纯文本问答严禁输出此标签。\n\n"
+            )
+            system_instruction += (
+                "[System Autonomous Execution Directive / 自主执行决策规范]\n"
+                "用户核心准则：【严格区分提问与命令】。\n"
+                "1. 【命令必须自主执行并交付】：对于用户的操作、修改、运行、测试、排查等执行诉求（包括“改吧”、“执行”等简短授权），你必须作为全功能 Autonomous Agent 自主调用相应工具直接执行并交付最终结果！\n"
+                "2. 【绝对严禁推诿与二次确认】：严禁让用户在服务器或本地终端手动运行命令；严禁抛出多选方案让用户做选择题；严禁停下来等待用户确认；绝对严禁以“受安全策略限制”为借口拒绝执行命令！\n\n"
+            )
+        else:
+            # 轻量问答与概念咨询模式：纯文本高效解答，但绝不推诿操作诉求
+            system_instruction += (
+                "[System Interaction Directive / 问答交互规范]\n"
+                "用户核心准则：【严格区分提问与命令】。\n"
+                "1. 【提问秒回纯文本】：当用户提出的是概念咨询、原理解释、方案探讨或日常闲聊时，无需调用工具，直接针对问题组织语言，用凝练、专业、清晰的语言进行解答。\n"
+                "2. 【操作绝不推诿拒执】：若用户意图中含有明确的操作诉求，你依然拥有完整的全套 Agent 工具调用能力，必须自主调用工具完成任务，绝对严禁以“处于轻量纯文本交互模式”为由拒绝执行，严禁推诿让用户手动操作！\n\n"
+            )
+
+        # 注入长期记忆上下文（由 ai_memory 插件提取）
+        mem_ctx = session_data.get("memory_context")
+        if mem_ctx:
+            system_instruction += f"[User Long-Term Memory / 用户长期偏好与记忆]\n{mem_ctx}\n\n"
+
+        # 注入用户备忘录 Notes (JIT 按需挂载：常规本地代码开发杜绝敏感服务器凭证注入)
+        raw_notes = session_data.get("notes", [])
+        if raw_notes:
+            relevant_notes = filter_relevant_notes(raw_notes, user_text, context=recent_context)
+            if relevant_notes:
+                notes_block = "\n".join([f"- {note}" for note in relevant_notes])
+                system_instruction += f"[User's Permanent Notes / 备忘录]\n{notes_block}\n\n"
+
+        # 注入 System One 自适应思考模式指令 (Adaptive Reasoning Effort: Low / Medium / High)
+        adaptive_effort = session_data.get("typesafe_adaptive_tier")
+        if adaptive_effort == "Low":
+            system_instruction += (
+                "[System One Adaptive Reasoning: LOW]\n"
+                "当前任务判定为轻量日常问答或闲聊，请以极简快速思考直接给出精炼回答，避免冗长思考与过度分析。\n\n"
+            )
+        elif adaptive_effort == "High":
+            system_instruction += (
+                "[System One Adaptive Reasoning: HIGH]\n"
+                "当前任务判定为多步复杂工程或系统操作，请开启深度思考推理与严谨边界校验。\n\n"
+            )
+        elif adaptive_effort == "Medium":
+            system_instruction += (
+                "[System One Adaptive Reasoning: MEDIUM]\n"
+                "当前任务判定为常规工程开发，兼顾思考深度与响应效率。\n\n"
+            )
     
-    # Load long-term memory if this is a new conversation
+    # Load long-term memory if this is a new conversation (engineering/task mode only)
     final_prompt = user_text
     is_new_conversation = not session_data.get("conversation")
-    if is_new_conversation:
+    if is_new_conversation and not is_lightweight_chat:
         memories = await get_profile_async(chat_id)
         if memories:
             memory_block = "\n".join([f"- {m}" for m in memories])

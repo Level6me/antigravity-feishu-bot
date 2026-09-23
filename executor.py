@@ -372,9 +372,9 @@ def extract_final_chinese_response(text):
     if not text:
         return ""
     
-    # 0. 优先彻底移除任务规划标签及其内容（支持已闭合与未闭合流式片段），防止后续小标题正则误匹配
-    text = re.sub(r'\[TASK_PLAN\].*?(?:\[/TASK_PLAN\]|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    text = re.sub(r'\[TASK_[^\]]*\]?', '', text, flags=re.IGNORECASE).strip()
+    # 0. 优先彻底移除成对闭合的任务规划标签块，开头未闭合流式行仅移除首行（避免正文中包含 `[TASK_PLAN]` 文本时截断后续全文）
+    text = re.sub(r'\[TASK_PLAN\].*?\[/TASK_PLAN\]\s*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'^\s*\[TASK_PLAN\][^\n]*(?:\n|$)', '', text, flags=re.IGNORECASE).strip()
     text = re.sub(r'\[/TASK_PLAN\]', '', text, flags=re.IGNORECASE).strip()
 
     # 1. 移除被 XML 标签包裹的思考过程与思维链，如 <thought>...</thought>, <thinking>...</thinking>, <think>...</think>
@@ -416,9 +416,9 @@ def extract_final_chinese_response(text):
     # 8. 清理残留的动态思考占位符
     text = re.sub(r'\*\(\s*(?:🧠|🔍|⚙️|💡|🚀)?\s*正在.*?\)\*', '', text).strip()
 
-    # 9. 再次清理任务规划标签防泄漏
-    text = re.sub(r'\[TASK_PLAN\].*?(?:\[/TASK_PLAN\]|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    text = re.sub(r'\[TASK_[^\]]*\]?', '', text, flags=re.IGNORECASE).strip()
+    # 9. 再次清理成对任务规划标签防泄漏
+    text = re.sub(r'\[TASK_PLAN\].*?\[/TASK_PLAN\]\s*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'^\s*\[TASK_PLAN\][^\n]*(?:\n|$)', '', text, flags=re.IGNORECASE).strip()
 
     return text
 
@@ -690,10 +690,11 @@ async def execute_antigravity(
                 )
 
             if bot_reply_msg_id:
-                await _feishu_call(
-                    lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card),
-                    label=f"init-card patch attempt {attempt}"
-                )
+                if attempt > 1 or is_resumed:
+                    await _feishu_call(
+                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card),
+                        label=f"init-card patch attempt {attempt}"
+                    )
             else:
                 new_id = await _feishu_call(
                     lambda: send_interactive_card_sdk(message_id, init_card),
@@ -943,8 +944,8 @@ async def execute_antigravity(
                     raw_extracted = extract_final_chinese_response(accumulated_text.strip())
                     if raw_extracted:
                         cp = re.sub(r'\[CHOICE_CARD\]\s*Q:.*?(?:\[/CHOICE_CARD\]|\Z)', '', raw_extracted, flags=re.DOTALL | re.IGNORECASE).strip()
-                        cp = re.sub(r'\[TASK_PLAN\].*?(?:\[/TASK_PLAN\]|\Z)', '', cp, flags=re.DOTALL | re.IGNORECASE).strip()
-                        cp = re.sub(r'\[TASK_[^\]]*\]?', '', cp).strip()
+                        cp = re.sub(r'\[TASK_PLAN\].*?\[/TASK_PLAN\]\s*', '', cp, flags=re.DOTALL | re.IGNORECASE).strip()
+                        cp = re.sub(r'^\s*\[TASK_PLAN\][^\n]*(?:\n|$)', '', cp, flags=re.IGNORECASE).strip()
                         clean_partial = cp.strip()
 
                 has_tool_in_flight = bool(current_tool_action or stream_action)
@@ -1198,7 +1199,9 @@ async def execute_antigravity(
                     log.error(f"[Executor] Typewriter streaming failed: {e}")
 
             # Level 2 & 3: TypeSafe Egress Guard (出口安全质检与凭证泄露防护)
-            if reply_text and not typesafe_blocked_info:
+            # 优化：对于未调用任何终端工具的纯日常闲聊与简单问答，跳过远端审查（本地秒级放行），省去 2~4 秒等待
+            is_light_interaction = (session_data.get("typesafe_adaptive_tier") == "Low" and len(completed_tool_steps) == 0)
+            if reply_text and not typesafe_blocked_info and not is_light_interaction:
                 try:
                     from system_one_gate import evaluate_output_guard
                     guard_res = await evaluate_output_guard(reply_text)
@@ -1241,6 +1244,17 @@ async def execute_antigravity(
                     session_data.pop("typesafe_audit_summary", None)
             except Exception as e:
                 log.warning(f"[TypeSafe] Failed to build audit summary: {e}")
+
+            # 保存最近一轮 AI 回复和用户指令摘要到 session_data，供下一轮决策网关精准判断上下文任务
+            if reply_text and not is_error:
+                clean_reply = re.sub(r'```.*?```', '[代码块]', reply_text, flags=re.DOTALL)
+                clean_reply = re.sub(r'[\r\n]+', ' ', clean_reply).strip()
+                session_data["last_ai_summary"] = clean_reply[:500]
+                session_data["last_user_query"] = user_text[:200].strip()
+                try:
+                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                except Exception as e:
+                    log.warning(f"[Executor] Failed to persist last_ai_summary: {e}")
 
             final_card = CardBuilder.build_ai_response(
                 reply_text, 

@@ -37,6 +37,8 @@ class TypeSafeDecision:
     complexity_score: float = 0.0
     complexity_confidence: float = 1.0
     needs_terminal: bool = False
+    is_operation: bool = False
+    action_type: str = "casual_greeting"
     latency_ms: float = 0.0
     is_fallback: bool = False
     fallback_reason: Optional[str] = None
@@ -101,18 +103,10 @@ def get_typesafe_client():
     return _async_client
 
 
-def _fallback_heuristic_eval(user_text: str, reason: str) -> TypeSafeDecision:
-    """Resilient fallback logic using pattern and keyword matching."""
+def _fallback_heuristic_eval(user_text: str, reason: str, context: Optional[str] = "") -> TypeSafeDecision:
+    """Resilient fallback logic used ONLY when Jev model is completely unreachable."""
     text_clean = re.sub(r'```.*?```', '', user_text, flags=re.DOTALL)
     text_clean = re.sub(r'`[^`]+`', '', text_clean)
-
-    # 1. Fallback security check
-    intent_safe_prefixes = [
-        "帮我写", "帮我做", "写个", "写一个", "写一段", "分析", "解释", "是什么", "什么是",
-        "如何", "怎么", "为什么", "问题", "报错", "脚本", "代码", "示例", "举个例子",
-        "怎样", "讲解", "介绍", "说明"
-    ]
-    has_safe_intent = any(kw in user_text[:80] for kw in intent_safe_prefixes)
 
     dangerous_patterns = [
         r"\brm\s+-rf\s+/",
@@ -122,50 +116,35 @@ def _fallback_heuristic_eval(user_text: str, reason: str) -> TypeSafeDecision:
         r":\(\){\s*:\s*\|\s*:\s*&\s*}\s*;\s*:",
         r"\bchmod\s+-R\s+777\s+/",
     ]
-    if not has_safe_intent:
-        dangerous_patterns += [
-            r"\bshutdown\s+-[hrP]",
-            r"\bpoweroff\b",
-            r"\breboot\b",
-        ]
+    is_dangerous = any(re.search(pat, text_clean, re.IGNORECASE) for pat in dangerous_patterns)
 
-    is_dangerous = False
-    for pat in dangerous_patterns:
-        if re.search(pat, text_clean, re.IGNORECASE):
-            is_dangerous = True
-            break
-
-    # 2. Fallback intent & complexity check
-    lower_text = user_text.lower()
+    lower_text = user_text.lower().strip()
     intent = "general_chat"
+    action_type = "casual_greeting"
     complexity = 0.0
     needs_terminal = False
+    is_operation = False
 
-    # Check plugin triggers
-    if any(kw in lower_text for kw in ["typesafe", "type safe", "ts key", "ts配置", "ts状态", "ts模型"]):
-        intent = "typesafe_status"
-        complexity = 0.0
-    elif any(kw in lower_text for kw in ["备忘", "记笔记", "待办", "添加笔记", "/note", "/notes"]):
-        intent = "notes"
-        complexity = 0.5
-    elif any(kw in lower_text for kw in ["提醒我", "定时", "倒计时", "闹钟", "计划任务", "/cron", "/schedule"]):
-        intent = "cron"
-        complexity = 0.5
-    elif any(kw in lower_text for kw in ["系统负载", "cpu占用", "内存剩余", "磁盘占用", "服务器状态", "健康状态", "/health", "/sysinfo"]):
+    if any(kw in lower_text for kw in ["/health", "/sysinfo", "系统负载"]):
         intent = "server_health"
-        complexity = 0.0
-    else:
-        agent_keywords = [
-            "代码", "写代码", "改代码", "重构", "修复", "debug", "bug", "报错",
-            "运行", "执行", "部署", "重启", "编译", "终端", "命令", "脚本", "bash",
-            "shell", "git", "curl", "npm", "pip", "python", "文件", "创建文件", "读文件",
-            "搜索", "排查", "项目", "skill", "mcp", "启动", "杀死", "关闭", "构建",
-            "推送", "提交", "改吧", "更新吧", "查一下", "看日志", "跑一下", "测试"
-        ]
-        if any(kw in lower_text for kw in agent_keywords):
-            intent = "code_agent"
-            complexity = 2.0
-            needs_terminal = True
+        action_type = "server_health"
+    elif any(kw in lower_text for kw in ["/note", "/notes", "备忘", "待办"]):
+        intent = "notes"
+        action_type = "notes"
+        complexity = 0.5
+    elif any(kw in lower_text for kw in ["/cron", "/schedule", "提醒我", "定时"]):
+        intent = "cron"
+        action_type = "cron"
+        complexity = 0.5
+    elif any(kw in lower_text for kw in ["typesafe", "ts配置", "ts状态"]):
+        intent = "typesafe_status"
+        action_type = "typesafe_status"
+    elif context and len(lower_text) <= 15 and not any(kw in lower_text for kw in ["你好", "谢谢", "早", "再见", "拜拜"]):
+        intent = "code_agent"
+        action_type = "execute_task"
+        complexity = 1.5
+        needs_terminal = True
+        is_operation = True
 
     return TypeSafeDecision(
         is_dangerous=is_dangerous,
@@ -176,58 +155,226 @@ def _fallback_heuristic_eval(user_text: str, reason: str) -> TypeSafeDecision:
         complexity_score=complexity,
         complexity_confidence=0.80,
         needs_terminal=needs_terminal,
+        is_operation=is_operation,
+        action_type=action_type,
         latency_ms=0.0,
         is_fallback=True,
         fallback_reason=reason
     )
 
 
-async def evaluate_message_gate(user_text: str, timeout_seconds: float = 2.0) -> TypeSafeDecision:
+def is_instant_chat_or_greeting(user_text: str, context: Optional[str] = "") -> Optional[TypeSafeDecision]:
+    """Zero-latency local fast-path for trivial chat, greetings, identity questions, and closures.
+    
+    Bypasses remote System One HTTP API call (~2100ms) entirely when the message is
+    unequivocally casual chat, self-introduction, or simple pleasantry.
+    Execution latency: < 0.01ms.
+    """
+    if not user_text:
+        return None
+        
+    raw = user_text.strip()
+    if len(raw) > 50:
+        return None
+        
+    # Check for forbidden code / shell / command symbols
+    if any(c in raw for c in ("`", "$", ">", "<", "{", "}", "\\", "|", ";", "&")):
+        return None
+
+    # Never bypass if potentially dangerous command keywords exist
+    dangerous_keywords = ["rm ", "chmod ", "dd ", "sudo", "cat ", "ls ", "cd ", "git ", "curl", "wget", "kill", "bash", "sh ", "mkfs"]
+    if any(kw in raw.lower() for kw in dangerous_keywords):
+        return None
+
+    # Clean text: remove standard punctuation & whitespace, lowercase
+    clean = re.sub(r'[\s!！?？~～.,，。:：\-_/]+', '', raw).lower()
+    if not clean:
+        return None
+
+    # Check if context contains an open proposal waiting for confirmation
+    has_pending_task = False
+    if context:
+        c_low = context.lower()
+        if any(kw in c_low for kw in ("pending task", "proposal", "待确认", "执行方案", "是否执行")):
+            has_pending_task = True
+
+    # 1. Greetings (你好, 早, hi, etc.)
+    greeting_patterns = [
+        r"^(你好|您好|在吗|在不在|有人吗|在呢|哈喽|嗨|早|早上好|中午好|下午好|晚上好|hi|hello|hey|hola|yo)+$",
+    ]
+    if any(re.match(p, clean) for p in greeting_patterns):
+        return TypeSafeDecision(
+            is_dangerous=False,
+            danger_prob=0.0,
+            intent="general_chat",
+            intent_confidence=1.0,
+            intent_probabilities={"casual_greeting": 1.0},
+            complexity_score=0.0,
+            complexity_confidence=1.0,
+            needs_terminal=False,
+            is_operation=False,
+            action_type="casual_greeting",
+            latency_ms=0.01,
+            is_fallback=False,
+            raw_answers={"fast_path": "local_greeting"}
+        )
+
+    # 2. Identity & capabilities (你是谁, 你会做什么, etc.)
+    identity_patterns = [
+        r"^(你是谁|你叫什么|你叫什么名字|介绍一下你自己|介绍下你自己|自我介绍|自我介绍一下|做个自我介绍|你会做什么|你会干什么|你能做什么|你能干什么|你能帮我做什么|你能帮我干什么|你有什么功能|你有啥功能|你有什么用|你有啥用|你支持什么|你有什么本事|你是哪个模型|你是什么模型|whoareyou|whatcanyoudo)+$",
+    ]
+    if any(re.match(p, clean) for p in identity_patterns):
+        return TypeSafeDecision(
+            is_dangerous=False,
+            danger_prob=0.0,
+            intent="general_chat",
+            intent_confidence=1.0,
+            intent_probabilities={"casual_greeting": 1.0},
+            complexity_score=0.0,
+            complexity_confidence=1.0,
+            needs_terminal=False,
+            is_operation=False,
+            action_type="casual_greeting",
+            latency_ms=0.01,
+            is_fallback=False,
+            raw_answers={"fast_path": "local_identity"}
+        )
+
+    # 3. Pleasantries / Thanks / Closure (谢谢, 拜拜, 辛苦了, etc.)
+    closure_patterns = [
+        r"^(谢谢|谢谢你|多谢|非常感谢|感谢|谢了|谢谢了|多谢了|谢啦|辛苦了|辛苦啦|太感谢了|十分感谢|thx|thanks|thankyou|再见|拜拜|晚安|bye|byebye|客气了|没事了|不用了)+$",
+    ]
+    if any(re.match(p, clean) for p in closure_patterns):
+        return TypeSafeDecision(
+            is_dangerous=False,
+            danger_prob=0.0,
+            intent="general_chat",
+            intent_confidence=1.0,
+            intent_probabilities={"casual_greeting": 1.0},
+            complexity_score=0.0,
+            complexity_confidence=1.0,
+            needs_terminal=False,
+            is_operation=False,
+            action_type="casual_greeting",
+            latency_ms=0.01,
+            is_fallback=False,
+            raw_answers={"fast_path": "local_closure"}
+        )
+
+    # 4. Laughter & Emotions (哈哈, 嘻嘻, 牛逼, etc.)
+    emotion_patterns = [
+        r"^(哈{2,}|呵{2,}|嘻嘻|笑死|牛逼|厉害|太棒了|真棒|666+|nb)+$",
+    ]
+    if any(re.match(p, clean) for p in emotion_patterns):
+        return TypeSafeDecision(
+            is_dangerous=False,
+            danger_prob=0.0,
+            intent="general_chat",
+            intent_confidence=1.0,
+            intent_probabilities={"casual_greeting": 1.0},
+            complexity_score=0.0,
+            complexity_confidence=1.0,
+            needs_terminal=False,
+            is_operation=False,
+            action_type="casual_greeting",
+            latency_ms=0.01,
+            is_fallback=False,
+            raw_answers={"fast_path": "local_emotion"}
+        )
+
+    # 5. Casual affirmations / acknowledgments (ONLY if NO pending task proposal in context)
+    if not has_pending_task:
+        ack_patterns = [
+            r"^(好的|好|行|ok|okay|收到|知道了|明白|嗯|嗯嗯|对|是的|好嘞|好哒|好的呢|好滴|行嘞|欧克|收到收到|明白明白|好吧|好的吧)+$",
+        ]
+        if any(re.match(p, clean) for p in ack_patterns):
+            return TypeSafeDecision(
+                is_dangerous=False,
+                danger_prob=0.0,
+                intent="general_chat",
+                intent_confidence=1.0,
+                intent_probabilities={"casual_greeting": 1.0},
+                complexity_score=0.0,
+                complexity_confidence=1.0,
+                needs_terminal=False,
+                is_operation=False,
+                action_type="casual_greeting",
+                latency_ms=0.01,
+                is_fallback=False,
+                raw_answers={"fast_path": "local_ack"}
+            )
+
+    return None
+
+
+async def evaluate_message_gate(user_text: str, context: Optional[str] = "", timeout_seconds: float = 4.0) -> TypeSafeDecision:
     """Evaluate user message with TypeSafe System One (Jev model).
     
-    If TypeSafe is unavailable, unconfigured, or times out, seamlessly fall back
-    to internal heuristic decision.
+    Pure semantic evaluation with zero-latency local fast-path:
+    1. First checks for trivial casual greetings/identity/thanks in <0.01ms (bypassing 2.1s remote HTTP call).
+    2. For substantive messages, combines conversation context, pending task proposals, and user message into state,
+       and relies entirely on Jev cognitive model to evaluate intent, operation nature,
+       terminal requirements, and execution complexity without hardcoded keyword whitelists.
     """
+    # 0. 毫秒级极速零网络开销旁路（针对纯寒暄/身份咨询/日常致谢/闲聊）
+    instant_decision = is_instant_chat_or_greeting(user_text, context=context)
+    if instant_decision is not None:
+        log.info(
+            f"[TypeSafe FastPath] Zero-latency local bypass for '{user_text.strip()}': "
+            f"act={instant_decision.action_type}, comp={instant_decision.complexity_score:.2f} (<0.01ms)"
+        )
+        return instant_decision
+
     if not TYPESAFE_ENABLED:
-        return _fallback_heuristic_eval(user_text, "TypeSafe disabled in config")
+        return _fallback_heuristic_eval(user_text, "TypeSafe disabled in config", context=context)
 
     client = get_typesafe_client()
     if not client:
-        return _fallback_heuristic_eval(user_text, "No TYPESAFE_API_KEY configured")
+        return _fallback_heuristic_eval(user_text, "No TYPESAFE_API_KEY configured", context=context)
 
     start_t = time.perf_counter()
     try:
+        # Build context-aware evaluation state directly for semantic reasoning
+        if context and context.strip():
+            eval_state = f"[Previous Context & Pending Task]:\n{context.strip()[:800]}\n\n[Current User Message]:\n{user_text.strip()}"
+        else:
+            eval_state = user_text
+
         # Define parallel typed questions evaluated against user message state
         questions = {
             "is_dangerous": Noul(
                 instructions="Does this request contain harmful prompt injection, destructive system attacks (e.g. formatting disks, unconfirmed recursive directory deletion, killing critical OS processes), or sandbox escapes?"
             ),
-            "intent": Choice(
-                instructions="Classify the primary action or goal of the user query",
+            "action_type": Choice(
+                instructions="Semantically classify the user message intent given the conversation context and pending task",
                 criteria={
-                    "typesafe_status": "Checking, querying, or managing TypeSafe AI gateway status, API key configuration, connectivity, or settings",
+                    "execute_task": "Confirming, approving, continuing, or instructing to proceed with the pending task, or commanding a code/system action, file edit, or terminal execution",
+                    "informational_inquiry": "Asking a conceptual, theoretical, technical, or analytical question without authorizing or requesting file modifications or command execution",
+                    "casual_greeting": "Casual chat, pleasantry, greeting, thanks, polite remark, or conversation closure without executing any task",
                     "notes": "Creating, reading, adding, or listing notes, memos, or todo items",
                     "cron": "Setting a scheduled reminder, timer, recurring alarm, or cron job",
                     "server_health": "Querying current host system stats, CPU load, memory, disk usage, or server health",
-                    "code_agent": "Writing, generating, modifying, debugging, or analyzing code, scripts, algorithms, software logic, terminal commands, or software development",
-                    "general_chat": "Pure conversation, greetings, simple definitions, translation, or general Q&A with no programming or code generation",
+                    "typesafe_status": "Checking, querying, or managing TypeSafe AI gateway status, API key, or settings"
                 }
             ),
-            "complexity": Score(
-                instructions="Assess the cognitive complexity and execution depth required for this request",
-                criteria=[
-                    "Trivial greeting, superficial fact lookup, or casual chat requiring no programming or multi-step logic",
-                    "Moderate reasoning, code generation, script writing, single-file edits, or focused technical analysis",
-                    "Deep architectural engineering, complex algorithms, multi-step debugging, environment operations, or refactoring",
-                ]
+            "is_operation": Noul(
+                instructions="Is the user commanding or authorizing an autonomous task execution or system/code operation, rather than asking a question or chatting?"
             ),
             "needs_terminal": Noul(
-                instructions="Does fulfilling this request require running command-line tools, modifying files, or terminal scripts on the machine?"
+                instructions="Does the actual action required to fulfill this request (including executing any approved pending task) require running terminal commands or modifying files?"
+            ),
+            "execution_complexity": Score(
+                instructions="Assess the cognitive complexity and execution depth required for fulfilling the task requested or approved by the user",
+                criteria=[
+                    "Trivial greeting, simple acknowledgment, or superficial conversation requiring no technical operations or multi-step reasoning",
+                    "Moderate technical analysis, code reading, conceptual explanation, or single-file guidance",
+                    "Deep engineering execution, multi-step problem solving, modifying codebases, debugging, or system commands"
+                ]
             )
         }
 
         eval_task = client.system_one(
-            state=user_text,
+            state=eval_state,
             questions=questions,
             model=TYPESAFE_MODEL or "jev-latest"
         )
@@ -239,39 +386,53 @@ async def evaluate_message_gate(user_text: str, timeout_seconds: float = 2.0) ->
         # Read Noul
         danger_ans = answers.get("is_dangerous")
         danger_prob = float(danger_ans.noul) if danger_ans else 0.0
-        # Danger threshold: noul probability >= 0.85
         is_dangerous = danger_prob >= 0.85
 
         # Read Choice
-        intent_ans = answers.get("intent")
-        intent_choice = str(intent_ans.choice) if intent_ans else "general_chat"
-        intent_conf = float(intent_ans.confidence) if (intent_ans and intent_ans.confidence is not None) else 1.0
-        intent_probs = {k: float(v) for k, v in intent_ans.probabilities.items()} if (intent_ans and intent_ans.probabilities) else {}
+        action_ans = answers.get("action_type")
+        action_type = str(action_ans.choice) if action_ans else "casual_greeting"
+        action_conf = float(action_ans.confidence) if (action_ans and action_ans.confidence is not None) else 1.0
+        action_probs = {k: float(v) for k, v in action_ans.probabilities.items()} if (action_ans and action_ans.probabilities) else {}
 
-        # Read Score
-        complexity_ans = answers.get("complexity")
-        complexity_score = float(complexity_ans.score) if complexity_ans else 0.0
-        complexity_conf = float(complexity_ans.confidence) if (complexity_ans and complexity_ans.confidence is not None) else 1.0
+        # Read Noul is_operation
+        is_op_ans = answers.get("is_operation")
+        is_operation = float(is_op_ans.noul) >= 0.5 if is_op_ans else False
 
-        # Read needs_terminal (threshold >= 0.45 for sensitive operational detection)
+        # Read Score execution_complexity
+        comp_ans = answers.get("execution_complexity")
+        complexity_score = float(comp_ans.score) if comp_ans else 0.0
+        complexity_conf = float(comp_ans.confidence) if (comp_ans and comp_ans.confidence is not None) else 1.0
+
+        # Read needs_terminal
         term_ans = answers.get("needs_terminal")
         needs_terminal = float(term_ans.noul) >= 0.45 if term_ans else False
 
+        # Map semantic action_type to intent
+        if action_type in ("notes", "cron", "server_health", "typesafe_status"):
+            intent_choice = action_type
+        elif action_type == "execute_task" or is_operation:
+            intent_choice = "code_agent"
+        elif action_type == "informational_inquiry":
+            intent_choice = "code_agent" if complexity_score >= 0.4 else "general_chat"
+        else:
+            intent_choice = "general_chat"
+
         log.info(
-            f"[TypeSafe] Decision in {elapsed_ms:.1f}ms: "
-            f"intent={intent_choice} (conf={intent_conf:.2f}), "
-            f"danger_prob={danger_prob:.2f}, complexity={complexity_score}, term={needs_terminal}"
+            f"[TypeSafe] Semantic decision in {elapsed_ms:.1f}ms: "
+            f"act={action_type}, op={is_operation}, comp={complexity_score:.2f}, term={needs_terminal}"
         )
 
         return TypeSafeDecision(
             is_dangerous=is_dangerous,
             danger_prob=danger_prob,
             intent=intent_choice,
-            intent_confidence=intent_conf,
-            intent_probabilities=intent_probs,
+            intent_confidence=action_conf,
+            intent_probabilities=action_probs,
             complexity_score=complexity_score,
             complexity_confidence=complexity_conf,
             needs_terminal=needs_terminal,
+            is_operation=is_operation,
+            action_type=action_type,
             latency_ms=elapsed_ms,
             is_fallback=False,
             raw_answers=answers
@@ -280,11 +441,11 @@ async def evaluate_message_gate(user_text: str, timeout_seconds: float = 2.0) ->
     except asyncio.TimeoutError:
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         log.warning(f"[TypeSafe] Evaluation timed out after {elapsed_ms:.1f}ms, using fallback heuristic.")
-        return _fallback_heuristic_eval(user_text, f"Timeout after {elapsed_ms:.1f}ms")
+        return _fallback_heuristic_eval(user_text, f"Timeout after {elapsed_ms:.1f}ms", context=context)
     except Exception as e:
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         log.warning(f"[TypeSafe] Evaluation failed ({e}), using fallback heuristic.")
-        return _fallback_heuristic_eval(user_text, f"API Error: {e}")
+        return _fallback_heuristic_eval(user_text, f"API Error: {e}", context=context)
 
 
 async def test_typesafe_connectivity() -> Dict[str, Any]:
@@ -334,7 +495,7 @@ async def test_typesafe_connectivity() -> Dict[str, Any]:
         }
 
 
-async def evaluate_output_guard(response_text: str, timeout_seconds: float = 2.0) -> TypeSafeOutputDecision:
+async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5) -> TypeSafeOutputDecision:
     """Level 2 & 3 (Sentry / Co-Pilot): Evaluate bot-generated response before delivery.
     
     Checks for sensitive credential leaks (tokens, private keys) and destructive advice.
@@ -344,11 +505,16 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 2.0
     if tier not in ("sentry", "copilot") or not getattr(config, "TYPESAFE_ENABLED", True):
         return TypeSafeOutputDecision(is_safe=True)
 
+    # 1. 快速本地静态扫描：高危密钥立即拦截，纯闲聊短文本（无代码块、无私钥特征）0ms 秒级放行
+    has_secret = bool(re.search(r'(-----BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY-----|ghp_[a-zA-Z0-9]{36}|ey[a-zA-Z0-9_\-]{30,}\.ey[a-zA-Z0-9_\-]{30,})', response_text))
+    if has_secret:
+        return TypeSafeOutputDecision(is_safe=False, secret_leak_prob=0.99, reason="检测到潜在敏感凭证暴露 (API Token/私钥)")
+    if len(response_text.strip()) < 400 and "```" not in response_text:
+        return TypeSafeOutputDecision(is_safe=True, latency_ms=0.0)
+
     client = get_typesafe_client()
     if not client:
-        # Fallback regex check for obvious secrets
-        has_secret = bool(re.search(r'(-----BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY-----|ghp_[a-zA-Z0-9]{36}|ey[a-zA-Z0-9_\-]{30,}\.ey[a-zA-Z0-9_\-]{30,})', response_text))
-        return TypeSafeOutputDecision(is_safe=not has_secret, secret_leak_prob=0.99 if has_secret else 0.01, is_fallback=True)
+        return TypeSafeOutputDecision(is_safe=True, is_fallback=True)
 
     start_t = time.perf_counter()
     try:
@@ -397,7 +563,7 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 2.0
         return TypeSafeOutputDecision(is_safe=True, latency_ms=elapsed_ms, is_fallback=True, fallback_reason=str(e))
 
 
-async def evaluate_tool_execution(command: str, context: str = "", timeout_seconds: float = 2.0) -> TypeSafeToolDecision:
+async def evaluate_tool_execution(command: str, context: str = "", timeout_seconds: float = 3.0) -> TypeSafeToolDecision:
     """Level 3 (Co-Pilot): Evaluate a shell command before execution."""
     import config
     tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
@@ -459,7 +625,7 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
         return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=elapsed_ms, is_fallback=True)
 
 
-async def evaluate_tool_error(command: str, error_output: str, timeout_seconds: float = 2.0) -> TypeSafeErrorDiagnosis:
+async def evaluate_tool_error(command: str, error_output: str, timeout_seconds: float = 3.0) -> TypeSafeErrorDiagnosis:
     """Level 3 (Co-Pilot): Diagnose execution failures and provide root cause classification."""
     import config
     tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
@@ -549,45 +715,45 @@ def get_typesafe_config_state() -> Dict[str, Any]:
 
 
 def evaluate_adaptive_tier(decision: TypeSafeDecision) -> str:
-    """Evaluate adaptive reasoning effort tier: Low | Medium | High based on cognitive decision analysis.
+    """Evaluate adaptive reasoning effort tier: Low | Medium | High based on semantic decision analysis.
     
-    Principles:
-    - Code generation and software engineering demand at least Medium/High reasoning verification.
-    - Low is strictly restricted to light conversational chat and trivial lookups with no code logic.
+    Pure semantic principles:
+    - Casual chat, greetings, polite remarks, or non-operational conversation with no task -> Low
+    - Informational queries, theoretical Q&A, or moderate analysis -> Medium (unless high architectural complexity >= 1.7 -> High)
+    - Operational task execution (new or confirmed pending plan) requiring code/terminal -> High
     """
     import config
     auto_enabled = getattr(config, "TYPESAFE_AUTO_MODE", True)
     if not auto_enabled:
         return ""
 
-    # 1. 优先判定 High:
-    # - 涉及终端命令或文件修改 (needs_terminal)
-    # - 高复杂度认知负荷 (complexity_score >= 0.8)
-    # - 代码编写/工程任务且复杂度达到深入分析 (intent == "code_agent" and complexity_score >= 0.8)
-    if decision.needs_terminal:
-        return "High"
-    if decision.complexity_score >= 0.8:
-        return "High"
-    if decision.intent == "code_agent" and decision.complexity_score >= 0.8:
-        return "High"
-
-    # 2. 判定 Medium:
-    # - 只要涉及代码/编程（intent == "code_agent"），底线必须是 Medium，绝不降入 Low
-    # - 或一般性任务达到中等分析复杂度 (complexity_score >= 0.4)
-    if decision.intent == "code_agent":
-        return "Medium"
-    if decision.complexity_score >= 0.4:
-        return "Medium"
-
-    # 3. 判定 Low:
-    # - 降级状态（若无代码任务）
-    # - 严格限制为非代码的日常轻量闲聊 (general_chat) 且低复杂度
-    if decision.is_fallback:
+    # 1. 语义判定为纯寒暄/日常致谢/闲聊，或者系统插件直达查询（健康度/备忘/定时/状态） -> Low
+    if decision.action_type in ("casual_greeting", "server_health", "notes", "cron", "typesafe_status"):
         return "Low"
-    if decision.intent == "general_chat" and decision.complexity_score < 0.4:
+    if not decision.is_operation and decision.complexity_score < 0.4 and not decision.needs_terminal:
         return "Low"
 
-    return "Medium"
+    # 2. 纯技术咨询/原理解释/方案探讨（非操作指令）：常规咨询保持 Medium，仅高复杂度架构设计升级为 High
+    if decision.action_type == "informational_inquiry" and not decision.is_operation:
+        if decision.complexity_score >= 1.7:
+            return "High"
+        return "Medium"
+
+    # 3. 语义判定为操作执行类（新操作或确认前文任务）且需要工具/达到高认知复杂度 -> High
+    if decision.is_operation and (decision.needs_terminal or decision.complexity_score >= 0.6 or decision.action_type == "execute_task"):
+        return "High"
+
+    # 4. 涉及终端操作且有实质性复杂度 -> High
+    if decision.needs_terminal and decision.complexity_score >= 0.6:
+        return "High"
+    if decision.complexity_score >= 1.5:
+        return "High"
+
+    # 5. 概念性问答、原理分析、代码解释或中等复杂度任务 -> Medium
+    if decision.action_type == "informational_inquiry" or decision.complexity_score >= 0.4:
+        return "Medium"
+
+    return "Low"
 
 
 def resolve_adaptive_model(base_model: str, adaptive_tier: str) -> str:

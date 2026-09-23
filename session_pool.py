@@ -289,12 +289,29 @@ class SessionPool:
     def __init__(self):
         self._sessions: Dict[str, PersistentSession] = {}
 
+    @staticmethod
+    def _is_compatible_model(current_model: str, target_model: str) -> bool:
+        if current_model == target_model:
+            return True
+        for prefix in ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.1-pro"):
+            if current_model.startswith(prefix) and target_model.startswith(prefix):
+                return True
+        return False
+
     def get_or_create(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = "") -> PersistentSession:
         sess = self._sessions.get(chat_id)
         # conversation_id 比对：只在"双方均非空且不同"时才视作需要重建
         # 避免传入空串（新会话/clear后）与已有真实 UUID 的 sess 不匹配，导致每轮都重建进程
         conv_mismatch = bool(conversation_id and sess and sess.conversation_id and sess.conversation_id != conversation_id)
-        if sess is None or sess.model != model or sess.project_dir != project_dir or conv_mismatch or not sess.is_alive():
+
+        # 优化：同一模型家族（如 gemini-3.8-flash-low / medium / high）内动态切换自适应档位时，
+        # 保持运行中的热进程不被销毁，思考深度由每轮 Prompt 动态引导，消除频繁冷启动的 2~3 秒延迟
+        model_mismatch = False
+        if sess and sess.model != model:
+            if not self._is_compatible_model(sess.model, model):
+                model_mismatch = True
+
+        if sess is None or model_mismatch or sess.project_dir != project_dir or conv_mismatch or not sess.is_alive():
             if sess:
                 asyncio.create_task(sess.close())
             sess = PersistentSession(chat_id, model, project_dir, conversation_id)
