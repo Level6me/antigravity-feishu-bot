@@ -304,7 +304,30 @@ def is_instant_chat_or_greeting(user_text: str, context: Optional[str] = "") -> 
                 raw_answers={"fast_path": "local_ack"}
             )
 
+        # 6. Casual follow-ups & inquiries (还有呢, 还会其他的吗, 继续还有呢, 然后呢, 还有啥, etc. when NO pending task)
+        followup_patterns = [
+            r"^(还有呢|还有啥|还有什么|还有没有|还有吗|还会什么|还会啥|还会其他的吗|还会其他的么|还会别的吗|还会别的么|还支持什么|还支持啥|继续|继续说|继续讲|然后呢|然后嘞|接着说|接着讲|还有么)+$",
+            r"^(继续|接着)?(还有呢|还有啥|还有什么|还有吗|还会什么|还会其他的吗|还会别的吗)+$",
+        ]
+        if any(re.match(p, clean) for p in followup_patterns):
+            return TypeSafeDecision(
+                is_dangerous=False,
+                danger_prob=0.0,
+                intent="general_chat",
+                intent_confidence=1.0,
+                intent_probabilities={"casual_greeting": 1.0},
+                complexity_score=0.0,
+                complexity_confidence=1.0,
+                needs_terminal=False,
+                is_operation=False,
+                action_type="casual_greeting",
+                latency_ms=0.01,
+                is_fallback=False,
+                raw_answers={"fast_path": "local_followup"}
+            )
+
     return None
+
 
 
 async def evaluate_message_gate(user_text: str, context: Optional[str] = "", timeout_seconds: float = 4.0) -> TypeSafeDecision:
@@ -505,12 +528,17 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5
     if tier not in ("sentry", "copilot") or not getattr(config, "TYPESAFE_ENABLED", True):
         return TypeSafeOutputDecision(is_safe=True)
 
-    # 1. 快速本地静态扫描：高危密钥立即拦截，纯闲聊短文本（无代码块、无私钥特征）0ms 秒级放行
+    # 1. 快速本地静态扫描：高危密钥立即拦截，无需等待远程网络
     has_secret = bool(re.search(r'(-----BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY-----|ghp_[a-zA-Z0-9]{36}|ey[a-zA-Z0-9_\-]{30,}\.ey[a-zA-Z0-9_\-]{30,})', response_text))
     if has_secret:
         return TypeSafeOutputDecision(is_safe=False, secret_leak_prob=0.99, reason="检测到潜在敏感凭证暴露 (API Token/私钥)")
-    if len(response_text.strip()) < 400 and "```" not in response_text:
-        return TypeSafeOutputDecision(is_safe=True, latency_ms=0.0)
+
+    # 2. 本地破坏性代码关键词检测：无高危破坏关键词的普通输出，本地 0ms 秒级放行
+    dangerous_output_patterns = [r"\brm\s+-rf\s+/", r"\bmkfs\b", r":\(\)\{.*\}", r"\bdd\s+if=/dev/"]
+    has_dangerous_cmd = any(re.search(pat, response_text) for pat in dangerous_output_patterns)
+    if not has_dangerous_cmd:
+        # 绝大多数常规代码解答与文本回复均无需阻塞等待远程 Jev，直接秒级放行！
+        return TypeSafeOutputDecision(is_safe=True, latency_ms=0.01)
 
     client = get_typesafe_client()
     if not client:
@@ -570,12 +598,44 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
     if tier != "copilot" or not getattr(config, "TYPESAFE_ENABLED", True):
         return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk")
 
+    # 1. 极致提速：只读工具与无害命令的本地零延迟白名单放行（<0.01ms），杜绝无谓的远程 Jev 网络 RTT (每次省2秒)
+    cmd_strip = command.strip()
+    # 纯读文件 / 目录浏览 / 代码搜索工具直接放行
+    if any(cmd_strip.startswith(p) for p in [
+        "tool:view_file", "tool:list_dir", "tool:grep_search", "tool:find_by_name",
+        "tool:search_web", "tool:read_url_content", "tool:ask_question"
+    ]):
+        return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.01)
+
+    # 常见只读与查看类安全 shell 命令直接放行
+    safe_readonly_prefixes = [
+        "git status", "git log", "git diff", "git show", "git branch",
+        "ls", "dir", "pwd", "cat ", "head ", "tail ", "wc ", "grep ", "rg ", "find ",
+        "echo ", "uname", "uptime", "whoami", "id", "hostname", "which ", "whereis ", "date"
+    ]
+    # 清理 timeout 前缀再检测
+    clean_cmd = re.sub(r'^timeout\s+\d+\s+', '', cmd_strip).strip()
+    if any(clean_cmd == p or clean_cmd.startswith(p + " ") or clean_cmd.startswith(p) for p in safe_readonly_prefixes):
+        # 排除管道或重定向中有恶意写/删操作的命令
+        if not any(x in clean_cmd for x in [">", "rm ", "dd ", "chmod ", "mkfs", "kill", "reboot", "shutdown"]):
+            return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.01)
+
+    # 2. 本地高危物理特征速断拦截（无需等待远程 Jev 决策）
+    is_crit = bool(re.search(r'\b(rm\s+-rf\s+/|mkfs|:\(\)\{|dd\s+if=/dev/)\b', command))
+    if is_crit:
+        return TypeSafeToolDecision(
+            is_allowed=False,
+            risk_level="critical_risk",
+            critical_prob=0.99,
+            reason="本地规则直接拦截高危破坏性系统命令",
+            latency_ms=0.01
+        )
+
     client = get_typesafe_client()
     if not client:
-        is_crit = bool(re.search(r'\b(rm\s+-rf\s+/|mkfs|:\(\)\{|dd\s+if=/dev/)\b', command))
         return TypeSafeToolDecision(
-            is_allowed=not is_crit,
-            risk_level="critical_risk" if is_crit else "low_risk",
+            is_allowed=True,
+            risk_level="low_risk",
             is_fallback=True
         )
 

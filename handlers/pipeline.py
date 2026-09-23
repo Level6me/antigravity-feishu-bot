@@ -402,7 +402,9 @@ async def _process_single_task(chat_id, task):
     is_complex_agent = False
     if session_data.get("mode") == "agent":
         is_complex_agent = True
-    elif decision.is_operation or decision.action_type == "execute_task":
+    elif decision.is_operation:
+        is_complex_agent = True
+    elif decision.action_type == "execute_task" and decision.complexity_score >= 0.25:
         is_complex_agent = True
     elif decision.needs_terminal and decision.complexity_score >= 0.4:
         is_complex_agent = True
@@ -418,6 +420,7 @@ async def _process_single_task(chat_id, task):
     is_lightweight_chat = (
         not decision.is_operation
         and not decision.needs_terminal
+        and not is_complex_agent
         and (
             decision.action_type == "casual_greeting"
             or decision.complexity_score < 0.25
