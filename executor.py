@@ -6,6 +6,7 @@ import uuid
 import re
 import subprocess
 from config import ANTIGRAVITY_BIN, DANGEROUSLY_SKIP_PERMISSIONS, get_brain_dir, get_transcript_path, BASE_DIR
+import config
 from logger import log
 from card_builder import CardBuilder
 from lark_client import patch_interactive_card_sdk, send_interactive_card_sdk, api_client
@@ -613,9 +614,12 @@ async def execute_antigravity(
             "-p", system_instruction + final_prompt, 
             "--output-format", "stream-json",
             "--model", session_data["model"],
+            "--effort", session_data.get("reasoning_effort", "medium"),
             "--print-timeout", "60m",
             "--log-file", log_file_path
         ]
+        if config.TYPESAFE_ENABLED and config.TYPESAFE_TIER == "copilot":
+            cmd_args.append("--sandbox")
         is_admin_chat = is_admin(chat_id)
         if DANGEROUSLY_SKIP_PERMISSIONS and is_admin_chat:
             cmd_args.append("--dangerously-skip-permissions")
@@ -654,7 +658,13 @@ async def execute_antigravity(
         try:
             from session_pool import session_pool
             conv_id_to_resume = session_data.get("conversation", "") if not is_new_conversation else ""
-            sess = session_pool.get_or_create(chat_id, session_data["model"], cwd_dir, conversation_id=conv_id_to_resume)
+            sess = session_pool.get_or_create(
+                chat_id,
+                session_data["model"],
+                cwd_dir,
+                conversation_id=conv_id_to_resume,
+                effort=session_data.get("reasoning_effort", "medium"),
+            )
             await sess.lock.acquire()
             sess_locked = True
             if not sess.is_alive():
@@ -811,6 +821,8 @@ async def execute_antigravity(
                             if not isinstance(t_info, dict):
                                 t_info = {}
                             t_params = t_info.get("parameters") or t_info.get("args") or step_up.get("parameters") or step_up.get("args") or {}
+                            if not isinstance(t_params, dict):
+                                t_params = {}
                             act = format_tool_action(t_name, t_params)
                             if act:
                                 if current_tool_action and act != current_tool_action:
@@ -823,11 +835,7 @@ async def execute_antigravity(
                                     current_plan_idx = CardBuilder.match_step_index(
                                         planned_steps, current_plan_idx, act, len(completed_tool_steps)
                                     )
-                                from plugin_manager import plugin_manager
-                                await plugin_manager.dispatch_tool_call(act, {})
-
-                            # Level 3 (Co-Pilot): 工具执行前安全核验与高危物理阻断
-                            import config
+                            # Co-Pilot 对高风险工具事件进行语义复核；普通工具由本地规则和 CLI 沙箱保护。
                             ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
                             if ts_tier == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
                                 cmd_target = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
@@ -842,14 +850,14 @@ async def execute_antigravity(
                                     try:
                                         from system_one_gate import evaluate_tool_execution
                                         tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
-                                        if not tool_dec.is_fallback:
+                                        if tool_dec.decision_source == "jev":
                                             session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
                                         if not tool_dec.is_allowed:
-                                            log.critical(f"[TypeSafe Co-Pilot] CRITICAL RISK DETECTED! Physical blocking: {cmd_target} -> {tool_dec.reason}")
+                                            log.critical(f"[TypeSafe Co-Pilot] High-risk tool event rejected; stopping the remaining agent stream: {cmd_target} -> {tool_dec.reason}")
                                             typesafe_blocked_info = {
                                                 "tool": t_name,
                                                 "target": cmd_target,
-                                                "reason": tool_dec.reason or "Jev 判定为严重系统破坏性操作",
+                                                "reason": tool_dec.reason or "安全策略拒绝了该高风险操作",
                                                 "risk_level": tool_dec.risk_level
                                             }
                                             await sess.close()
@@ -863,6 +871,18 @@ async def execute_antigravity(
                                             })
                                     except Exception as e:
                                         log.warning(f"[TypeSafe Co-Pilot] Tool execution evaluation error: {e}")
+                                        typesafe_blocked_info = {
+                                            "tool": t_name,
+                                            "target": cmd_target,
+                                            "reason": "高风险工具检查异常，已停止后续执行",
+                                            "risk_level": "critical_risk",
+                                        }
+                                        await sess.close()
+                                        should_break = True
+                                        break
+                            if act:
+                                from plugin_manager import plugin_manager
+                                await plugin_manager.dispatch_tool_call(act, {})
                     elif event_type == "result":
                         if current_tool_action:
                             if current_tool_action not in completed_tool_steps:
@@ -956,9 +976,16 @@ async def execute_antigravity(
                 # 2. 如果是纯问答无工具任务，只要有文本输出立即打字机流式呈现；
                 # 3. 如果是多步骤复杂任务，仅在所有工具执行完毕、且模型输出实质性总结文本（>=25字）时才切换至打字机
                 is_streaming_text = False
+                guard_before_delivery = (
+                    config.TYPESAFE_ENABLED
+                    and config.TYPESAFE_TIER in ("sentry", "copilot")
+                )
                 if clean_partial and not has_tool_in_flight:
                     if is_voice_message:
                         # 语音对话模式：流式生成期间不提前打字剧透，优先保证语音消息首先送达
+                        is_streaming_text = False
+                    elif guard_before_delivery:
+                        # Do not expose unreviewed text; final output is checked before delivery.
                         is_streaming_text = False
                     elif not is_complex:
                         is_streaming_text = True
@@ -1075,7 +1102,6 @@ async def execute_antigravity(
 
             # Level 3 (Co-Pilot): 任务执行异常时的自愈根因诊断
             if is_error and not is_quota_exhausted and not typesafe_blocked_info:
-                import config
                 if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
                     try:
                         from system_one_gate import evaluate_tool_error
@@ -1172,6 +1198,24 @@ async def execute_antigravity(
                     task_meta.get("is_voice_message")
                 )
             )
+            # Sentry / Co-Pilot 必须在文字和语音发出前检查最终回复。
+            if reply_text and not typesafe_blocked_info:
+                if config.TYPESAFE_ENABLED and config.TYPESAFE_TIER in ("sentry", "copilot"):
+                    try:
+                        from system_one_gate import evaluate_output_guard
+                        guard_res = await evaluate_output_guard(reply_text)
+                        if not guard_res.is_fallback and guard_res.latency_ms > 0.1:
+                            session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
+                        if not guard_res.is_safe:
+                            log.warning(f"[TypeSafe Sentry] Output blocked before delivery: {guard_res.reason}")
+                            reply_text = (
+                                "🛡️ **[System One 内容安全拦截]**\n\n"
+                                f"系统检测到回复存在风险或检查服务不可用：{guard_res.reason}。"
+                            )
+                    except Exception as e:
+                        log.warning(f"[TypeSafe Sentry] Egress guard failed before delivery: {e}")
+                        reply_text = "🛡️ 回复安全检查未能完成，本次内容已暂缓发送。"
+
             # 1. 优先生成并发送原生语音消息，确保语音条率先送达聊天窗口！
             if is_voice_message and not is_error and reply_text:
                 try:
@@ -1198,24 +1242,8 @@ async def execute_antigravity(
                 except Exception as e:
                     log.error(f"[Executor] Typewriter streaming failed: {e}")
 
-            # Level 2 & 3: TypeSafe Egress Guard (出口安全质检与凭证泄露防护)
-            # 优化：对于未调用任何终端工具的纯日常闲聊与简单问答，跳过远端审查（本地秒级放行），省去 2~4 秒等待
-            is_light_interaction = (session_data.get("typesafe_adaptive_tier") == "Low" and len(completed_tool_steps) == 0)
-            if reply_text and not typesafe_blocked_info and not is_light_interaction:
-                try:
-                    from system_one_gate import evaluate_output_guard
-                    guard_res = await evaluate_output_guard(reply_text)
-                    if not guard_res.is_fallback:
-                        session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
-                    if not guard_res.is_safe:
-                        log.warning(f"[TypeSafe Sentry] Output blocked: {guard_res.reason}")
-                        reply_text = f"🛡️ **[System One 内容安全拦截]**\n\n系统检测到本次生成内容存在不合规或敏感项：{guard_res.reason}。\n为保护数据与敏感凭证安全，该部分内容已被拦截。"
-                except Exception as e:
-                    log.warning(f"[TypeSafe Sentry] Egress guard hook error: {e}")
-
             # 生成 System One 全链路审计摘要（存入 session_data 供卡片底部渲染展示）
             try:
-                import config
                 ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
                 ts_enabled = getattr(config, "TYPESAFE_ENABLED", True)
                 total_decisions = session_data.get("typesafe_decision_count", 0)
@@ -1316,4 +1344,3 @@ async def execute_antigravity(
         log.warning(f"[Executor] Attempt {attempt}/{MAX_ATTEMPTS} failed/stalled without final response for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")
         await asyncio.sleep(1.0)
     return True
-

@@ -15,7 +15,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
-from config import TYPESAFE_API_KEY, TYPESAFE_ENABLED, TYPESAFE_MODEL, TYPESAFE_BASE_URL, TYPESAFE_TIER
+import config
 from logger import log
 
 try:
@@ -38,11 +38,23 @@ class TypeSafeDecision:
     complexity_confidence: float = 1.0
     needs_terminal: bool = False
     is_operation: bool = False
-    action_type: str = "casual_greeting"
+    action_type: str = ""
     latency_ms: float = 0.0
     is_fallback: bool = False
     fallback_reason: Optional[str] = None
     raw_answers: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.action_type:
+            if self.intent in ("casual_chat", "general_chat", "greeting", "casual_greeting"):
+                self.action_type = "casual_greeting"
+            elif self.intent in ("code_agent", "execute_task"):
+                self.action_type = "execute_task"
+                self.is_operation = True
+            elif self.intent in ("notes", "cron", "server_health", "typesafe_status"):
+                self.action_type = self.intent
+            else:
+                self.action_type = "informational_inquiry"
 
 
 @dataclass
@@ -67,6 +79,7 @@ class TypeSafeToolDecision:
     latency_ms: float = 0.0
     reason: Optional[str] = None
     is_fallback: bool = False
+    decision_source: str = "jev"  # jev | local | fallback | disabled
 
 
 @dataclass
@@ -87,14 +100,16 @@ def get_typesafe_client():
     global _async_client
     if not _TYPESAFE_SDK_AVAILABLE:
         return None
-    api_key = TYPESAFE_API_KEY or os.getenv("TYPESAFE_API_KEY", "").strip()
+    # Read mutable runtime settings from config so the in-chat console can
+    # rotate credentials/endpoints without leaving this module on stale imports.
+    api_key = config.TYPESAFE_API_KEY or os.getenv("TYPESAFE_API_KEY", "").strip()
     if not api_key:
         return None
     if _async_client is None:
         try:
             client_kwargs = {"api_key": api_key}
-            if TYPESAFE_BASE_URL:
-                client_kwargs["base_url"] = TYPESAFE_BASE_URL
+            if config.TYPESAFE_BASE_URL:
+                client_kwargs["base_url"] = config.TYPESAFE_BASE_URL
             _async_client = AsyncTypeSafeClient(**client_kwargs)
             log.info("[TypeSafe] AsyncTypeSafeClient initialized successfully.")
         except Exception as e:
@@ -119,9 +134,11 @@ def _fallback_heuristic_eval(user_text: str, reason: str, context: Optional[str]
     is_dangerous = any(re.search(pat, text_clean, re.IGNORECASE) for pat in dangerous_patterns)
 
     lower_text = user_text.lower().strip()
+    # Unknown requests must not silently become casual chat. If Jev is
+    # unavailable, use Medium as the safe latency/quality compromise.
     intent = "general_chat"
-    action_type = "casual_greeting"
-    complexity = 0.0
+    action_type = "informational_inquiry"
+    complexity = 0.5
     needs_terminal = False
     is_operation = False
 
@@ -348,7 +365,7 @@ async def evaluate_message_gate(user_text: str, context: Optional[str] = "", tim
         )
         return instant_decision
 
-    if not TYPESAFE_ENABLED:
+    if not config.TYPESAFE_ENABLED:
         return _fallback_heuristic_eval(user_text, "TypeSafe disabled in config", context=context)
 
     client = get_typesafe_client()
@@ -387,11 +404,18 @@ async def evaluate_message_gate(user_text: str, context: Optional[str] = "", tim
                 instructions="Does the actual action required to fulfill this request (including executing any approved pending task) require running terminal commands or modifying files?"
             ),
             "execution_complexity": Score(
-                instructions="Assess the cognitive complexity and execution depth required for fulfilling the task requested or approved by the user",
+                instructions=(
+                    "Score the reasoning effort actually needed to fulfill the user's request, not how technical its topic sounds. "
+                    "Use the examples as anchors: a direct factual answer or brief explanation of one concept is level 0; "
+                    "comparing options across several criteria and making a recommendation is level 1; "
+                    "a multi-step engineering task that investigates, changes, or verifies a codebase is level 2. "
+                    "For example, asking the difference between a Python list and tuple is level 0, while comparing cache designs "
+                    "across consistency, latency, and operating cost is level 1."
+                ),
                 criteria=[
-                    "Trivial greeting, simple acknowledgment, or superficial conversation requiring no technical operations or multi-step reasoning",
-                    "Moderate technical analysis, code reading, conceptual explanation, or single-file guidance",
-                    "Deep engineering execution, multi-step problem solving, modifying codebases, debugging, or system commands"
+                    "Level 0: Answer directly from general knowledge, define one concept, or give a brief explanation; no meaningful comparison, synthesis, or action is needed.",
+                    "Level 1: Reason across multiple factors, compare alternatives, interpret technical context, or make a recommendation; no broad codebase change is required.",
+                    "Level 2: Complete dependent steps such as inspecting or debugging a project, editing code, verifying changes, or coordinating a substantial implementation."
                 ]
             )
         }
@@ -399,12 +423,26 @@ async def evaluate_message_gate(user_text: str, context: Optional[str] = "", tim
         eval_task = client.system_one(
             state=eval_state,
             questions=questions,
-            model=TYPESAFE_MODEL or "jev-latest"
+            model=config.TYPESAFE_MODEL or "jev-latest"
         )
         response = await asyncio.wait_for(eval_task, timeout=timeout_seconds)
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
 
         answers = response.answers
+        required_answers = {
+            "is_dangerous", "action_type", "is_operation",
+            "needs_terminal", "execution_complexity",
+        }
+        try:
+            present_answers = set(answers.keys())
+        except Exception:
+            present_answers = set()
+        if not required_answers.issubset(present_answers):
+            missing = sorted(required_answers - present_answers)
+            log.warning(f"[TypeSafe] Incomplete classification response (missing={missing}); using safe fallback.")
+            return _fallback_heuristic_eval(
+                user_text, "Incomplete Jev classification response", context=context
+            )
         
         # Read Noul
         danger_ans = answers.get("is_dangerous")
@@ -476,7 +514,7 @@ async def test_typesafe_connectivity() -> Dict[str, Any]:
     if not _TYPESAFE_SDK_AVAILABLE:
         return {"status": "error", "message": "typesafe-sdk is not installed."}
     
-    api_key = TYPESAFE_API_KEY or os.getenv("TYPESAFE_API_KEY", "").strip()
+    api_key = config.TYPESAFE_API_KEY or os.getenv("TYPESAFE_API_KEY", "").strip()
     if not api_key:
         return {
             "status": "unconfigured",
@@ -496,7 +534,7 @@ async def test_typesafe_connectivity() -> Dict[str, Any]:
                 questions={
                     "ping": Noul(instructions="Is this a basic test query?")
                 },
-                model=TYPESAFE_MODEL or "jev-latest"
+                model=config.TYPESAFE_MODEL or "jev-latest"
             ),
             timeout=5.0
         )
@@ -506,7 +544,7 @@ async def test_typesafe_connectivity() -> Dict[str, Any]:
             "status": "ok",
             "message": "Connected to TypeSafe System One (Jev) successfully.",
             "latency_ms": round(elapsed_ms, 2),
-            "model": TYPESAFE_MODEL or "jev-latest",
+            "model": config.TYPESAFE_MODEL or "jev-latest",
             "test_result": ping_noul
         }
     except Exception as e:
@@ -529,7 +567,15 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5
         return TypeSafeOutputDecision(is_safe=True)
 
     # 1. 快速本地静态扫描：高危密钥立即拦截，无需等待远程网络
-    has_secret = bool(re.search(r'(-----BEGIN (RSA|OPENSSH|EC|DSA) PRIVATE KEY-----|ghp_[a-zA-Z0-9]{36}|ey[a-zA-Z0-9_\-]{30,}\.ey[a-zA-Z0-9_\-]{30,})', response_text))
+    secret_patterns = (
+        r"-----BEGIN (?:RSA|OPENSSH|EC|DSA) PRIVATE KEY-----",
+        r"\b(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,})\b",
+        r"\bAKIA[0-9A-Z]{16}\b",
+        r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
+        r"\bsk-(?:proj-)?[A-Za-z0-9_-]{24,}\b",
+        r"\bey[A-Za-z0-9_-]{30,}\.ey[A-Za-z0-9_-]{30,}\b",
+    )
+    has_secret = any(re.search(pattern, response_text) for pattern in secret_patterns)
     if has_secret:
         return TypeSafeOutputDecision(is_safe=False, secret_leak_prob=0.99, reason="检测到潜在敏感凭证暴露 (API Token/私钥)")
 
@@ -542,7 +588,12 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5
 
     client = get_typesafe_client()
     if not client:
-        return TypeSafeOutputDecision(is_safe=True, is_fallback=True)
+        return TypeSafeOutputDecision(
+            is_safe=False,
+            is_fallback=True,
+            fallback_reason="Jev 不可用，无法检查高风险输出",
+            reason="检测到高风险内容，但 Jev 检查不可用，已阻止发送",
+        )
 
     start_t = time.perf_counter()
     try:
@@ -559,11 +610,19 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5
             client.system_one(
                 state=sample_text,
                 questions=questions,
-                model=getattr(config, "TYPESAFE_MODEL", "jev-latest")
+                model=config.TYPESAFE_MODEL or "jev-latest"
             ),
             timeout=timeout_seconds
         )
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+        if "secret_leak" not in res.answers or "harmful_payload" not in res.answers:
+            return TypeSafeOutputDecision(
+                is_safe=False,
+                latency_ms=elapsed_ms,
+                is_fallback=True,
+                fallback_reason="Jev 未返回完整输出检查结果",
+                reason="输出安全检查结果不完整，已阻止发送",
+            )
         secret_p = float(res.answers["secret_leak"].noul) if "secret_leak" in res.answers else 0.0
         harmful_p = float(res.answers["harmful_payload"].noul) if "harmful_payload" in res.answers else 0.0
 
@@ -588,7 +647,13 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5
     except Exception as e:
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         log.warning(f"[TypeSafe Sentry] evaluate_output_guard error: {e}")
-        return TypeSafeOutputDecision(is_safe=True, latency_ms=elapsed_ms, is_fallback=True, fallback_reason=str(e))
+        return TypeSafeOutputDecision(
+            is_safe=False,
+            latency_ms=elapsed_ms,
+            is_fallback=True,
+            fallback_reason=str(e),
+            reason="高风险输出检查失败，已阻止发送",
+        )
 
 
 async def evaluate_tool_execution(command: str, context: str = "", timeout_seconds: float = 3.0) -> TypeSafeToolDecision:
@@ -596,47 +661,68 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
     import config
     tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
     if tier != "copilot" or not getattr(config, "TYPESAFE_ENABLED", True):
-        return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk")
+        return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", decision_source="disabled")
 
     # 1. 极致提速：只读工具与无害命令的本地零延迟白名单放行（<0.01ms），杜绝无谓的远程 Jev 网络 RTT (每次省2秒)
     cmd_strip = command.strip()
     # 纯读文件 / 目录浏览 / 代码搜索工具直接放行
-    if any(cmd_strip.startswith(p) for p in [
+    if any(cmd_strip == p or cmd_strip.startswith(p + " ") for p in [
         "tool:view_file", "tool:list_dir", "tool:grep_search", "tool:find_by_name",
         "tool:search_web", "tool:read_url_content", "tool:ask_question"
     ]):
-        return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.01)
+        return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.01, decision_source="local")
 
-    # 常见只读与查看类安全 shell 命令直接放行
+    # 常见只读与查看类安全 shell 命令直接放行；拒绝复合 shell 语法，
+    # 避免 `cat ... | rm ...` 之类命令因只读前缀而绕过检查。
     safe_readonly_prefixes = [
         "git status", "git log", "git diff", "git show", "git branch",
-        "ls", "dir", "pwd", "cat ", "head ", "tail ", "wc ", "grep ", "rg ", "find ",
-        "echo ", "uname", "uptime", "whoami", "id", "hostname", "which ", "whereis ", "date"
+        "ls", "dir", "pwd", "cat", "head", "tail", "wc", "grep", "rg", "find",
+        "echo", "uname", "uptime", "whoami", "id", "hostname", "which", "whereis", "date"
     ]
     # 清理 timeout 前缀再检测
     clean_cmd = re.sub(r'^timeout\s+\d+\s+', '', cmd_strip).strip()
-    if any(clean_cmd == p or clean_cmd.startswith(p + " ") or clean_cmd.startswith(p) for p in safe_readonly_prefixes):
-        # 排除管道或重定向中有恶意写/删操作的命令
-        if not any(x in clean_cmd for x in [">", "rm ", "dd ", "chmod ", "mkfs", "kill", "reboot", "shutdown"]):
-            return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.01)
+    if any(clean_cmd == p or clean_cmd.startswith(p + " ") for p in safe_readonly_prefixes):
+        if not re.search(r"[|;&><`]|\$\(", clean_cmd):
+            return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.01, decision_source="local")
 
     # 2. 本地高危物理特征速断拦截（无需等待远程 Jev 决策）
-    is_crit = bool(re.search(r'\b(rm\s+-rf\s+/|mkfs|:\(\)\{|dd\s+if=/dev/)\b', command))
+    is_crit = bool(re.search(r'(?i)(?:\brm\s+-[a-z]*r[a-z]*f\s+(?:/|\*)|\bmkfs(?:\.[a-z0-9]+)?\b|:\(\)\s*\{|\bdd\s+if=/dev/)', command))
     if is_crit:
         return TypeSafeToolDecision(
             is_allowed=False,
             risk_level="critical_risk",
             critical_prob=0.99,
             reason="本地规则直接拦截高危破坏性系统命令",
-            latency_ms=0.01
+            latency_ms=0.01,
+            decision_source="local",
+        )
+
+    # Routine tools rely on the host sandbox and permission scopes. Spend a
+    # Jev round trip only on commands with meaningful destructive, privilege,
+    # service, network, or path-escape indicators.
+    risk_markers = re.compile(
+        r"(?i)(?:\brm\b|\brmdir\b|\bshred\b|\bunlink\b|\bdd\b|\bmkfs\b|\bformat\b|"
+        r"\bchmod\b|\bchown\b|\bsudo\b|\bkill\b|\bpkill\b|\breboot\b|\bshutdown\b|"
+        r"\bpoweroff\b|\bsystemctl\s+(?:stop|restart|disable)\b|\blaunchctl\s+(?:unload|stop)\b|"
+        r"\biptables\b|\bufw\s+(?:disable|reset)\b|/dev/(?:sd|nvme|vd|disk)|"
+        r"(?:curl|wget)[^\n|]*\|\s*(?:sh|bash)|\b(?:\.env|id_rsa|private[_ -]?key|secret|token|password)\b)"
+    )
+    if not risk_markers.search(command):
+        return TypeSafeToolDecision(
+            is_allowed=True,
+            risk_level="medium_risk",
+            latency_ms=0.01,
+            decision_source="local",
         )
 
     client = get_typesafe_client()
     if not client:
         return TypeSafeToolDecision(
-            is_allowed=True,
-            risk_level="low_risk",
-            is_fallback=True
+            is_allowed=False,
+            risk_level="critical_risk",
+            reason="高风险工具检查不可用，已暂停执行",
+            is_fallback=True,
+            decision_source="fallback",
         )
 
     start_t = time.perf_counter()
@@ -664,12 +750,21 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
             timeout=timeout_seconds
         )
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
-        risk_choice = str(res.answers["risk_assessment"].choice) if "risk_assessment" in res.answers else "low_risk"
-        risk_conf = float(res.answers["risk_assessment"].confidence) if ("risk_assessment" in res.answers and res.answers["risk_assessment"].confidence is not None) else 1.0
-        crit_prob = float(res.answers["is_critical"].noul) if "is_critical" in res.answers else 0.0
+        if "risk_assessment" not in res.answers or "is_critical" not in res.answers:
+            return TypeSafeToolDecision(
+                is_allowed=False,
+                risk_level="critical_risk",
+                latency_ms=elapsed_ms,
+                reason="Jev 未返回完整风险判断，已暂停执行",
+                is_fallback=True,
+                decision_source="fallback",
+            )
+        risk_choice = str(res.answers["risk_assessment"].choice)
+        risk_conf = float(res.answers["risk_assessment"].confidence) if res.answers["risk_assessment"].confidence is not None else 0.0
+        crit_prob = float(res.answers["is_critical"].noul)
 
-        is_allowed = (risk_choice != "critical_risk") and (crit_prob < 0.80)
-        reason = None if is_allowed else f"Jev 判定为高危破坏性指令 ({risk_choice}, 破坏概率: {crit_prob:.2f})"
+        is_allowed = risk_choice in ("low_risk", "medium_risk") and crit_prob < 0.80 and risk_conf >= 0.55
+        reason = None if is_allowed else f"Jev 判定为高危或不确定操作 ({risk_choice}, 置信度: {risk_conf:.2f}, 破坏概率: {crit_prob:.2f})"
 
         return TypeSafeToolDecision(
             is_allowed=is_allowed,
@@ -677,12 +772,20 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
             risk_confidence=risk_conf,
             critical_prob=crit_prob,
             latency_ms=elapsed_ms,
-            reason=reason
+            reason=reason,
+            decision_source="jev",
         )
     except Exception as e:
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         log.warning(f"[TypeSafe Co-Pilot] evaluate_tool_execution error: {e}")
-        return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=elapsed_ms, is_fallback=True)
+        return TypeSafeToolDecision(
+            is_allowed=False,
+            risk_level="critical_risk",
+            latency_ms=elapsed_ms,
+            reason="Jev 高风险检查失败，已暂停执行",
+            is_fallback=True,
+            decision_source="fallback",
+        )
 
 
 async def evaluate_tool_error(command: str, error_output: str, timeout_seconds: float = 3.0) -> TypeSafeErrorDiagnosis:
@@ -777,43 +880,62 @@ def get_typesafe_config_state() -> Dict[str, Any]:
 def evaluate_adaptive_tier(decision: TypeSafeDecision) -> str:
     """Evaluate adaptive reasoning effort tier: Low | Medium | High based on semantic decision analysis.
     
-    Pure semantic principles:
-    - Casual chat, greetings, polite remarks, or non-operational conversation with no task -> Low
-    - Informational queries, theoretical Q&A, or moderate analysis -> Medium (unless high architectural complexity >= 1.7 -> High)
-    - Operational task execution (new or confirmed pending plan) requiring code/terminal -> High
+    Routing policy:
+    - Explicit casual chat and very simple non-operational questions -> Low
+    - Simple operations and ordinary analysis -> Medium
+    - Multi-step work or substantively complex terminal tasks -> High
     """
     import config
     auto_enabled = getattr(config, "TYPESAFE_AUTO_MODE", True)
     if not auto_enabled:
         return ""
 
-    # 1. 语义判定为纯寒暄/日常致谢/闲聊，或者系统插件直达查询（健康度/备忘/定时/状态） -> Low
-    if decision.action_type in ("casual_greeting", "server_health", "notes", "cron", "typesafe_status"):
+    # Only explicit non-operational casual conversation is Low. Plugin intents
+    # are tasks; if they reach the model path, keep them at least Medium.
+    if decision.action_type == "casual_greeting" and not decision.is_operation and not decision.needs_terminal:
         return "Low"
-    if not decision.is_operation and decision.complexity_score < 0.4 and not decision.needs_terminal:
-        return "Low"
+
+    # Low-confidence routing is also uncertain: avoid a costly High by default,
+    # but do not classify it as simple chat.
+    if decision.intent_confidence < 0.55:
+        return "Medium"
+    if decision.complexity_confidence < 0.55:
+        return "Medium"
+
+    # A short confirmation of a known pending operation can still be complex,
+    # even when the remote classifier has failed and local fallback is active.
+    if decision.is_fallback and decision.is_operation and decision.complexity_score >= 1.5:
+        return "High"
+
+    # Unknown fallback requests must not be downgraded to casual-chat Low.
+    if decision.is_fallback:
+        return "Medium"
+
+    # Deep multi-step work gets High. A terminal requirement by itself is not
+    # enough: simple one-command tasks should stay Medium.
+    if decision.complexity_score >= 1.7:
+        return "High"
+    if decision.needs_terminal and decision.complexity_score >= 1.2:
+        return "High"
 
     # 2. 纯技术咨询/原理解释/方案探讨（非操作指令）：常规咨询保持 Medium，仅高复杂度架构设计升级为 High
     if decision.action_type == "informational_inquiry" and not decision.is_operation:
-        if decision.complexity_score >= 1.7:
-            return "High"
+        # Short, direct Q&A should get the fast path too; reserve Medium for
+        # questions Jev rates as substantive analysis and High for deep work.
+        return "Low" if decision.complexity_score < 0.5 else "Medium"
+
+    # Every execution intent and plugin task that reaches the agent path is
+    # Medium unless the complexity checks above upgraded it to High.
+    if decision.is_operation or decision.needs_terminal or decision.action_type in (
+        "execute_task", "notes", "cron", "server_health", "typesafe_status"
+    ):
         return "Medium"
 
-    # 3. 语义判定为操作执行类（新操作或确认前文任务）且需要工具/达到高认知复杂度 -> High
-    if decision.is_operation and (decision.needs_terminal or decision.complexity_score >= 0.6 or decision.action_type == "execute_task"):
-        return "High"
-
-    # 4. 涉及终端操作且有实质性复杂度 -> High
-    if decision.needs_terminal and decision.complexity_score >= 0.6:
-        return "High"
-    if decision.complexity_score >= 1.5:
-        return "High"
-
-    # 5. 概念性问答、原理分析、代码解释或中等复杂度任务 -> Medium
-    if decision.action_type == "informational_inquiry" or decision.complexity_score >= 0.4:
+    if decision.complexity_score >= 0.4:
         return "Medium"
 
-    return "Low"
+    # Unknown semantic categories should not be mistaken for casual chat.
+    return "Medium"
 
 
 def resolve_adaptive_model(base_model: str, adaptive_tier: str) -> str:
@@ -927,4 +1049,3 @@ def update_typesafe_env(
 get_system_one_config_state = get_typesafe_config_state
 update_system_one_env = update_typesafe_env
 test_system_one_connectivity = test_typesafe_connectivity
-

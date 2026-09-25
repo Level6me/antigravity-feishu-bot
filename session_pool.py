@@ -15,6 +15,7 @@ import time
 import uuid
 from typing import Optional, Dict, Any
 
+import config
 from config import (
     ANTIGRAVITY_BIN,
     find_antigravity_bin,
@@ -80,13 +81,16 @@ class TurnEventStream:
 
 class PersistentSession:
     """Represents a long-lived interactive agy CLI process."""
-    def __init__(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = ""):
+    def __init__(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = "", effort: str = "medium", sandbox_enabled: bool = False):
         self.chat_id = chat_id
         self.model = model
+        self.effort = effort if effort in ("low", "medium", "high") else "medium"
+        self.sandbox_enabled = sandbox_enabled
         self.project_dir = project_dir
         self.process: Optional[asyncio.subprocess.Process] = None
         self.conversation_id: str = conversation_id
         self.lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
         self.last_active_time = time.time()
         self._closing = False
         self._decoder = codecs.getincrementaldecoder('utf-8')()
@@ -104,6 +108,13 @@ class PersistentSession:
         return self.process is not None and self.process.returncode is None
 
     async def start(self):
+        # prewarm and request execution may race to start the same process.
+        async with self._start_lock:
+            if self.is_alive():
+                return
+            await self._start_process()
+
+    async def _start_process(self):
         """Spawn the background agy process in stream-json mode."""
         if self.is_alive():
             return
@@ -117,11 +128,15 @@ class PersistentSession:
             "--input-format", "stream-json",
             "--output-format", "stream-json",
             "--model", self.model,
+            "--effort", self.effort,
             "--print-timeout", "60m"
         ]
 
         if self.conversation_id:
             cmd_args.extend(["--conversation", self.conversation_id])
+
+        if self.sandbox_enabled:
+            cmd_args.append("--sandbox")
 
         is_admin_chat = is_admin(self.chat_id)
         if DANGEROUSLY_SKIP_PERMISSIONS and is_admin_chat:
@@ -139,7 +154,7 @@ class PersistentSession:
         custom_env["PYTHONUNBUFFERED"] = "1"
         custom_env["STDOUT_LINE_BUFFERED"] = "1"
 
-        log.info(f"[SessionPool] Spawning warm agy process for chat {self.chat_id} (model={self.model}, cwd={cwd_dir})")
+        log.info(f"[SessionPool] Spawning warm agy process for chat {self.chat_id} (model={self.model}, effort={self.effort}, sandbox={self.sandbox_enabled}, cwd={cwd_dir})")
         self.process = await asyncio.create_subprocess_exec(
             *cmd_args,
             stdin=asyncio.subprocess.PIPE,
@@ -241,7 +256,8 @@ class PersistentSession:
             self._stderr_drain_task = None
         proc = self.process
         self.process = None
-        app_state.running_processes.pop(self.chat_id, None)
+        if app_state.running_processes.get(self.chat_id) is proc:
+            app_state.running_processes.pop(self.chat_id, None)
         if proc:
             try:
                 # Collect descendant pids to prevent orphaned commands (e.g. brew, shell tasks) from lingering
@@ -289,32 +305,26 @@ class SessionPool:
     def __init__(self):
         self._sessions: Dict[str, PersistentSession] = {}
 
-    @staticmethod
-    def _is_compatible_model(current_model: str, target_model: str) -> bool:
-        if current_model == target_model:
-            return True
-        for prefix in ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.1-pro"):
-            if current_model.startswith(prefix) and target_model.startswith(prefix):
-                return True
-        return False
-
-    def get_or_create(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = "") -> PersistentSession:
+    def get_or_create(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = "", effort: str = "medium") -> PersistentSession:
         sess = self._sessions.get(chat_id)
         # conversation_id 比对：只在"双方均非空且不同"时才视作需要重建
         # 避免传入空串（新会话/clear后）与已有真实 UUID 的 sess 不匹配，导致每轮都重建进程
         conv_mismatch = bool(conversation_id and sess and sess.conversation_id and sess.conversation_id != conversation_id)
 
-        # 优化：同一模型家族（如 gemini-3.8-flash-low / medium / high）内动态切换自适应档位时，
-        # 保持运行中的热进程不被销毁，思考深度由每轮 Prompt 动态引导，消除频繁冷启动的 2~3 秒延迟
-        model_mismatch = False
-        if sess and sess.model != model:
-            if not self._is_compatible_model(sess.model, model):
-                model_mismatch = True
+        normalized_effort = effort if effort in ("low", "medium", "high") else "medium"
+        sandbox_enabled = bool(config.TYPESAFE_ENABLED and config.TYPESAFE_TIER == "copilot")
+        # --model, --effort and sandbox policy are fixed when agy starts.
+        # Reuse only a process that exactly matches the current request.
+        model_mismatch = bool(sess and (
+            sess.model != model
+            or sess.effort != normalized_effort
+            or sess.sandbox_enabled != sandbox_enabled
+        ))
 
         if sess is None or model_mismatch or sess.project_dir != project_dir or conv_mismatch or not sess.is_alive():
             if sess:
                 asyncio.create_task(sess.close())
-            sess = PersistentSession(chat_id, model, project_dir, conversation_id)
+            sess = PersistentSession(chat_id, model, project_dir, conversation_id, normalized_effort, sandbox_enabled)
             self._sessions[chat_id] = sess
         return sess
 
@@ -326,10 +336,10 @@ class SessionPool:
         if sess:
             sess.conversation_id = conversation_id
 
-    async def prewarm(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = ""):
+    async def prewarm(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = "", effort: str = "medium"):
         """Asynchronously pre-spawns a warm process in the background so next message has 0s start latency."""
         try:
-            sess = self.get_or_create(chat_id, model, project_dir, conversation_id)
+            sess = self.get_or_create(chat_id, model, project_dir, conversation_id, effort=effort)
             if not sess.is_alive():
                 await sess.start()
         except Exception as e:
@@ -342,4 +352,3 @@ class SessionPool:
             await sess.close()
 
 session_pool = SessionPool()
-
