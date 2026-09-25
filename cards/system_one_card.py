@@ -317,3 +317,189 @@ def build_typesafe_tier_menu_card(tier: Optional[str] = None) -> dict:
 build_system_one_config_card = build_typesafe_config_card
 build_system_one_tier_menu_card = build_typesafe_tier_menu_card
 
+
+def build_l3_high_risk_confirm_card(
+    tool_name: str,
+    command: str,
+    risk_level: str = "critical_risk",
+    reason: str = "",
+    chat_id: str = "",
+    project_dir: str = "",
+    call_id: str = ""
+) -> dict:
+    """Build interactive confirmation card for L3 high-risk tool execution."""
+    level_map = {
+        "critical_risk": "🚨 高危破坏级别 (Critical)",
+        "high_risk": "⚠️ 较高风险级别 (High)",
+        "medium_risk": "⚡ 中度风险级别 (Medium)",
+        "low_risk": "ℹ️ 较低风险 (Low)"
+    }
+    risk_display = level_map.get(risk_level, f"⚠️ {risk_level}")
+
+    clean_cmd = command.strip()
+    cmd_preview = clean_cmd if len(clean_cmd) <= 300 else f"{clean_cmd[:300]}..."
+    clean_reason = reason.strip() or "Jev 认知模型判定该操作具有破坏性或不确定性风险"
+    cwd_display = project_dir if (project_dir and project_dir not in ["默认", "Default"]) else "默认工作区"
+
+    elements = [
+        {
+            "tag": "markdown",
+            "content": (
+                "🛡️ **System One (L3 全流程守卫) 高危操作审批**\n\n"
+                "检测到当前任务尝试在主机环境中调用具有高风险的系统指令。为了防止误操作或系统破坏，**执行已暂缓**，请您核对并选择操作："
+            )
+        },
+        {
+            "tag": "markdown",
+            "content": (
+                f"• **待执行指令**：\n```bash\n{cmd_preview}\n```\n"
+                f"• **风险评级**：`{risk_display}`\n"
+                f"• **判定原因**：{clean_reason}\n"
+                f"• **执行环境**：`{cwd_display}`\n"
+                f"• **调用工具**：`{tool_name}`"
+            )
+        },
+        {"tag": "hr"},
+        {
+            "tag": "action",
+            "layout": "bisect",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "⚠️ 授权执行 (Authorize)"
+                    },
+                    "type": "danger",
+                    "value": {
+                        "action": "l3_confirm_action",
+                        "decision": "approve",
+                        "tool": tool_name,
+                        "command": clean_cmd,
+                        "risk_level": risk_level,
+                        "cwd": project_dir,
+                        "call_id": call_id,
+                        "chat_id": chat_id
+                    }
+                },
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "🚫 拒绝并终止 (Reject)"
+                    },
+                    "type": "default",
+                    "value": {
+                        "action": "l3_confirm_action",
+                        "decision": "reject",
+                        "tool": tool_name,
+                        "command": clean_cmd,
+                        "risk_level": risk_level,
+                        "cwd": project_dir,
+                        "call_id": call_id,
+                        "chat_id": chat_id
+                    }
+                }
+            ]
+        },
+        create_footer()
+    ]
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "🚨 高危敏感指令执行确认 (L3 安全守卫)"},
+            "template": "orange"
+        },
+        "elements": elements
+    }
+
+
+def build_l3_confirm_result_card(
+    status: str,
+    command: str,
+    operator_id: str = "",
+    output: str = "",
+    returncode: Optional[int] = None,
+    elapsed_seconds: Optional[float] = None
+) -> dict:
+    """Build result card for L3 high-risk action confirmation state transition."""
+    operator_tag = f"<at user_id=\"{operator_id}\"></at>" if operator_id else "管理员"
+    cmd_preview = command.strip()
+    if len(cmd_preview) > 300:
+        cmd_preview = f"{cmd_preview[:300]}..."
+
+    if status == "running":
+        header_template = "turquoise"
+        title_text = "⏳ 高危指令已授权，正在执行..."
+        desc = f"👤 操作人：{operator_tag}\n\n已确认授权执行该高危敏感指令，系统正在受控环境中调度执行，请稍候..."
+        out_block = []
+    elif status == "rejected":
+        header_template = "grey"
+        title_text = "🚫 高危指令执行已拒绝 (L3 守卫)"
+        desc = f"👤 操作人：{operator_tag}\n\n已拒绝执行该高危敏感指令，后续任务已安全终止，未对主机系统做出任何变更。"
+        out_block = []
+    elif status == "success":
+        header_template = "green"
+        title_text = "✅ 高危指令授权执行完毕"
+        elapsed_str = f"`{elapsed_seconds:.2f}s`" if elapsed_seconds is not None else "`未知`"
+        ret_str = f"`{returncode}`" if returncode is not None else "`0`"
+        desc = (
+            f"👤 审批人：{operator_tag}\n"
+            f"• **执行状态**：成功完成\n"
+            f"• **执行耗时**：{elapsed_str}\n"
+            f"• **退出状态码**：{ret_str}"
+        )
+        clean_out = output.strip()
+        if len(clean_out) > 2000:
+            clean_out = f"{clean_out[:2000]}\n... (日志过长已截断)"
+        out_content = clean_out if clean_out else "(命令执行成功，无标准输出)"
+        out_block = [
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": f"📋 **执行输出 (Output)**：\n```bash\n{out_content}\n```"
+            }
+        ]
+    else:  # failed
+        header_template = "carmine"
+        title_text = "❌ 高危指令执行返回异常"
+        elapsed_str = f"`{elapsed_seconds:.2f}s`" if elapsed_seconds is not None else "`未知`"
+        ret_str = f"`{returncode}`" if returncode is not None else "`非0`"
+        desc = (
+            f"👤 审批人：{operator_tag}\n"
+            f"• **执行状态**：执行失败 / 异常中断\n"
+            f"• **执行耗时**：{elapsed_str}\n"
+            f"• **退出状态码**：{ret_str}"
+        )
+        clean_out = output.strip()
+        if len(clean_out) > 2000:
+            clean_out = f"{clean_out[:2000]}\n... (日志过长已截断)"
+        out_content = clean_out if clean_out else "(无详细错误输出)"
+        out_block = [
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": f"⚠️ **错误信息 (Error)**：\n```bash\n{out_content}\n```"
+            }
+        ]
+
+    elements = [
+        {
+            "tag": "markdown",
+            "content": f"• **目标指令**：\n```bash\n{cmd_preview}\n```\n{desc}"
+        }
+    ]
+    elements.extend(out_block)
+    elements.append(create_footer())
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": title_text},
+            "template": header_template
+        },
+        "elements": elements
+    }
+
+
