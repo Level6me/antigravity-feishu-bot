@@ -139,8 +139,90 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
             asyncio.run_coroutine_threadsafe(notify_and_process(), app_state.main_loop)
             
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"已确认：{label[:15]}"}})
-        
+    elif action_value.get("action") == "l3_confirm_action":
+        decision = action_value.get("decision", "reject")
+        command = action_value.get("command", "")
+        tool = action_value.get("tool", "")
+        cwd = action_value.get("cwd", "")
+        call_id = action_value.get("call_id", "")
+        operator_open_id = data.event.operator.open_id if data.event.operator else ""
+
+        # 1. 管理员权限校验：仅管理员有权审批高危敏感指令
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 仅系统管理员有权审批高危指令！"}})
+
+        # 2. 拒绝分支
+        if decision == "reject":
+            log.info(f"[L3 Guard] Admin {operator_open_id} rejected command in chat {chat_id}: {command}")
+            res_card = CardBuilder.build_l3_confirm_result_card(
+                status="rejected",
+                command=command,
+                operator_id=operator_open_id
+            )
+            return P2CardActionTriggerResponse({
+                "card": {"type": "raw", "data": res_card},
+                "toast": {"type": "info", "content": "已拒绝执行该高危敏感指令"}
+            })
+
+        # 3. 授权执行分支
+        log.info(f"[L3 Guard] Admin {operator_open_id} approved command in chat {chat_id}: {command} (cwd={cwd})")
+        running_card = CardBuilder.build_l3_confirm_result_card(
+            status="running",
+            command=command,
+            operator_id=operator_open_id
+        )
+
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_execute_approved():
+                t0 = time.time()
+                ret_code = 0
+                out_text = ""
+                try:
+                    clean_cmd = re.sub(r'^timeout\s+\d+\s+', '', command.strip()).strip()
+                    proc = await asyncio.create_subprocess_shell(
+                        clean_cmd,
+                        cwd=cwd if (cwd and os.path.isdir(cwd)) else None,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    try:
+                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180.0)
+                        out_str = stdout.decode('utf-8', errors='replace')
+                        err_str = stderr.decode('utf-8', errors='replace')
+                        out_text = f"{out_str}\n{err_str}".strip()
+                        ret_code = proc.returncode
+                    except asyncio.TimeoutError:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        out_text = "执行超时 (180s)，已被系统强制截断中止"
+                        ret_code = -1
+                except Exception as ex:
+                    out_text = f"执行异常: {ex}"
+                    ret_code = -1
+
+                elapsed = time.time() - t0
+                final_status = "success" if ret_code == 0 else "failed"
+                final_card = CardBuilder.build_l3_confirm_result_card(
+                    status=final_status,
+                    command=command,
+                    operator_id=operator_open_id,
+                    output=out_text,
+                    returncode=ret_code,
+                    elapsed_seconds=elapsed
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, final_card)
+                )
+
+            asyncio.run_coroutine_threadsafe(do_execute_approved(), app_state.main_loop)
+
+        return P2CardActionTriggerResponse({
+            "card": {"type": "raw", "data": running_card},
+            "toast": {"type": "success", "content": "已确认授权，正在后台调度执行..."}
+        })
+
     elif action_value.get("action") == "extend_wait":
         log.info(f"User requested extend_wait in chat {chat_id}")
         app_state.extended_wait_chats[chat_id] = time.time() + 300

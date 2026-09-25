@@ -853,12 +853,14 @@ async def execute_antigravity(
                                         if tool_dec.decision_source == "jev":
                                             session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
                                         if not tool_dec.is_allowed:
-                                            log.critical(f"[TypeSafe Co-Pilot] High-risk tool event rejected; stopping the remaining agent stream: {cmd_target} -> {tool_dec.reason}")
+                                            log.critical(f"[TypeSafe Co-Pilot] High-risk tool event intercepted: {cmd_target} -> {tool_dec.reason}")
                                             typesafe_blocked_info = {
                                                 "tool": t_name,
                                                 "target": cmd_target,
                                                 "reason": tool_dec.reason or "安全策略拒绝了该高风险操作",
-                                                "risk_level": tool_dec.risk_level
+                                                "risk_level": tool_dec.risk_level,
+                                                "call_id": call_key,
+                                                "cwd": session_data.get("project") or ""
                                             }
                                             await sess.close()
                                             should_break = True
@@ -876,6 +878,8 @@ async def execute_antigravity(
                                             "target": cmd_target,
                                             "reason": "高风险工具检查异常，已停止后续执行",
                                             "risk_level": "critical_risk",
+                                            "call_id": call_key,
+                                            "cwd": session_data.get("project") or ""
                                         }
                                         await sess.close()
                                         should_break = True
@@ -1052,16 +1056,36 @@ async def execute_antigravity(
             session_data["last_execution_error"] = is_error
 
             if typesafe_blocked_info:
-                is_error = True
-                session_data["last_execution_error"] = True
-                final_reply = (
-                    f"🛡️ **[System One 安全策略拦截]**\n\n"
-                    f"系统检测到本次任务尝试执行高危操作，已根据安全策略中止执行流：\n"
-                    f"- **拦截操作**：`{typesafe_blocked_info['target'][:150]}`\n"
-                    f"- **风险评级**：`{typesafe_blocked_info['risk_level']}`\n"
-                    f"- **拦截原因**：{typesafe_blocked_info['reason']}\n\n"
-                    f"💡 *安全提示：如需执行该类操作，请在受控环境中通过终端直接执行。*"
+                is_error = False
+                session_data["last_execution_error"] = False
+                session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策 · 高危操作待审批"
+                try:
+                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                except Exception:
+                    pass
+
+                confirm_card = CardBuilder.build_l3_high_risk_confirm_card(
+                    tool_name=typesafe_blocked_info.get("tool", "run_command"),
+                    command=typesafe_blocked_info.get("target", ""),
+                    risk_level=typesafe_blocked_info.get("risk_level", "critical_risk"),
+                    reason=typesafe_blocked_info.get("reason", ""),
+                    chat_id=chat_id,
+                    project_dir=typesafe_blocked_info.get("cwd", session_data.get("project", "")),
+                    call_id=typesafe_blocked_info.get("call_id", "")
                 )
+                if bot_reply_msg_id:
+                    await _feishu_call(
+                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, confirm_card),
+                        label="patch l3 confirm card"
+                    )
+                else:
+                    await _feishu_call(
+                        lambda: send_interactive_card_sdk(message_id, confirm_card),
+                        label="send l3 confirm card"
+                    )
+                final_reply = None
+                accumulated_text = ""
+
 
             transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
 
@@ -1252,7 +1276,7 @@ async def execute_antigravity(
 
                 if ts_enabled:
                     if typesafe_blocked_info:
-                        session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策 · 高危操作已拦截"
+                        session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策 · 高危操作待审批"
                     elif ts_tier == "copilot":
                         if total_decisions > 0:
                             session_data["typesafe_audit_summary"] = f"⚡️S1：L3全流程决策x{total_decisions}次{tier_suffix}"

@@ -77,4 +77,7 @@ class CardBuilder:
     build_system_one_tier_menu_card = staticmethod(system_one_card.build_system_one_tier_menu_card)
     build_typesafe_config_card = build_system_one_config_card
     build_typesafe_tier_menu_card = build_system_one_tier_menu_card
+    build_l3_high_risk_confirm_card = staticmethod(system_one_card.build_l3_high_risk_confirm_card)
+    build_l3_confirm_result_card = staticmethod(system_one_card.build_l3_confirm_result_card)
+
 
