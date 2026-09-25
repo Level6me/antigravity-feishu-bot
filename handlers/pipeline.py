@@ -7,6 +7,7 @@ from card_builder import CardBuilder
 from lark_client import send_interactive_card_sdk, patch_interactive_card_sdk, set_emoji_sdk, delete_emoji_sdk
 from executor import execute_antigravity
 from logger import log
+import config
 import stats
 import app_state
 from handlers.media import (
@@ -282,14 +283,21 @@ async def _process_single_task(chat_id, task):
         except Exception as e:
             log.warning(f"[Pipeline] Failed to send early typing card for chat {chat_id}: {e}")
 
-    # 并行异步预热后台运行进程，消除模型冷启动等待
+    # 先预热上一轮的档位，与 Jev 判定并行；若新档位不同，判定后再切到精确档位。
+    prewarm_task = None
+    prewarmed_model = session_data.get("model", "Default")
+    prewarmed_effort = session_data.get("reasoning_effort", "low")
     try:
         from session_pool import session_pool
-        model_to_warm = session_data.get("model", "Default")
         proj_val = session_data.get("project")
         cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
         conv_id_to_resume = session_data.get("conversation", "") if not is_resumed else ""
-        asyncio.create_task(session_pool.prewarm(chat_id, model_to_warm, cwd_dir, conversation_id=conv_id_to_resume))
+        prewarm_task = asyncio.create_task(
+            session_pool.prewarm(
+                chat_id, prewarmed_model, cwd_dir,
+                conversation_id=conv_id_to_resume, effort=prewarmed_effort
+            )
+        )
     except Exception:
         pass
 
@@ -299,7 +307,8 @@ async def _process_single_task(chat_id, task):
 
     recent_context = get_recent_conversation_context(session_data)
     decision = await evaluate_message_gate(user_text, context=recent_context)
-    if not decision.is_fallback:
+    was_local_fast_path = bool(decision.raw_answers.get("fast_path"))
+    if not decision.is_fallback and not was_local_fast_path:
         session_data["typesafe_decision_count"] = 1
     else:
         session_data["typesafe_decision_count"] = 0
@@ -313,10 +322,32 @@ async def _process_single_task(chat_id, task):
         base_model = session_data.get("base_model") or session_data.get("model", "")
         session_data["base_model"] = base_model
         session_data["model"] = resolve_adaptive_model(base_model, adaptive_tier)
+        session_data["reasoning_effort"] = adaptive_tier.lower()
     else:
         session_data.pop("typesafe_adaptive_tier", None)
         if "base_model" in session_data:
             session_data["model"] = session_data["base_model"]
+        session_data["reasoning_effort"] = "medium"
+
+    selected_model = session_data.get("model", "Default")
+    selected_effort = session_data.get("reasoning_effort", "medium")
+    needs_selected_prewarm = (
+        selected_model != prewarmed_model or selected_effort != prewarmed_effort
+    )
+
+    log.info(
+        "[Adaptive Routing] source=%s action=%s operation=%s complexity=%.2f "
+        "confidence=%.2f tier=%s model=%s effort=%s latency_ms=%.1f",
+        "local-fast-path" if was_local_fast_path else ("fallback" if decision.is_fallback else "jev"),
+        decision.action_type,
+        decision.is_operation,
+        decision.complexity_score,
+        decision.intent_confidence,
+        adaptive_tier or "disabled",
+        session_data.get("model", ""),
+        session_data.get("reasoning_effort", "medium"),
+        decision.latency_ms,
+    )
 
     session_data["bot_reply_msg_id"] = bot_reply_msg_id
 
@@ -390,6 +421,25 @@ async def _process_single_task(chat_id, task):
             except Exception as e:
                 log.warning(f"[TypeSafe FastPath] Failed to parse schedule intent: {e}")
 
+    # Plugin fast paths above do not need an agent process. For model-backed
+    # requests, warm the exact selected model/effort before prompt construction.
+    if needs_selected_prewarm:
+        try:
+            if prewarm_task:
+                await prewarm_task
+            from session_pool import session_pool
+            proj_val = session_data.get("project")
+            cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
+            conv_id_to_resume = session_data.get("conversation", "") if not is_resumed else ""
+            prewarm_task = asyncio.create_task(
+                session_pool.prewarm(
+                    chat_id, selected_model, cwd_dir,
+                    conversation_id=conv_id_to_resume, effort=selected_effort
+                )
+            )
+        except Exception as e:
+            log.warning(f"[Pipeline] Selected-effort prewarm failed to schedule: {e}")
+
     # 3. 运行插件 on_before_ai 钩子
     user_text, session_data = await plugin_manager.dispatch_before_ai(user_text, chat_id, session_data)
     if not user_text or not user_text.strip():
@@ -399,19 +449,21 @@ async def _process_single_task(chat_id, task):
     # 4. 智能意图路由与人机交互规范 (严格贯彻：区分提问与命令)
     # 提问/咨询：纯文本高效解答，不无端调用工具
     # 命令/操作：自主决策并调用工具执行到底，绝对严禁推诿让用户手动在终端执行！
-    is_complex_agent = False
-    if session_data.get("mode") == "agent":
-        is_complex_agent = True
-    elif decision.is_operation:
-        is_complex_agent = True
-    elif decision.action_type == "execute_task" and decision.complexity_score >= 0.25:
-        is_complex_agent = True
-    elif decision.needs_terminal and decision.complexity_score >= 0.4:
-        is_complex_agent = True
-    elif decision.intent in ("server_health", "cron", "notes"):
-        is_complex_agent = True
-    elif decision.complexity_score >= 0.6:
-        is_complex_agent = True
+    # Keep the full planning protocol for genuinely complex work. Simple
+    # operations still retain the execution-capable interaction instructions
+    # below, but avoid paying the prompt/latency cost of a multi-step plan.
+    is_complex_agent = (
+        session_data.get("mode") == "agent"
+        or adaptive_tier == "High"
+    )
+    if not adaptive_tier:  # Preserve the legacy behavior when auto mode is off.
+        is_complex_agent = is_complex_agent or (
+            decision.is_operation
+            or (decision.action_type == "execute_task" and decision.complexity_score >= 0.25)
+            or (decision.needs_terminal and decision.complexity_score >= 0.4)
+            or decision.intent in ("server_health", "cron", "notes")
+            or decision.complexity_score >= 0.6
+        )
 
     # Inject protocol into prompt
     current_proj = session_data.get("project", "默认")
@@ -422,8 +474,7 @@ async def _process_single_task(chat_id, task):
         and not decision.needs_terminal
         and not is_complex_agent
         and (
-            decision.action_type == "casual_greeting"
-            or decision.complexity_score < 0.25
+            session_data.get("typesafe_adaptive_tier") == "Low"
         )
         and session_data.get("mode") != "agent"
     )
@@ -472,7 +523,6 @@ async def _process_single_task(chat_id, task):
             "2. 【受限递归与安全避让】：严禁系统全盘无限制递归搜索；严禁重启当前飞书机器人自身进程。\n"
             "3. 【计划任务调度能力】：用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
         )
-        import config
         if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot":
             system_instruction += (
                 "[System One Co-Pilot Safety & Reflection Directive / 全链路执行与自愈规则]\n"
