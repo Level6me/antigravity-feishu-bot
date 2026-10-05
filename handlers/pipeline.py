@@ -599,12 +599,28 @@ async def _process_single_task(chat_id, task):
             final_prompt = f"[System Context: User preferences:]\n{memory_block}\n\n[User's Message:]\n{user_text}"
             
     # Delegate execution to executor
+    # 动态热加载最新模块（确保所有新代码逻辑即改即生效，无需外部重启进程中断会话）
+    try:
+        import sys, importlib
+        if "config" in sys.modules:
+            importlib.reload(sys.modules["config"])
+        if "cards.indicators" in sys.modules:
+            importlib.reload(sys.modules["cards.indicators"])
+        if "cards" in sys.modules:
+            importlib.reload(sys.modules["cards"])
+        if "executor" in sys.modules:
+            importlib.reload(sys.modules["executor"])
+        from executor import execute_antigravity as _current_execute_antigravity
+    except Exception as reload_err:
+        log.warning(f"[Pipeline] Dynamic module reload warning: {reload_err}")
+        _current_execute_antigravity = execute_antigravity
+
     # 43200s (12小时) 总超时兜底：支持长达数小时至十几小时的超大型自动化工程任务
     # 超时时 CancelledError 会进入 execute_antigravity，其 finally 块仍会执行清理
     is_error = False
     try:
         is_error = await asyncio.wait_for(
-            execute_antigravity(
+            _current_execute_antigravity(
                 chat_id, user_text, message_id, bot_reply_msg_id, session_data, 
                 is_new_conversation, system_instruction, final_prompt, downloaded_file_name, 
                 download_success, running_processes, is_resumed=is_resumed, task_meta=task

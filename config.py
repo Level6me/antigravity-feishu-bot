@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     typesafe_tier: str = Field(default="gateway", alias="TYPESAFE_TIER")  # gateway | sentry | copilot
     typesafe_auto_mode: bool = Field(default=True, alias="TYPESAFE_AUTO_MODE")
 
+    # Task stall & compile watchdog timeouts (seconds)
+    stall_timeout: int = Field(default=600, alias="STALL_TIMEOUT")
+    stall_hard_timeout: int = Field(default=3600, alias="STALL_HARD_TIMEOUT")
+    tool_execution_timeout: int = Field(default=3600, alias="TOOL_EXECUTION_TIMEOUT")
+
     model_config = SettingsConfigDict(
         env_file=os.path.join(BASE_DIR, ".env"),
         env_file_encoding="utf-8",
@@ -62,6 +67,11 @@ DEFAULT_MODEL = settings.default_model or "gemini-3.7-flash-low"
 APP_SECRET = settings.feishu_app_secret or settings.app_secret
 TTS_VOICE = settings.tts_voice or "zh-CN-XiaoxiaoNeural"
 ENABLE_VOICE_REPLY = settings.enable_voice_reply
+
+# Watchdog timeouts exports
+STALL_TIMEOUT = settings.stall_timeout
+STALL_HARD_TIMEOUT = settings.stall_hard_timeout
+TOOL_EXECUTION_TIMEOUT = settings.tool_execution_timeout
 
 # TypeSafe AI exports
 TYPESAFE_API_KEY = settings.typesafe_api_key or os.getenv("TYPESAFE_API_KEY", "")
