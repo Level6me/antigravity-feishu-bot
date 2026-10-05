@@ -315,6 +315,7 @@ def build_planned_steps_indicator(
     downloaded_file_name: str = None,
     download_success: bool = True,
     is_all_completed: bool = False,
+    process_status: dict = None,
 ) -> dict:
     """Build a rich roadmap checklist card showing all planned steps upfront with dynamic progress icons."""
     total = len(planned_steps)
@@ -349,10 +350,24 @@ def build_planned_steps_indicator(
     steps_block = "\n".join(lines)
     time_hint = f"已运行 {think_seconds}s" if think_seconds > 0 else "请稍候..."
     
+    # 智能进程诊断状态横幅
+    diag_banner = ""
+    if process_status and process_status.get("active") and not is_all_completed:
+        act_desc = process_status.get("status_desc") or ""
+        workers = process_status.get("workers") or []
+        detail_cmd = process_status.get("detail_cmd") or ""
+        worker_info = f"`{', '.join(workers[:3])}`" if workers else ""
+        if act_desc:
+            diag_banner = f"\n\n> ⚙️ **底层任务探针**：{act_desc}"
+            if worker_info and not detail_cmd:
+                diag_banner += f" (活动进程: {worker_info})"
+            if detail_cmd:
+                diag_banner += f"\n> 💻 **实际运行命令**：`{detail_cmd[:80]}`"
+
     if is_all_completed:
         content = f"**📋 任务规划与执行清单 (共 {total} 步)：**\n\n{steps_block}\n\n*({time_hint}，全部步骤已执行完毕，正在输出回复)*"
     else:
-        content = f"**📋 任务规划与执行清单 (第 {current_step_idx + 1}/{total} 步)：**\n\n{steps_block}\n\n*({time_hint}，AI 正在多步骤自主推进中)*"
+        content = f"**📋 任务规划与执行清单 (第 {current_step_idx + 1}/{total} 步)：**\n\n{steps_block}{diag_banner}\n\n*({time_hint}，AI 正在多步骤自主推进中)*"
         
     if downloaded_file_name:
         if download_success:
@@ -400,6 +415,7 @@ def build_tool_indicator(
     planned_steps=None,
     current_step_idx=0,
     is_all_completed=False,
+    process_status=None,
 ):
     if planned_steps:
         return build_planned_steps_indicator(
@@ -411,6 +427,7 @@ def build_tool_indicator(
             downloaded_file_name=downloaded_file_name,
             download_success=download_success,
             is_all_completed=is_all_completed,
+            process_status=process_status,
         )
 
     completed_steps = completed_steps or []
@@ -418,6 +435,20 @@ def build_tool_indicator(
     
     time_hint = f"已运行 {think_seconds}s" if think_seconds > 0 else "请稍候..."
     
+    # 智能进程诊断状态横幅
+    diag_banner = ""
+    if process_status and process_status.get("active") and not is_all_completed:
+        act_desc = process_status.get("status_desc") or ""
+        workers = process_status.get("workers") or []
+        detail_cmd = process_status.get("detail_cmd") or ""
+        worker_info = f"`{', '.join(workers[:3])}`" if workers else ""
+        if act_desc:
+            diag_banner = f"\n\n> ⚙️ **底层任务探针**：{act_desc}"
+            if worker_info and not detail_cmd:
+                diag_banner += f" (活动进程: {worker_info})"
+            if detail_cmd:
+                diag_banner += f"\n> 💻 **实际运行命令**：`{detail_cmd[:80]}`"
+
     # 构建多步骤清单
     if completed_steps or action_disp:
         total_steps = len(completed_steps) + (1 if action_disp else 0)
@@ -442,11 +473,11 @@ def build_tool_indicator(
             
         steps_block = "\n".join(lines)
         if total_steps > 1:
-            content = f"**🤖 任务多步骤执行中 (第 {total_steps} 步)：**\n\n{steps_block}\n\n*({time_hint}，后台正在全速推进中)*"
+            content = f"**🤖 任务多步骤执行中 (第 {total_steps} 步)：**\n\n{steps_block}{diag_banner}\n\n*({time_hint}，后台正在全速推进中)*"
         else:
-            content = f"**🤖 任务执行进展：**\n\n{steps_block}\n\n*(AI 正在运行底层命令或操作文件，{time_hint})*"
+            content = f"**🤖 任务执行进展：**\n\n{steps_block}{diag_banner}\n\n*(AI 正在运行底层命令或操作文件，{time_hint})*"
     else:
-        content = f"**🤖 任务执行进展：**\n\n• ⏳ 正在执行底层操作...\n\n*(AI 正在运行底层命令或操作文件，{time_hint})*"
+        content = f"**🤖 任务执行进展：**\n\n• ⏳ 正在执行底层操作...{diag_banner}\n\n*(AI 正在运行底层命令或操作文件，{time_hint})*"
     
     if downloaded_file_name:
         if download_success:

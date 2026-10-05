@@ -186,7 +186,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                         stderr=asyncio.subprocess.PIPE
                     )
                     try:
-                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180.0)
+                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800.0)
                         out_str = stdout.decode('utf-8', errors='replace')
                         err_str = stderr.decode('utf-8', errors='replace')
                         out_text = f"{out_str}\n{err_str}".strip()
@@ -196,7 +196,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                             proc.kill()
                         except Exception:
                             pass
-                        out_text = "执行超时 (180s)，已被系统强制截断中止"
+                        out_text = "执行超时 (1800s / 30分钟)，已被系统强制截断中止"
                         ret_code = -1
                 except Exception as ex:
                     out_text = f"执行异常: {ex}"
@@ -225,8 +225,9 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
     elif action_value.get("action") == "extend_wait":
         log.info(f"User requested extend_wait in chat {chat_id}")
-        app_state.extended_wait_chats[chat_id] = time.time() + 300
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已确认继续等待，后台保持执行并已延长 5 分钟等待。"}})
+        current_extend = app_state.extended_wait_chats.get(chat_id, 0)
+        app_state.extended_wait_chats[chat_id] = max(current_extend, time.time()) + 900
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已确认继续等待，后台保持执行并已延长 15 分钟等待。"}})
         
     elif action_value.get("action") == "browse_dir":
         target_path = action_value.get("path")

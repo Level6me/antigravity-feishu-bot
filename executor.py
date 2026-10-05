@@ -45,54 +45,250 @@ def _parse_cputime(s: str) -> float:
         return 0.0
     return 0.0
 
-def _get_process_group_cpu_seconds(pid: int) -> float:
-    """获取整个进程组（主进程 + 所有子进程/subagent）的累计 CPU 秒数。
-    这样即使主进程在 I/O wait，只要子进程在工作也能检测到活跃。"""
-    if not pid:
-        return 0.0
+# 常见本地/云端编译、构建、打包、网络 I/O 及工具进程名集合
+ACTIVE_WORKER_NAMES = {
+    # 编译与构建工具
+    "gcc", "g++", "clang", "clang++", "rustc", "cargo", "go", "javac", "java", "mvn", "gradle",
+    "make", "gmake", "cmake", "ninja", "msbuild", "dotnet", "scalac", "sbt", "kotlinc",
+    # 脚本与包管理器 / 打包工具
+    "node", "npm", "npx", "yarn", "pnpm", "bun", "webpack", "vite", "esbuild", "rollup", "next",
+    "python", "python3", "pytest", "pip", "poetry", "uv", "pipenv", "conda",
+    # 容器、虚拟化与远程/云端构建调用
+    "docker", "podman", "containerd", "buildkitd", "nerdctl", "kubectl", "helm",
+    "ssh", "scp", "rsync", "git", "gh", "curl", "wget", "tar", "zip", "unzip", "gzip", "zstd"
+}
+
+def _clean_process_command(cmd: str) -> str:
+    """清理并美化进程执行命令，去除包装层，提取核心可读指令。"""
+    if not cmd:
+        return ""
+    cmd = re.sub(r'[\r\n\t]+', ' ', cmd).strip()
+    cmd = re.sub(r'^timeout\s+\d+\s+', '', cmd).strip()
+    cmd = re.sub(r'^/bin/bash\s+-c\s+', '', cmd).strip()
+    cmd = re.sub(r'^/bin/sh\s+-c\s+', '', cmd).strip()
+    cmd = re.sub(r'^bash\s+-c\s+', '', cmd).strip()
+    cmd = re.sub(r'^sh\s+-c\s+', '', cmd).strip()
+    cmd = cmd.strip(' "\'`')
+    if len(cmd) > 80:
+        return cmd[:77] + "..."
+    return cmd
+
+def _get_process_tree_status(root_pid: int) -> dict:
+    """获取以 root_pid 为根的完整进程树状态（不仅限于同 PGID，覆盖所有 fork/exec 逃逸出的子孙进程）。
+    结合 Linux /proc 与 ps，提取实际运行指令、系统调用与内核等待状态、IO及CPU消耗。
+    返回:
+        total_cputime: 递归所有子孙进程的 CPU 时间之和
+        has_active_workers: 进程树中是否存在编译器/构建器/云端网络客户端等工作子进程
+        worker_names: 发现的活跃工作进程名称列表
+        detail_cmd: 当前实际运行的最深层/最活跃的核心命令
+        all_pids: 属于该树的所有 PID 集合
+        running_count: 处于 R(运行) 状态的进程数
+        sleeping_count: 处于 S(可中断睡眠/等待IO/网络) 状态的进程数
+        deadlock_suspect: 是否疑似 D(不可中断死锁/磁盘挂起) 或 Z(僵尸) 状态
+    """
+    if not root_pid:
+        return {
+            "total_cputime": 0.0, "has_active_workers": False, "worker_names": [],
+            "detail_cmd": "", "all_pids": set(), "running_count": 0,
+            "sleeping_count": 0, "deadlock_suspect": False
+        }
     try:
-        pgid = os.getpgid(pid)
         out = subprocess.check_output(
-            ["ps", "-ax", "-o", "pgid=,cputime="],
+            ["ps", "-eo", "pid,ppid,state,wchan:20,comm,cputime,args"],
             text=True, timeout=3
         ).strip()
-        total = 0.0
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) == 2:
+        
+        children_map = {}
+        proc_info_map = {}
+        
+        for line in out.splitlines()[1:]:
+            parts = line.split(None, 6)
+            if len(parts) >= 6:
                 try:
-                    if int(parts[0]) == pgid:
-                        total += _parse_cputime(parts[1])
+                    p = int(parts[0])
+                    pp = int(parts[1])
+                    state = parts[2]
+                    wchan = parts[3]
+                    c = parts[4]
+                    t = _parse_cputime(parts[5])
+                    raw_args = parts[6] if len(parts) > 6 else c
+                    children_map.setdefault(pp, []).append(p)
+                    proc_info_map[p] = {
+                        "pid": p, "ppid": pp, "state": state, "wchan": wchan,
+                        "comm": c, "cputime": t, "args": raw_args
+                    }
                 except (ValueError, TypeError):
                     continue
-        return total
-    except Exception:
+
+        # BFS 遍历 root_pid 的整个子孙树
+        all_pids = set()
+        queue = [root_pid]
+        while queue:
+            curr = queue.pop(0)
+            all_pids.add(curr)
+            if curr in children_map:
+                for child in children_map[curr]:
+                    if child not in all_pids:
+                        queue.append(child)
+
+        total_cpu = 0.0
+        active_workers = []
+        detail_cmd = ""
+        running_count = 0
+        sleeping_count = 0
+        d_state_count = 0
+        
+        # 寻找最深层的活动子进程命令（排除顶层壳或包装器）
+        candidate_cmds = []
+        for p in all_pids:
+            info = proc_info_map.get(p)
+            if not info:
+                continue
+            total_cpu += info["cputime"]
+            comm = info["comm"].lower()
+            state = info["state"]
+            
+            if "R" in state:
+                running_count += 1
+            elif "S" in state:
+                sleeping_count += 1
+            elif "D" in state:
+                d_state_count += 1
+                
+            if comm in ACTIVE_WORKER_NAMES:
+                active_workers.append(comm)
+                cleaned = _clean_process_command(info["args"])
+                if cleaned and cleaned not in ("bash", "sh", "timeout"):
+                    candidate_cmds.append((p, comm, cleaned))
+
+        if candidate_cmds:
+            # 优先采用最深层/最新的实际构建命令
+            detail_cmd = candidate_cmds[-1][2]
+        elif len(all_pids) > 1:
+            # 如果没有预定义白名单但有子进程，提取末尾子进程命令
+            for p in sorted(list(all_pids), reverse=True):
+                if p != root_pid:
+                    info = proc_info_map.get(p)
+                    if info:
+                        cleaned = _clean_process_command(info["args"])
+                        if cleaned and cleaned not in ("bash", "sh", "timeout"):
+                            detail_cmd = cleaned
+                            break
+
+        return {
+            "total_cputime": total_cpu,
+            "has_active_workers": len(active_workers) > 0 or len(all_pids) > 1,
+            "worker_names": active_workers,
+            "detail_cmd": detail_cmd,
+            "all_pids": all_pids,
+            "running_count": running_count,
+            "sleeping_count": sleeping_count,
+            "deadlock_suspect": d_state_count > 0 and running_count == 0
+        }
+    except Exception as e:
+        log.warning(f"[Executor] Process tree check failed for PID {root_pid}: {e}")
         try:
             out = subprocess.check_output(
-                ["ps", "-p", str(pid), "-o", "cputime="],
+                ["ps", "-p", str(root_pid), "-o", "cputime="],
                 text=True, timeout=2
             ).strip()
-            return _parse_cputime(out)
+            return {
+                "total_cputime": _parse_cputime(out),
+                "has_active_workers": False,
+                "worker_names": [],
+                "detail_cmd": "",
+                "all_pids": {root_pid},
+                "running_count": 0,
+                "sleeping_count": 1,
+                "deadlock_suspect": False
+            }
         except Exception:
-            return 0.0
+            return {
+                "total_cputime": 0.0, "has_active_workers": False, "worker_names": [],
+                "detail_cmd": "", "all_pids": set(), "running_count": 0,
+                "sleeping_count": 0, "deadlock_suspect": False
+            }
 
-def _is_process_group_active(pid: int, min_cpu_percent: float = 0.05) -> bool:
-    """检测进程组是否有实际 CPU 活动（涵盖所有子进程/subagent）。
-    只有进程组中有实质性 CPU 消耗（>5% 占比，过滤 Go 运行时心跳或微小波动），才认定为活跃。"""
+def _is_process_group_active(pid: int, min_cpu_percent: float = 0.02) -> dict:
+    """深度检测整个进程树是否有实际活动：
+    涵盖本地高 CPU 运算、活跃构建进程、云端网络/系统调用 I/O 等待，
+    并能够准确识别是否真的死锁（D状态/挂起），返回高可读性的状态描述。
+    """
     if not pid:
-        return False
-    current_cputime = _get_process_group_cpu_seconds(pid)
+        return {"active": False, "reason": "no_pid", "workers": [], "status_desc": "无活动进程", "detail_cmd": ""}
+    
+    status = _get_process_tree_status(pid)
+    current_cputime = status["total_cputime"]
     now = time.time()
+    
+    cpu_active = False
+    cpu_usage_pct = 0.0
     if pid in _process_cpu_tracker:
         last_time, last_cputime = _process_cpu_tracker[pid]
         time_delta = now - last_time
         cpu_delta = current_cputime - last_cputime
         _process_cpu_tracker[pid] = (now, current_cputime)
         if time_delta > 0:
-            return (cpu_delta / time_delta) > min_cpu_percent
+            cpu_usage_pct = (cpu_delta / time_delta) * 100.0
+            cpu_active = (cpu_delta / time_delta) > min_cpu_percent
     else:
         _process_cpu_tracker[pid] = (now, current_cputime)
-    return False
+
+    workers = status["worker_names"]
+    detail_cmd = status["detail_cmd"]
+
+    # 1. 本地高强度 CPU 编译/运算中
+    if cpu_active:
+        desc = f"本地运算中 (CPU: {cpu_usage_pct:.1f}%)"
+        if workers:
+            desc = f"构建编译中 (CPU: {cpu_usage_pct:.1f}%, 进程: {', '.join(workers[:2])})"
+        return {
+            "active": True,
+            "reason": "cpu_busy",
+            "workers": workers,
+            "status_desc": desc,
+            "detail_cmd": detail_cmd
+        }
+    
+    # 2. 识别到明确的编译/构建/远程/打包子进程（即便在等待I/O或云端响应）
+    if workers:
+        worker_str = ", ".join(workers[:2])
+        return {
+            "active": True,
+            "reason": "active_worker",
+            "workers": workers,
+            "status_desc": f"任务执行中 ({worker_str} 正在推进)",
+            "detail_cmd": detail_cmd
+        }
+
+    # 3. 存在子进程树且处于正常可中断睡眠(S)或运行(R)态（多为网络请求、云端编译轮询或管道读写）
+    if len(status["all_pids"]) > 1 and (status["running_count"] > 0 or status["sleeping_count"] > 0):
+        desc = "等待外部响应与网络 I/O 中" if status["running_count"] == 0 else "后台子任务处理中"
+        return {
+            "active": True,
+            "reason": "subprocesses_alive",
+            "workers": workers,
+            "status_desc": desc,
+            "detail_cmd": detail_cmd
+        }
+
+    # 4. 疑似内核不可中断死锁 (D 状态)
+    if status["deadlock_suspect"]:
+        return {
+            "active": False,
+            "reason": "deadlock_suspect",
+            "workers": workers,
+            "status_desc": "⚠️ 检测到不可中断磁盘/内核态挂起",
+            "detail_cmd": detail_cmd
+        }
+
+    return {
+        "active": False,
+        "reason": "idle",
+        "workers": [],
+        "status_desc": "进程处于静默等待",
+        "detail_cmd": ""
+    }
 
 def format_tool_action(tool_name: str = "", params: dict = None, raw_action: str = "") -> str:
     """Format and streamline tool actions to avoid verbose code snippets or multi-line commands."""
@@ -756,7 +952,11 @@ async def execute_antigravity(
             process_start_time = time.time()
             last_progress_time = process_start_time
             last_cpu_check_time = 0
-            is_cpu_busy = False
+            is_worker_active = False
+            active_worker_reason = "idle"
+            active_worker_list = []
+            process_status_info = {"active": False, "status_desc": "", "workers": [], "detail_cmd": ""}
+            tool_in_flight_start_time = None
             last_tool_action = ""
             completed_tool_steps = []
             current_tool_action = ""
@@ -764,10 +964,13 @@ async def execute_antigravity(
             typesafe_blocked_info = None
             evaluated_tool_calls = set()
             last_patched_card_sig = ""
-            STALL_TIMEOUT = 300
-            STALL_HARD_TIMEOUT = 600
+            
+            # 从配置中读取超时配置，支持自定义配置并设置合理防御值
+            BASE_STALL_TIMEOUT = getattr(config, "STALL_TIMEOUT", 600)
+            BASE_STALL_HARD_TIMEOUT = getattr(config, "STALL_HARD_TIMEOUT", 3600)
+            BASE_TOOL_TIMEOUT = getattr(config, "TOOL_EXECUTION_TIMEOUT", 3600)
             BASE_QUIET_WARNING_THRESHOLD = 120
-            TOOL_QUIET_WARNING_THRESHOLD = 180
+            TOOL_QUIET_WARNING_THRESHOLD = 300
 
             turn_stream = await sess.send_prompt_and_stream(system_instruction + final_prompt)
 
@@ -815,6 +1018,7 @@ async def execute_antigravity(
                                     completed_tool_steps.append(current_tool_action)
                                 current_tool_action = ""
                                 stream_action = ""
+                                tool_in_flight_start_time = None
                         elif step_t == "tool":
                             t_name = step_up.get("tool_name") or step_up.get("name") or ""
                             t_info = step_up.get("tool_info", {})
@@ -831,6 +1035,8 @@ async def execute_antigravity(
                                 current_tool_action = act
                                 stream_action = act
                                 last_tool_action = act
+                                if tool_in_flight_start_time is None:
+                                    tool_in_flight_start_time = now
                                 if planned_steps:
                                     current_plan_idx = CardBuilder.match_step_index(
                                         planned_steps, current_plan_idx, act, len(completed_tool_steps)
@@ -924,22 +1130,44 @@ async def execute_antigravity(
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
 
+                # 进程树状态与心跳检测（每 2 秒采集一次）
                 if now - last_cpu_check_time >= 2.0:
                     last_cpu_check_time = now
-                    is_cpu_busy = await loop.run_in_executor(
+                    worker_status = await loop.run_in_executor(
                         None, lambda: _is_process_group_active(process.pid)
                     )
+                    is_worker_active = worker_status.get("active", False)
+                    active_worker_reason = worker_status.get("reason", "idle")
+                    active_worker_list = worker_status.get("workers", [])
+                    process_status_info = worker_status
 
+                    # 如果检测到本地编译 CPU 活跃，或存在活跃的构建/编译/云端通信子进程，
+                    # 自动刷新心跳推进时间，证明子任务正在稳步推进中，绝非假死卡死！
+                    if is_worker_active:
+                        last_progress_time = now
+
+                # 动态计算等待与硬上限阈值
                 extend_until = app_state.extended_wait_chats.get(chat_id, 0)
-                effective_stall_timeout = STALL_TIMEOUT
-                if now < extend_until:
-                    effective_stall_timeout += 300
+                extended_bonus = max(0, int(extend_until - now)) if extend_until > now else 0
+                
+                has_tool_in_flight = bool(current_tool_action or stream_action)
+                
+                # 若工具正在执行（例如编译、云端打包、测试运行），基准等待时长使用 TOOL_EXECUTION_TIMEOUT (默认 1 小时)
+                if has_tool_in_flight:
+                    effective_stall_timeout = BASE_TOOL_TIMEOUT + extended_bonus
+                    effective_stall_hard_timeout = max(BASE_STALL_HARD_TIMEOUT, BASE_TOOL_TIMEOUT) + extended_bonus
+                else:
+                    effective_stall_timeout = BASE_STALL_TIMEOUT + extended_bonus
+                    effective_stall_hard_timeout = BASE_STALL_HARD_TIMEOUT + extended_bonus
 
+                # 假死判定逻辑
                 if think_seconds >= effective_stall_timeout and stall_seconds >= effective_stall_timeout:
-                    if is_cpu_busy and stall_seconds < STALL_HARD_TIMEOUT:
-                        log.info(f"[Executor] No event for {stall_seconds}s but process group still CPU-active, extending wait")
+                    # 即使 stall_seconds 达到阈值，只要进程树仍有活跃编译/网络子进程，且未突破硬上限，绝不误杀！
+                    if is_worker_active and stall_seconds < effective_stall_hard_timeout:
+                        worker_desc = f" [{', '.join(active_worker_list[:3])}]" if active_worker_list else ""
+                        log.info(f"[Executor] No event for {stall_seconds}s but workers active ({active_worker_reason}{worker_desc}), extending wait")
                     else:
-                        log.error(f"[Executor] Process stalled for chat {chat_id}, closing session...")
+                        log.error(f"[Executor] Process stalled for chat {chat_id} (stall={stall_seconds}s, limit={effective_stall_timeout}s, hard={effective_stall_hard_timeout}s), closing session...")
                         await sess.close()
                         error_card = CardBuilder.build_stall_error_card(user_text, think_seconds, stall_seconds)
                         if bot_reply_msg_id:
@@ -947,7 +1175,7 @@ async def execute_antigravity(
                                 lambda: patch_interactive_card_sdk(bot_reply_msg_id, error_card),
                                 label="stall error card patch"
                             )
-                        stderr_text = f"⚠️ 任务已检测到卡死并自动终止（连续 {stall_seconds // 60} 分钟没有任何新 Token 或日志写入）。"
+                        stderr_text = f"⚠️ 任务已检测到假死并自动终止（连续 {stall_seconds // 60} 分钟没有任何输出、进程树无任何 CPU 活跃且无任何工具在运行）。"
                         session_data["last_execution_error"] = True
                         return {"has_reply": True, "reply_text": stderr_text, "is_error": True}
 
@@ -958,10 +1186,9 @@ async def execute_antigravity(
                     session_data["last_execution_error"] = True
                     return {"has_reply": True, "reply_text": stderr_text, "is_error": True}
 
-                has_active_tool = bool(current_tool_action or stream_action or last_tool_action or completed_tool_steps)
+                has_active_tool = bool(current_tool_action or stream_action or last_tool_action or completed_tool_steps or has_tool_in_flight)
                 effective_warning_threshold = TOOL_QUIET_WARNING_THRESHOLD if has_active_tool else BASE_QUIET_WARNING_THRESHOLD
-                if now < extend_until:
-                    effective_warning_threshold += 300
+                effective_warning_threshold += extended_bonus
 
                 clean_partial = ""
                 if accumulated_text and accumulated_text.strip():
@@ -1013,7 +1240,7 @@ async def execute_antigravity(
                         total_planned_steps=len(planned_steps) if planned_steps else 0
                     )
                     desired_patch_interval = 0.20
-                elif stall_seconds >= effective_warning_threshold and not is_cpu_busy:
+                elif stall_seconds >= effective_warning_threshold and not is_worker_active and not has_tool_in_flight:
                     indicator_card = CardBuilder.build_stall_warning_card(user_text, think_seconds, stall_seconds)
                     desired_patch_interval = 2.0
                 else:
@@ -1028,7 +1255,8 @@ async def execute_antigravity(
                             think_seconds,
                             completed_steps=completed_tool_steps,
                             planned_steps=planned_steps,
-                            current_step_idx=current_plan_idx
+                            current_step_idx=current_plan_idx,
+                            process_status=process_status_info
                         )
                     else:
                         indicator_card = CardBuilder.build_typing_indicator(
