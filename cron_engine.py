@@ -141,8 +141,10 @@ class CronEngine:
                 )
                 result_text = f"提醒已准时送达飞书：{prompt}"
             elif action_type == "shell":
-                from plugins.cron_scheduler.executors import execute_task
-                is_success, res_str, _ = await execute_task(task, send_card_to_chat_sdk)
+                import importlib
+                import plugins.cron_scheduler.executors as _exc
+                importlib.reload(_exc)
+                is_success, res_str, _ = await _exc.execute_task(task, send_card_to_chat_sdk)
                 is_error = not is_success
                 result_text = res_str
             else:

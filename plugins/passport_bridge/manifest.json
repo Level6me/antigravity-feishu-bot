@@ -5,5 +5,5 @@
   "author": "Antigravity",
   "description": "提供局域网全双工 WebSocket、UDP 服务自发现、双向语音对讲、声屏状态看板与飞书卡片联动中继",
   "commands": ["/passport", "/hardware"],
-  "enabled": true
+  "enabled": false
 }
