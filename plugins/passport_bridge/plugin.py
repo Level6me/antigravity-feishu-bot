@@ -18,6 +18,11 @@ _plugin_dir = os.path.dirname(os.path.abspath(__file__))
 if _plugin_dir not in sys.path:
     sys.path.insert(0, _plugin_dir)
 
+if "ws_server" in sys.modules:
+    import importlib
+    import ws_server
+    importlib.reload(ws_server)
+
 from ws_server import PassportServer
 
 TTS_VOICE_LIST = [
@@ -117,12 +122,81 @@ class PassportBridgePlugin(BasePlugin):
         port = int(self.config_data.get("server_port", 8765))
         udp_port = int(self.config_data.get("udp_discovery_port", 8765))
 
+        # 清理可能残留的 8765 端口 socket 与旧服务
+        import app_state
+        old_srv = getattr(app_state, "_active_passport_server", None)
+        if old_srv:
+            try:
+                if getattr(old_srv, "udp_transport", None):
+                    old_srv.udp_transport.close()
+            except Exception:
+                pass
+            if app_state.main_loop and app_state.main_loop.is_running():
+                try:
+                    asyncio.run_coroutine_threadsafe(old_srv.stop(), app_state.main_loop)
+                except Exception:
+                    pass
+
+        # 关闭所有存活的旧 DatagramTransport，彻底解除 asyncio 底层对 UDP 描述符的引用
+        import gc
+        for obj in gc.get_objects():
+            if "DatagramTransport" in type(obj).__name__:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+
+        # 1. 深入 /proc/net 匹配占用 8765 端口的所有 socket 并从事件循环中移除释放
+        try:
+            hex_port = f":{port:04X}"
+            target_inodes = set()
+            for proto in ("tcp", "udp"):
+                try:
+                    with open(f"/proc/net/{proto}", "r") as f:
+                        for line in f:
+                            parts = line.split()
+                            if len(parts) >= 10 and parts[1].endswith(hex_port):
+                                target_inodes.add(f"socket:[{parts[9]}]")
+                except Exception:
+                    pass
+
+            if target_inodes:
+                fd_dir = "/proc/self/fd"
+                for fd_str in os.listdir(fd_dir):
+                    try:
+                        link = os.readlink(f"{fd_dir}/{fd_str}")
+                        if link in target_inodes:
+                            fd = int(fd_str)
+                            log.info(f"[PassportBridge] 成功定位并解绑旧 8765 端口 socket (fd={fd}, {link})")
+                            if app_state.main_loop:
+                                try:
+                                    app_state.main_loop.remove_reader(fd)
+                                except Exception:
+                                    pass
+                                try:
+                                    app_state.main_loop.remove_writer(fd)
+                                except Exception:
+                                    pass
+                            try:
+                                os.close(fd)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.warning(f"[PassportBridge] 深度清理旧 socket 异常: {e}")
+
         self.server = PassportServer(host=host, port=port, udp_port=udp_port, plugin=self)
+        app_state._active_passport_server = self.server
         
+        async def _safe_start():
+            await asyncio.sleep(0.3)
+            await self.server.start()
+
         # 将服务端挂载到当前主 asyncio 事件循环中
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.server.start())
+            loop.create_task(_safe_start())
             log.info(f"[Plugin:{self.plugin_id}] 局域网服务初始化成功，监听端口: {port}")
         except RuntimeError:
             log.warning(f"[Plugin:{self.plugin_id}] 当前未在异步主事件循环中，延后启动。")

@@ -171,12 +171,78 @@ async def execute_task(task: dict, send_card_func=None) -> Tuple[bool, str, int]
     # 如果任务指令中包含 reload_plugins，执行热重载
     if command == "sys_reload_plugins" or prompt == "sys_reload_plugins":
         try:
+            import app_state
             from plugin_manager import plugin_manager
+
+            # 1. 查找并优雅关闭当前 passport_bridge 服务
+            old_pb = plugin_manager.plugins.get("passport_bridge")
+            old_srv = getattr(old_pb, "server", None) or getattr(app_state, "_active_passport_server", None)
+            if old_srv:
+                log.info("[executors] Stopping legacy PassportServer before reload...")
+                try:
+                    if getattr(old_srv, "udp_transport", None):
+                        old_srv.udp_transport.close()
+                except Exception:
+                    pass
+                if app_state.main_loop and app_state.main_loop.is_running():
+                    try:
+                        fut = asyncio.run_coroutine_threadsafe(old_srv.stop(), app_state.main_loop)
+                        fut.result(timeout=2.0)
+                    except Exception as _e_srv:
+                        log.warning(f"[executors] Error stopping legacy server: {_e_srv}")
+
+            # 2. 深入 /proc/net 匹配占用 8765 端口的所有 socket 并从事件循环中移除释放
+            try:
+                hex_port = f":{8765:04X}"
+                target_inodes = set()
+                for proto in ("tcp", "udp"):
+                    try:
+                        with open(f"/proc/net/{proto}", "r") as f:
+                            for line in f:
+                                parts = line.split()
+                                if len(parts) >= 10 and parts[1].endswith(hex_port):
+                                    target_inodes.add(f"socket:[{parts[9]}]")
+                    except Exception:
+                        pass
+
+                if target_inodes:
+                    fd_dir = "/proc/self/fd"
+                    for fd_str in os.listdir(fd_dir):
+                        try:
+                            link = os.readlink(f"{fd_dir}/{fd_str}")
+                            if link in target_inodes:
+                                fd = int(fd_str)
+                                log.info(f"[executors] 成功关闭 8765 端口 socket (fd={fd}, {link})")
+                                if app_state.main_loop:
+                                    try:
+                                        app_state.main_loop.remove_reader(fd)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        app_state.main_loop.remove_writer(fd)
+                                    except Exception:
+                                        pass
+                                try:
+                                    os.close(fd)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+            except Exception as _e_sel:
+                log.warning(f"[executors] Proc net socket cleanup error: {_e_sel}")
+
+            time.sleep(0.5)
+
             plugin_manager.reload_plugins()
-            log.info("[executors] execute_task successfully reloaded all plugins.")
+
+            new_pb = plugin_manager.plugins.get("passport_bridge")
+            if new_pb and hasattr(new_pb, "server") and new_pb.server:
+                app_state._active_passport_server = new_pb.server
+
+            log.info("[executors] execute_task successfully reloaded all plugins with clean sockets.")
             return True, "sys_reload_plugins done", 0
         except Exception as _e:
-            log.error(f"[executors] Failed to reload plugins: {_e}")
+            log.error(f"[executors] Failed to reload plugins: {_e}", exc_info=True)
             return False, str(_e), 0
 
     try:

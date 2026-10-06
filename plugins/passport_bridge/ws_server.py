@@ -95,8 +95,17 @@ class PassportServer:
         
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
-        self.site = web.TCPSite(self.runner, self.host, self.port)
-        await self.site.start()
+        for attempt in range(5):
+            try:
+                self.site = web.TCPSite(self.runner, self.host, self.port, reuse_address=True, reuse_port=True)
+                await self.site.start()
+                break
+            except OSError as e:
+                if e.errno == 98 and attempt < 4:
+                    log.warning(f"[PassportBridge] 端口 {self.port} 处于释放过渡期，0.5秒后重试 ({attempt+1}/4)...")
+                    await asyncio.sleep(0.5)
+                else:
+                    raise
         log.info(f"[PassportBridge] HTTP & WebSocket 服务已启动: ws://{self.host}:{self.port}/ws/passport")
         
         # 启动 UDP 服务自发现监听器
@@ -130,10 +139,15 @@ class PassportServer:
         class DiscoveryProtocol(asyncio.DatagramProtocol):
             def __init__(self, outer):
                 self.outer = outer
+                self.transport = None
+
+            def connection_made(self, transport):
+                self.transport = transport
 
             def datagram_received(self, data, addr):
                 try:
                     msg = data.decode("utf-8", errors="ignore").strip()
+                    log.info(f"[PassportBridge] 收到来自 {addr} 的 UDP 数据包: {msg}")
                     if "DISCOVER_FEISHU_PASSPORT" in msg or "DISCOVER_PASSPORT" in msg:
                         resp = json.dumps({
                             "service": "feishu_passport",
@@ -141,21 +155,30 @@ class PassportServer:
                             "ws_port": self.outer.port,
                             "timestamp": int(time.time())
                         }).encode("utf-8")
-                        self.transport.sendto(resp, addr)
+                        target_transport = self.transport or self.outer.udp_transport
+                        if target_transport:
+                            target_transport.sendto(resp, addr)
+                            log.info(f"[PassportBridge] 已向 {addr} 回复握手包: {resp.decode('utf-8')}")
                 except Exception as e:
                     log.error(f"[PassportBridge] UDP discovery parse error: {e}")
 
-        try:
-            transport, protocol = await loop.create_datagram_endpoint(
-                lambda: DiscoveryProtocol(self),
-                local_addr=("0.0.0.0", self.udp_port),
-                allow_broadcast=True
-            )
-            self.udp_transport = transport
-            self.udp_protocol = protocol
-            log.info(f"[PassportBridge] UDP 自动发现监听器已就绪 (端口 {self.udp_port})")
-        except Exception as e:
-            log.warning(f"[PassportBridge] UDP 端口绑定失败 (可能端口已被占用): {e}")
+        for attempt in range(5):
+            try:
+                transport, protocol = await loop.create_datagram_endpoint(
+                    lambda: DiscoveryProtocol(self),
+                    local_addr=("0.0.0.0", self.udp_port),
+                    allow_broadcast=True,
+                    reuse_port=True
+                )
+                self.udp_transport = transport
+                self.udp_protocol = protocol
+                log.info(f"[PassportBridge] UDP 自动发现监听器已就绪 (端口 {self.udp_port})")
+                break
+            except Exception as e:
+                if attempt < 4:
+                    await asyncio.sleep(0.5)
+                else:
+                    log.warning(f"[PassportBridge] UDP 端口绑定失败 (可能端口已被占用): {e}")
 
     async def handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
         """处理硬件长连接全双工通信"""
@@ -690,7 +713,9 @@ class PassportServer:
         })
 
         temp_dir = tempfile.gettempdir()
-        mp3_path = os.path.join(temp_dir, f"tts_pass_{int(time.time()*1000)}.mp3")
+        ts = int(time.time() * 1000)
+        mp3_path = os.path.join(temp_dir, f"tts_pass_{ts}.mp3")
+        pcm_path = os.path.join(temp_dir, f"tts_pass_{ts}.pcm")
         
         self.tts_interrupted[ws] = False
         try:
@@ -698,28 +723,41 @@ class PassportServer:
             await communicate.save(mp3_path)
             
             if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
-                with open(mp3_path, "rb") as f:
-                    mp3_data = f.read()
-                # 分片以二进制推给硬件，并在每个分片前检测随时打断信号
-                chunk_size = 1024
-                for i in range(0, len(mp3_data), chunk_size):
-                    if self.tts_interrupted.get(ws, False):
-                        log.info("[PassportBridge] TTS 音频推流已被硬件端打断截断")
-                        break
-                    chunk = mp3_data[i:i+chunk_size]
-                    await ws.send_bytes(chunk)
-                    await asyncio.sleep(0.01)
+                cmd = [
+                    "ffmpeg", "-y", "-i", mp3_path,
+                    "-f", "s16le", "-acodec", "pcm_s16le",
+                    "-ac", "1", "-ar", "16000", pcm_path
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                await proc.wait()
+
+                if os.path.exists(pcm_path) and os.path.getsize(pcm_path) > 0:
+                    with open(pcm_path, "rb") as f:
+                        pcm_data = f.read()
+                    chunk_size = 1920
+                    for i in range(0, len(pcm_data), chunk_size):
+                        if self.tts_interrupted.get(ws, False):
+                            log.info("[PassportBridge] TTS 音频推流已被硬件端打断截断")
+                            break
+                        chunk = pcm_data[i:i+chunk_size]
+                        await ws.send_bytes(chunk)
+                        await asyncio.sleep(0.055)
 
             if not self.tts_interrupted.get(ws, False):
                 await self.send_json(ws, {"type": "ai_speech_end"})
         except Exception as e:
             log.error(f"[PassportBridge] TTS 合成推流失败: {e}")
         finally:
-            if os.path.exists(mp3_path):
-                try:
-                    os.remove(mp3_path)
-                except Exception:
-                    pass
+            for p in (mp3_path, pcm_path):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
             # 延时后切回看板
             await asyncio.sleep(2)
             await self.broadcast_ai_state("idle", "")
