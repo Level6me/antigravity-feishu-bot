@@ -327,7 +327,17 @@ async def _process_single_task(chat_id, task):
         session_data.pop("typesafe_adaptive_tier", None)
         if "base_model" in session_data:
             session_data["model"] = session_data["base_model"]
-        session_data["reasoning_effort"] = "medium"
+        
+        # 兼容处理：若用户显式指定了带档位的模型名（如 -high / -low / -medium），提取对应 effort，避免 CLI 参数冲突报错
+        cur_m = (session_data.get("model") or "").lower()
+        if cur_m.endswith("-high"):
+            session_data["reasoning_effort"] = "high"
+        elif cur_m.endswith("-low"):
+            session_data["reasoning_effort"] = "low"
+        elif cur_m.endswith("-medium"):
+            session_data["reasoning_effort"] = "medium"
+        else:
+            session_data["reasoning_effort"] = "medium"
 
     selected_model = session_data.get("model", "Default")
     selected_effort = session_data.get("reasoning_effort", "medium")
