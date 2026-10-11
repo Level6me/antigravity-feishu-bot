@@ -327,7 +327,17 @@ async def _process_single_task(chat_id, task):
         session_data.pop("typesafe_adaptive_tier", None)
         if "base_model" in session_data:
             session_data["model"] = session_data["base_model"]
-        session_data["reasoning_effort"] = "medium"
+        # effort 必须与模型名档位后缀一致，否则 agy CLI 因参数冲突拒绝启动
+        # （例如 -high 模型配 medium effort；此 bug 曾导致每次关闭自适应后无法对话）
+        _m = (session_data.get("model") or "").lower()
+        if _m.endswith("-high"):
+            session_data["reasoning_effort"] = "high"
+        elif _m.endswith("-low"):
+            session_data["reasoning_effort"] = "low"
+        elif _m.endswith("-medium"):
+            session_data["reasoning_effort"] = "medium"
+        else:
+            session_data["reasoning_effort"] = "medium"
 
     selected_model = session_data.get("model", "Default")
     selected_effort = session_data.get("reasoning_effort", "medium")
