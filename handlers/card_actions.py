@@ -80,8 +80,11 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 old_model = session_data.get("model", "Default")
                 session_data["model"] = new_model
                 session_data["base_model"] = new_model
+                from system_one_gate import infer_effort_from_model
+                effort_to_set = infer_effort_from_model(new_model, session_data.get("reasoning_effort", "medium"))
+                session_data["reasoning_effort"] = effort_to_set
                 await save_session_async(chat_id, session_data)
-                log.info(f"Switched model to {new_model} in chat {chat_id}")
+                log.info(f"Switched model to {new_model} (effort={effort_to_set}) in chat {chat_id}")
                 try:
                     from session_pool import session_pool
                     proj_val = session_data.get("project")
@@ -89,7 +92,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     conv_id = session_data.get("conversation", "")
                     asyncio.create_task(session_pool.prewarm(
                         chat_id, new_model, cwd_dir, conversation_id=conv_id,
-                        effort=session_data.get("reasoning_effort", "medium")
+                        effort=effort_to_set
                     ))
                 except Exception:
                     pass
@@ -756,10 +759,23 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_toggle_auto():
-                from system_one_gate import get_typesafe_config_state, update_typesafe_env
+                from system_one_gate import get_typesafe_config_state, update_typesafe_env, infer_effort_from_model
                 cur = get_typesafe_config_state()
                 new_auto = not cur.get("auto_mode", True)
                 updated = update_typesafe_env(auto_mode=new_auto)
+                
+                # 若关闭自适应模式，立即将当前会话的 effort 同步至 base_model 所指定的档位，杜绝悬挂的旧 effort 冲突
+                try:
+                    session_data = await get_session_async(chat_id)
+                    cur_model = session_data.get("base_model") or session_data.get("model", "")
+                    if cur_model:
+                        session_data["model"] = cur_model
+                        session_data["reasoning_effort"] = infer_effort_from_model(cur_model, session_data.get("reasoning_effort", "medium"))
+                        session_data.pop("typesafe_adaptive_tier", None)
+                        await save_session_async(chat_id, session_data)
+                except Exception as _sync_err:
+                    log.warning(f"[toggle_typesafe_auto_mode] Sync session effort failed: {_sync_err}")
+
                 new_card = CardBuilder.build_typesafe_config_card(
                     api_key=updated["api_key"],
                     enabled=updated["enabled"],

@@ -962,7 +962,18 @@ def resolve_adaptive_model(base_model: str, adaptive_tier: str) -> str:
     return base_model
 
 
-
+def infer_effort_from_model(model_name: str, fallback_effort: str = "medium") -> str:
+    """Infer the valid agy --effort value (low, medium, high) from model name or fallback."""
+    if not model_name:
+        return fallback_effort
+    m = model_name.lower().strip()
+    if m.endswith("-high"):
+        return "high"
+    elif m.endswith("-low"):
+        return "low"
+    elif m.endswith("-medium"):
+        return "medium"
+    return fallback_effort if fallback_effort in ("low", "medium", "high") else "medium"
 def update_typesafe_env(
     api_key: Optional[str] = None,
     enabled: Optional[bool] = None,
