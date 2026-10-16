@@ -763,16 +763,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         return True, user_text
 
     elif user_text.strip() == "/quota":
-        try:
-            import importlib
-            import utils.quota
-            importlib.reload(utils.quota)
-            import cards.stats_cards
-            importlib.reload(cards.stats_cards)
-            from cards import CardBuilder
-            CardBuilder.build_quota_card = staticmethod(cards.stats_cards.build_quota_card)
-        except Exception as e:
-            log.warning(f"[/quota] Module reload warning: {e}")
         from utils.quota import fetch_quota
         try:
             quota_data = await asyncio.get_running_loop().run_in_executor(None, fetch_quota)
