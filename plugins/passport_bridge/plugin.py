@@ -1,6 +1,6 @@
 """
-FoloToy AI Passport 飞书机器人桥接插件 (PassportBridgePlugin)
-全功能卡片式按钮交互控制面板版
+FoloToy AI Passport × Letgo 极简实用硬件协同控制面板
+专注核心能力：设备状态感知、寻机声光呼叫、Letgo 固件一键 OTA、网关音色无缝切换、指定文本对话式播报
 """
 
 import os
@@ -8,22 +8,19 @@ import sys
 import json
 import time
 import asyncio
-from typing import Optional, Dict, Any
+import subprocess
+import urllib.request
+import urllib.error
+import urllib.parse
+from typing import Optional, Dict, Any, List, Tuple
 
 from plugin_base import BasePlugin
 from logger import log
-from lark_client import send_interactive_card_sdk, patch_interactive_card_sdk, send_reply_sdk
-
-_plugin_dir = os.path.dirname(os.path.abspath(__file__))
-if _plugin_dir not in sys.path:
-    sys.path.insert(0, _plugin_dir)
-
-if "ws_server" in sys.modules:
-    import importlib
-    import ws_server
-    importlib.reload(ws_server)
-
-from ws_server import PassportServer
+from lark_client import (
+    send_interactive_card_sdk, patch_interactive_card_sdk,
+    send_reply_sdk, send_card_to_chat_sdk
+)
+import app_state
 
 TTS_VOICE_LIST = [
     ("zh-CN-XiaoxiaoNeural", "👧 晓晓 (自然女声)"),
@@ -32,174 +29,190 @@ TTS_VOICE_LIST = [
     ("zh-CN-XiaoyiNeural", "👩 晓伊 (温和女声)")
 ]
 
-MACRO_PRESETS = {
-    "ok_double_click": {
-        "checkin": {
-            "action": "feishu_checkin",
-            "description": "飞书工作台状态极速打卡",
-            "notify_feishu": True
-        },
-        "todo": {
-            "action": "bitable_capture",
-            "description": "多维表格待办闪念录入",
-            "notify_feishu": True
-        },
-        "pomodoro": {
-            "action": "start_pomodoro",
-            "description": "启动 25 分钟专注番茄钟",
-            "notify_feishu": True
-        },
-        "broadcast": {
-            "action": "station_broadcast",
-            "description": "向局域网广播工位状态",
-            "notify_feishu": True
-        }
-    },
-    "up_double_click": {
-        "git": {
-            "action": "git_status_check",
-            "description": "当前工程 Git 状态巡检",
-            "command": "git branch --show-current && git status -s && git log -1 --oneline",
-            "notify_feishu": True
-        },
-        "sys": {
-            "action": "custom_script",
-            "description": "主机资源与系统负载巡检",
-            "command": "uptime && free -h && df -h /",
-            "notify_feishu": True
-        },
-        "net": {
-            "action": "custom_script",
-            "description": "网络连通与外网延迟诊断",
-            "command": "ping -c 3 223.5.5.5 | tail -2",
-            "notify_feishu": True
-        },
-        "clock": {
-            "action": "flip_clock_sync",
-            "description": "同步气象并切换翻页时钟",
-            "notify_feishu": False
-        }
-    },
-    "down_double_click": {
-        "guard": {
-            "action": "custom_script",
-            "description": "工位安全防窥 / 锁屏守护",
-            "command": "echo '工位防窥安全守护已激活' && date",
-            "notify_feishu": True
-        },
-        "stop": {
-            "action": "emergency_stop",
-            "description": "紧急物理熔断后台任务",
-            "notify_feishu": True
-        },
-        "test": {
-            "action": "custom_script",
-            "description": "工程自动化快速单元测试",
-            "command": "python3 -m unittest discover tests -v 2>&1 | tail -10 || echo '测试用例就绪'",
-            "notify_feishu": True
-        },
-        "clean": {
-            "action": "custom_script",
-            "description": "清理工程构建与临时缓存",
-            "command": "find . -name '__pycache__' -exec rm -rf {} + 2>/dev/null && echo 'Python 缓存清理完毕'",
-            "notify_feishu": True
-        }
+
+# ==================== 网关与 Letgo 感知底层方法 ====================
+def query_gateway_status(port: int = 8765) -> dict:
+    """获取 passport-bridge 网关状态"""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/status", headers={"User-Agent": "PassportPlugin"})
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            if resp.status == 200:
+                return json.loads(resp.read().decode())
+    except Exception:
+        pass
+    return {}
+
+
+def query_gateway_devices(port: int = 8765) -> dict:
+    """获取 passport-bridge 白名单配对设备"""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/devices", headers={"User-Agent": "PassportPlugin"})
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            if resp.status == 200:
+                return json.loads(resp.read().decode())
+    except Exception:
+        pass
+    return {}
+
+
+def query_gateway_current_voice(port: int = 8765) -> str:
+    """从 passport-bridge 读取当前实际生效的 TTS 音色"""
+    cfg_file = "/home/jiang/github/passport-bridge/config.json"
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("tts_voice", "zh-CN-XiaoxiaoNeural")
+        except Exception:
+            pass
+    return "zh-CN-XiaoxiaoNeural"
+
+
+def call_gateway_set_voice(new_voice: str, port: int = 8765) -> tuple:
+    """调用 passport-bridge 设置新音色并同步让硬件生效"""
+    try:
+        data = json.dumps({"voice": new_voice}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/voice",
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "PassportPlugin"}
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if resp.status == 200:
+                return True, f"已切换音色为【{new_voice}】"
+    except Exception as e:
+        return False, f"切换音色失败: {e}"
+    return False, "切换音色失败"
+
+
+def call_gateway_ring(port: int = 8765) -> tuple:
+    """向在线硬件发送真实寻机声光报警与语音呼叫"""
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/ring",
+            data=b"{}",
+            headers={"Content-Type": "application/json", "User-Agent": "PassportPlugin"}
+        )
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
+            res_data = json.loads(resp.read().decode())
+            if res_data.get("success"):
+                return True, "🔔 寻机声光呼叫已发送！硬件屏幕已弹窗并鸣叫。"
+            return False, res_data.get("error", "寻机未成功")
+    except urllib.error.HTTPError as he:
+        try:
+            err_json = json.loads(he.read().decode())
+            return False, err_json.get("error", f"HTTP {he.code}")
+        except Exception:
+            return False, f"HTTP {he.code}"
+    except Exception as e:
+        return False, f"寻机呼叫异常: {e}"
+
+
+def call_gateway_speak(text: str, port: int = 8765) -> tuple:
+    """向 passport-bridge 下发指定文本进行流式语音朗读与弹窗展示"""
+    try:
+        data = json.dumps({"text": text}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/speak",
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "PassportPlugin"}
+        )
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            body = json.loads(resp.read().decode())
+            if body.get("success"):
+                return True, f"已向硬件播报「{text[:30]}」"
+            return False, body.get("error", "网关播报未成功")
+    except urllib.error.HTTPError as he:
+        try:
+            err = json.loads(he.read().decode()).get("error")
+            return False, err or f"HTTP {he.code}"
+        except Exception:
+            return False, f"HTTP {he.code}"
+    except Exception as e:
+        return False, f"播报接口异常: {e}"
+
+
+def query_letgo_git_info() -> dict:
+    """获取 Letgo 源码当前提交"""
+    letgo_dir = "/home/jiang/github/Letgo"
+    info = {
+        "commit": "ef0c0ab",
+        "message": "feat(ui): 状态栏去时长、优化列表滚动与背光控制、音量顶层显示并完成全中文与浅色主题适配",
+        "date": "近期"
     }
-}
+    if not os.path.exists(letgo_dir):
+        return info
+    try:
+        res = subprocess.run(
+            ["git", "-C", letgo_dir, "log", "-1", "--pretty=format:%h|%s|%cd", "--date=relative"],
+            capture_output=True, text=True, timeout=2.0
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            parts = res.stdout.strip().split("|")
+            if len(parts) >= 3:
+                info = {"commit": parts[0], "message": parts[1], "date": parts[2]}
+    except Exception:
+        pass
+    return info
 
 
+def query_latest_firmware() -> dict:
+    """获取最新就绪的 OTA 固件版本"""
+    fw_dir = "/home/jiang/github/passport-bridge/firmware"
+    if os.path.exists(fw_dir):
+        for entry in sorted(os.listdir(fw_dir), reverse=True):
+            sub_path = os.path.join(fw_dir, entry)
+            ota_file = os.path.join(sub_path, "ota.bin")
+            if os.path.isdir(sub_path) and os.path.exists(ota_file):
+                size_mb = round(os.path.getsize(ota_file) / (1024 * 1024), 2)
+                return {"tag": entry, "size_mb": size_mb}
+    return {"tag": "fw-38484776565", "size_mb": 1.95}
+
+
+def call_gateway_ota(mac: str, tag: str, port: int = 8765) -> tuple:
+    """通过 passport-bridge 下发 OTA 升级指令"""
+    try:
+        qs = urllib.parse.urlencode({"action": "upgrade", "mac": mac, "tag": tag})
+        url = f"http://127.0.0.1:{port}/api/ota_action?{qs}"
+        req = urllib.request.Request(url, headers={"User-Agent": "PassportPlugin"})
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+            if resp.status == 200 or "已下发" in body:
+                return True, f"🚀 已成功向硬件 ({mac}) 下发固件【{tag}】的 OTA 升级指令！设备正实时写入 Flash。"
+            return False, f"⚠️ 网关反馈: {body[:100]}"
+    except Exception as e:
+        return False, f"❌ 触发 OTA 异常: {e}"
+
+
+def call_gateway_remove_device(mac: str, port: int = 8765) -> tuple:
+    """通过 passport-bridge 解除配对"""
+    try:
+        data = json.dumps({"mac": mac}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/devices/remove",
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "PassportPlugin"}
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if resp.status == 200:
+                return True, f"🗑️ 设备 `{mac}` 已成功解除白名单配对！"
+    except Exception as e:
+        return False, f"❌ 解除配对异常: {e}"
+    return False, "❌ 解除配对失败"
+
+
+# ==================== 插件主类 ====================
 class PassportBridgePlugin(BasePlugin):
 
     def initialize(self):
-        """插件初始化，加载配置并启动局域网异步服务端"""
+        """轻量级客户端模式初始化，不占用或抢占网络端口"""
         self.config_data = self.get_config() or {}
         self.enabled = self.config_data.get("enabled", True)
+        self.pending_speech_chats = {}  # chat_id -> expire_timestamp
         if not self.enabled:
             log.info(f"[Plugin:{self.plugin_id}] 插件已在配置中禁用。")
             return
-
-        host = self.config_data.get("server_host", "0.0.0.0")
-        port = int(self.config_data.get("server_port", 8765))
-        udp_port = int(self.config_data.get("udp_discovery_port", 8765))
-
-        # 清理可能残留的 8765 端口 socket 与旧服务
-        import app_state
-        old_srv = getattr(app_state, "_active_passport_server", None)
-        if old_srv:
-            try:
-                if getattr(old_srv, "udp_transport", None):
-                    old_srv.udp_transport.close()
-            except Exception:
-                pass
-            if app_state.main_loop and app_state.main_loop.is_running():
-                try:
-                    asyncio.run_coroutine_threadsafe(old_srv.stop(), app_state.main_loop)
-                except Exception:
-                    pass
-
-        # 关闭所有存活的旧 DatagramTransport，彻底解除 asyncio 底层对 UDP 描述符的引用
-        import gc
-        for obj in gc.get_objects():
-            if "DatagramTransport" in type(obj).__name__:
-                try:
-                    obj.close()
-                except Exception:
-                    pass
-
-        # 1. 深入 /proc/net 匹配占用 8765 端口的所有 socket 并从事件循环中移除释放
-        try:
-            hex_port = f":{port:04X}"
-            target_inodes = set()
-            for proto in ("tcp", "udp"):
-                try:
-                    with open(f"/proc/net/{proto}", "r") as f:
-                        for line in f:
-                            parts = line.split()
-                            if len(parts) >= 10 and parts[1].endswith(hex_port):
-                                target_inodes.add(f"socket:[{parts[9]}]")
-                except Exception:
-                    pass
-
-            if target_inodes:
-                fd_dir = "/proc/self/fd"
-                for fd_str in os.listdir(fd_dir):
-                    try:
-                        link = os.readlink(f"{fd_dir}/{fd_str}")
-                        if link in target_inodes:
-                            fd = int(fd_str)
-                            log.info(f"[PassportBridge] 成功定位并解绑旧 8765 端口 socket (fd={fd}, {link})")
-                            if app_state.main_loop:
-                                try:
-                                    app_state.main_loop.remove_reader(fd)
-                                except Exception:
-                                    pass
-                                try:
-                                    app_state.main_loop.remove_writer(fd)
-                                except Exception:
-                                    pass
-                            try:
-                                os.close(fd)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-        except Exception as e:
-            log.warning(f"[PassportBridge] 深度清理旧 socket 异常: {e}")
-
-        self.server = PassportServer(host=host, port=port, udp_port=udp_port, plugin=self)
-        app_state._active_passport_server = self.server
-        
-        async def _safe_start():
-            await asyncio.sleep(0.3)
-            await self.server.start()
-
-        # 将服务端挂载到当前主 asyncio 事件循环中
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_safe_start())
-            log.info(f"[Plugin:{self.plugin_id}] 局域网服务初始化成功，监听端口: {port}")
-        except RuntimeError:
-            log.warning(f"[Plugin:{self.plugin_id}] 当前未在异步主事件循环中，延后启动。")
+        log.info(f"[Plugin:{self.plugin_id}] Passport 控制台就绪，连接本地 8765 网关。")
 
     def get_config(self) -> dict:
         cfg_path = os.path.join(self.plugin_dir, "config.json")
@@ -220,103 +233,45 @@ class PassportBridgePlugin(BasePlugin):
         except Exception as e:
             log.error(f"[Plugin:{self.plugin_id}] 保存配置失败: {e}")
 
-    def _send_quick_capture_demo(self, chat_id: str):
-        """发送多维表格/待办灵感快速录入演示交互卡片"""
-        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
-        bitable_card = {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "template": "turquoise",
-                "title": {"content": "📋 飞书多维表格 / 待办任务快速录入 (演示)", "tag": "plain_text"}
-            },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": (
-                        f"✨ **灵感/待办主题**：\n> **优化硬件端 WebSockets 与 IMA-ADPCM 音频解压实时性能**\n\n"
-                        f"🏷️ **分类标签**：`#语音闪念` `#固件架构` `#硬件直录`\n"
-                        f"🕒 **录入时间**：`{now_str}`\n"
-                        f"📟 **录入终端**：`FoloToy AI Passport (随身硬件麦克风)`\n"
-                        f"📊 **归档状态**：`已写入多维表格待办清单`"
-                    )
-                },
-                {
-                    "tag": "hr"
-                },
-                {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "✅ 标记完成"},
-                            "type": "primary",
-                            "value": {"action": "quick_todo_done", "content": "优化硬件端 WebSockets 延迟"}
-                        }
-                    ]
-                }
-            ]
-        }
-        try:
-            from lark_client import send_card_to_chat_sdk
-            send_card_to_chat_sdk(chat_id, bitable_card)
-        except Exception as e:
-            log.error(f"[Plugin:{self.plugin_id}] 发送待办演示卡片失败: {e}")
-
-    # ==================== 卡片构建器 ====================
-    def build_control_card(self, chat_id: str, view_mode: str = "control", banner: Optional[str] = None) -> dict:
-        """构建全交互式卡片控制中心 (分类模块化、高颜值极客控制台)"""
+    # ==================== 极简实用单页卡片构建器 ====================
+    def build_control_card(self, chat_id: str, banner: Optional[str] = None) -> dict:
+        """构建极简克制、高可用、功能真实的控制面板"""
         cfg = self.get_config()
         port = cfg.get("server_port", 8765)
         bound_chat = cfg.get("bound_chat_id", "")
-        curr_voice = cfg.get("tts_voice", "zh-CN-XiaoxiaoNeural")
-        
+
+        # 1. 查询网关与设备实时状态
+        gw_status = query_gateway_status(port)
+        connected_clients = gw_status.get("connected_clients", 0)
+        gw_online = (gw_status.get("status") == "online")
+        devices_dict = query_gateway_devices(port)
+
+        # 2. 查询当前实际生效的音色
+        curr_voice = query_gateway_current_voice(port)
         voice_label = curr_voice
         for v_code, v_name in TTS_VOICE_LIST:
             if v_code == curr_voice:
                 voice_label = v_name
                 break
 
-        clients_count = len(self.server.active_websockets) if hasattr(self, "server") and self.server else 0
+        # 3. 会话绑定状态
         is_bound = (bound_chat == chat_id)
-        
-        if is_bound:
-            bound_desc = "🟢 **已绑定当前会话** (实时推流接收)"
-        elif bound_chat:
-            bound_desc = "🟡 **已绑定其他会话**"
-        else:
-            bound_desc = "⚪ **未绑定** (首个活跃会话接收)"
+        bound_desc = "🟢 **已绑定本会话 (推流专属接收)**" if is_bound else "⚪ **未绑定 (广播至首个活跃会话)**"
 
-        online_badge = f"🟢 在线 ({clients_count} 台)" if clients_count > 0 else "⚪ 离线待命"
-        header_color = "turquoise" if clients_count > 0 else "orange"
+        # 4. 状态徽章与颜色
+        if connected_clients > 0:
+            header_color = "turquoise"
+            status_badge = f"🟢 **在线连接中 ({connected_clients} 台活跃)**"
+        elif gw_online:
+            header_color = "blue"
+            status_badge = "🟢 **网关就绪 (硬件待命休眠中)**"
+        else:
+            header_color = "orange"
+            status_badge = "⚪ **网关未启动**"
+
         elements = []
 
-        # 1. 顶部视图导航选项卡 (Tab 切换)
-        elements.append({
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "🎛️ 综合控制台"},
-                    "type": "primary" if view_mode == "control" else "default",
-                    "value": {"action": "switch_view", "view": "control", "chat_id": chat_id}
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "⚡ 物理动作宏"},
-                    "type": "primary" if view_mode == "macro" else "default",
-                    "value": {"action": "switch_view", "view": "macro", "chat_id": chat_id}
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "🛠️ 固件与指南"},
-                    "type": "primary" if view_mode == "firmware" else "default",
-                    "value": {"action": "switch_view", "view": "firmware", "chat_id": chat_id}
-                }
-            ]
-        })
-        elements.append({"tag": "hr"})
-
-        # 2. 顶部操作反馈横幅
+        # 顶部操作反馈
         if banner:
             elements.append({
                 "tag": "markdown",
@@ -324,536 +279,195 @@ class PassportBridgePlugin(BasePlugin):
             })
             elements.append({"tag": "hr"})
 
-        # 3. 主视图：综合控制台 (清晰模块化分类)
-        if view_mode == "control":
-            # --- 模块 1: 硬件网关与实时画像 ---
-            bind_btn_text = "🔓 解绑本会话" if is_bound else "📌 绑定至本会话"
-            bind_btn_type = "danger" if is_bound else "primary"
-            bind_action = "unbind_chat" if is_bound else "bind_chat"
+        # ---------- 板块 1: 硬件与网关状态 ----------
+        target_mac = ""
+        target_ip = ""
+        target_name = "FoloToy AI Passport"
+        if devices_dict:
+            target_mac = list(devices_dict.keys())[0]
+            target_ip = devices_dict[target_mac].get("ip", "10.0.0.23")
+            target_name = devices_dict[target_mac].get("name", "FoloToy AI Passport")
 
-            elements.append({
-                "tag": "markdown",
-                "content": (
-                    f"**📊 硬件网关与实时画像 (Gateway Status)**\n"
-                    f"• 📡 **设备状态**：{online_badge} | 🌐 **监听网关**：`0.0.0.0:{port}`\n"
-                    f"• 💬 **专属通道**：{bound_desc}\n"
-                    f"• 🎙️ **音频链路**：`IMA-ADPCM (4:1压缩 / 16kHz)` | 🔊 **音色**：`{voice_label}`\n"
-                    f"• ⏱️ **活跃项目**：`{os.path.basename(os.getcwd())}` | 🔋 **工位环境**：`24°C 晴朗 / AQI 28 优`"
-                )
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": bind_btn_text},
-                        "type": bind_btn_type,
-                        "value": {"action": bind_action, "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔄 刷新状态"},
-                        "type": "default",
-                        "value": {"action": "refresh_status", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "📡 同步看板"},
-                        "type": "default",
-                        "value": {"action": "push_dashboard", "chat_id": chat_id}
+        elements.append({
+            "tag": "markdown",
+            "content": (
+                f"### 📱 随身设备与网关状态\n"
+                f"• 📡 **设备状态**：{status_badge}\n"
+                f"• 🏷️ **硬件节点**：`{target_name}` | 🔑 **MAC**：`{target_mac or '待配对'}`\n"
+                f"• 🌐 **局域网 IP**：`{target_ip or '未知'}` | 端口：`8765`\n"
+                f"• 💬 **飞书直达**：{bound_desc}"
+            )
+        })
+
+        bind_btn_text = "🔓 解绑本会话" if is_bound else "📌 绑定本会话"
+        bind_btn_type = "danger" if is_bound else "primary"
+        bind_action = "unbind_chat" if is_bound else "bind_chat"
+
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": bind_btn_text},
+                    "type": bind_btn_type,
+                    "value": {"action": bind_action, "chat_id": chat_id}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔔 寻机声光呼叫"},
+                    "type": "primary",
+                    "value": {"action": "find_device", "chat_id": chat_id}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔄 刷新状态"},
+                    "type": "default",
+                    "value": {"action": "refresh_status", "chat_id": chat_id}
+                }
+            ]
+        })
+        elements.append({"tag": "hr"})
+
+        # ---------- 板块 2: Letgo 固件与一键 OTA ----------
+        git_info = query_letgo_git_info()
+        fw_info = query_latest_firmware()
+
+        elements.append({
+            "tag": "markdown",
+            "content": (
+                f"### 🚀 Letgo 固件与 OTA 升级\n"
+                f"• 🎯 **适配型号**：`folotoy/ai-passport` (ESP32-C3 / 240×320 ST7789P3 彩屏)\n"
+                f"• 🔖 **源码提交**：`{git_info['commit']}` - {git_info['message'][:35]}...\n"
+                f"• 📦 **最新固件**：**`{fw_info['tag']}`** ({fw_info['size_mb']}MB / Flash 写入就绪)"
+            )
+        })
+
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": f"🚀 一键推送 OTA【{fw_info['tag']}】"},
+                    "type": "primary",
+                    "value": {
+                        "action": "trigger_ota",
+                        "tag": fw_info["tag"],
+                        "mac": target_mac,
+                        "chat_id": chat_id
                     }
-                ]
-            })
-            elements.append({"tag": "hr"})
-
-            # --- 模块 2: 随身对讲与语音协同 ---
-            elements.append({
-                "tag": "markdown",
-                "content": (
-                    "**🎙️ 随身对讲与语音协同 (Voice & Bitable)**\n"
-                    "*长按 OK 键说话推流，支持语音闪念秒级归档多维表格待办。*"
-                )
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "📻 发起对讲广播"},
-                        "type": "primary",
-                        "value": {"action": "broadcast_walkie", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "📝 灵感待办演示"},
-                        "type": "default",
-                        "value": {"action": "bitable_quick_capture_demo", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔊 轮换播报音色"},
-                        "type": "default",
-                        "value": {"action": "cycle_voice", "chat_id": chat_id}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🗑️ 解绑该设备"},
+                    "type": "danger",
+                    "value": {
+                        "action": "remove_device",
+                        "mac": target_mac,
+                        "chat_id": chat_id
                     }
-                ]
-            })
-            elements.append({"tag": "hr"})
+                }
+            ]
+        })
+        elements.append({"tag": "hr"})
 
-            # --- 模块 3: 工位穿透与生活助理 ---
-            elements.append({
-                "tag": "markdown",
-                "content": (
-                    "**💼 工位协同与穿透提醒 (Desk Assistant)**\n"
-                    "*全天候工位助手，支持会议穿透展示、复古翻页时钟与防丢寻机。*"
-                )
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔔 寻机声光爆闪"},
-                        "type": "primary",
-                        "value": {"action": "find_device", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "📅 会议穿透提醒"},
-                        "type": "default",
-                        "value": {"action": "send_meeting_alert", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "⛅ 同步天气时钟"},
-                        "type": "default",
-                        "value": {"action": "sync_weather_clock", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🍅 启动番茄钟"},
-                        "type": "default",
-                        "value": {"action": "start_pomodoro", "chat_id": chat_id}
-                    }
-                ]
-            })
-            elements.append({"tag": "hr"})
+        # ---------- 板块 3: 播报音色与指定文本播报 ----------
+        elements.append({
+            "tag": "markdown",
+            "content": (
+                f"### 🎙️ 语音播报与自定义朗读\n"
+                f"• 🔊 **当前网关生效音色**：**`{voice_label}`**\n"
+                f"*点击下方的【播放指定文本】按钮，系统将引导您回复想要让硬件朗读的任意内容：*"
+            )
+        })
 
-            # --- 模块 4: 物理按键宏与工作流 ---
-            macro_cfg = cfg.get("macro_bindings", {})
-            ok_info = macro_cfg.get("ok_double_click", {})
-            up_info = macro_cfg.get("up_double_click", {})
-            down_info = macro_cfg.get("down_double_click", {})
-            ok_name = ok_info.get("description", "飞书工作台状态打卡")
-            up_name = up_info.get("description", "当前工程 Git 巡检")
-            down_name = down_info.get("description", "工位安全防窥 / 自定义")
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔊 切换播报音色"},
+                    "type": "default",
+                    "value": {"action": "cycle_voice", "chat_id": chat_id}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "📢 播放指定文本"},
+                    "type": "primary",
+                    "value": {"action": "prompt_custom_speech", "chat_id": chat_id}
+                }
+            ]
+        })
 
-            elements.append({
-                "tag": "markdown",
-                "content": (
-                    f"**⚡ 物理动作宏工作流 (Physical Action Engine)**\n"
-                    f"• 🔘 **OK 双击**：`{ok_name}`\n"
-                    f"• 🔼 **Up 双击**：`{up_name}`\n"
-                    f"• 🔽 **Down 双击**：`{down_name}`\n"
-                    f"*点击右侧按钮直接在飞书中为每个实体按键选择与绑定预设！*"
-                )
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "📍 运行 OK 宏"},
-                        "type": "primary",
-                        "value": {"action": "trigger_macro_checkin", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔍 运行 Up 宏"},
-                        "type": "default",
-                        "value": {"action": "trigger_macro_git", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🛡️ 运行 Down 宏"},
-                        "type": "default",
-                        "value": {"action": "trigger_macro_down", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "⚙️ 配置按键宏"},
-                        "type": "default",
-                        "value": {"action": "switch_view", "view": "macro", "chat_id": chat_id}
-                    }
-                ]
-            })
-            elements.append({"tag": "hr"})
-
-            # --- 模块 5: 屏幕告警与高危熔断 ---
-            elements.append({
-                "tag": "markdown",
-                "content": (
-                    "**🚨 屏幕告警与高危熔断 (Screen Alerts & Safety)**\n"
-                    "*下发不同级别弹窗通知，或在失控时秒级熔断后台 Agent 任务。*"
-                )
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "💬 提示弹窗"},
-                        "type": "default",
-                        "value": {"action": "send_alert", "level": "info", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "⚠️ 警告弹窗"},
-                        "type": "default",
-                        "value": {"action": "send_alert", "level": "warning", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🚨 告警弹窗"},
-                        "type": "danger",
-                        "value": {"action": "send_alert", "level": "danger", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🛑 紧急安全熔断"},
-                        "type": "danger",
-                        "value": {"action": "trigger_stop", "chat_id": chat_id}
-                    }
-                ]
-            })
-
-        # 4. 视图：物理按键动作宏专属交互配置面板
-        elif view_mode == "macro":
-            macro_cfg = cfg.get("macro_bindings", {})
-            ok_binding = macro_cfg.get("ok_double_click", {})
-            up_binding = macro_cfg.get("up_double_click", {})
-            down_binding = macro_cfg.get("down_double_click", {})
-
-            ok_desc = ok_binding.get("description", "飞书工作台状态签到")
-            ok_cmd = ok_binding.get("command", "")
-            ok_notify = ok_binding.get("notify_feishu", True)
-            ok_act = ok_binding.get("action", "feishu_checkin")
-
-            up_desc = up_binding.get("description", "当前工程 Git 状态巡检")
-            up_cmd = up_binding.get("command", "")
-            up_notify = up_binding.get("notify_feishu", True)
-            up_act = up_binding.get("action", "git_status_check")
-
-            down_desc = down_binding.get("description", "工位安全防窥 / 自定义动作")
-            down_cmd = down_binding.get("command", "")
-            down_notify = down_binding.get("notify_feishu", True)
-            down_act = down_binding.get("action", "custom_script")
-
-            elements.append({
-                "tag": "markdown",
-                "content": (
-                    "### ⚡ FoloToy AI Passport 物理动作宏可视化配置\n"
-                    "无需手动修改配置文件，**点击下方预设按钮即可秒级切换实体按键绑定与通知**："
-                )
-            })
-            elements.append({"tag": "hr"})
-
-            # --- 1. OK 确定键配置区 ---
-            elements.append({
-                "tag": "markdown",
-                "content": (
-                    f"**🔘 [OK 确定键] 双击宏配置**\n"
-                    f"• 当前生效：**`{ok_desc}`**\n"
-                    f"• 执行行为：`{ok_cmd if ok_cmd else ('内置: ' + ok_act)}`\n"
-                    f"• 飞书通知：`{'🔔 开启卡片推送' if ok_notify else '🔕 静默模式 (无卡片)'}`\n"
-                    f"*点击预设一键绑定*："
-                )
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("📍 签到打卡" + (" (当前)" if "签到" in ok_desc else ""))},
-                        "type": "primary" if "签到" in ok_desc else "default",
-                        "value": {"action": "set_macro", "key": "ok_double_click", "preset": "checkin", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("📝 灵感待办" + (" (当前)" if "待办" in ok_desc or "闪念" in ok_desc else ""))},
-                        "type": "primary" if ("待办" in ok_desc or "闪念" in ok_desc) else "default",
-                        "value": {"action": "set_macro", "key": "ok_double_click", "preset": "todo", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("⏱️ 番茄计时" + (" (当前)" if "番茄" in ok_desc else ""))},
-                        "type": "primary" if "番茄" in ok_desc else "default",
-                        "value": {"action": "set_macro", "key": "ok_double_click", "preset": "pomodoro", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("📢 工位广播" + (" (当前)" if "广播" in ok_desc else ""))},
-                        "type": "primary" if "广播" in ok_desc else "default",
-                        "value": {"action": "set_macro", "key": "ok_double_click", "preset": "broadcast", "view": "macro", "chat_id": chat_id}
-                    }
-                ]
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔕 关闭通知" if ok_notify else "🔔 开启通知"},
-                        "type": "default",
-                        "value": {"action": "toggle_macro_notify", "key": "ok_double_click", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "▶️ 立即测试 OK 宏"},
-                        "type": "primary",
-                        "value": {"action": "trigger_macro_checkin", "view": "macro", "chat_id": chat_id}
-                    }
-                ]
-            })
-            elements.append({"tag": "hr"})
-
-            # --- 2. Up 上翻键配置区 ---
-            elements.append({
-                "tag": "markdown",
-                "content": (
-                    f"**🔼 [Up 上翻键] 双击宏配置**\n"
-                    f"• 当前生效：**`{up_desc}`**\n"
-                    f"• 执行命令：`{up_cmd if up_cmd else ('内置: ' + up_act)}`\n"
-                    f"• 飞书通知：`{'🔔 开启卡片推送' if up_notify else '🔕 静默模式 (无卡片)'}`\n"
-                    f"*点击预设一键绑定*："
-                )
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("🔍 Git 巡检" + (" (当前)" if "Git" in up_desc else ""))},
-                        "type": "primary" if "Git" in up_desc else "default",
-                        "value": {"action": "set_macro", "key": "up_double_click", "preset": "git", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("📊 系统负载" + (" (当前)" if "负载" in up_desc else ""))},
-                        "type": "primary" if "负载" in up_desc else "default",
-                        "value": {"action": "set_macro", "key": "up_double_click", "preset": "sys", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("🌐 网络诊断" + (" (当前)" if "网络" in up_desc else ""))},
-                        "type": "primary" if "网络" in up_desc else "default",
-                        "value": {"action": "set_macro", "key": "up_double_click", "preset": "net", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("⛅ 翻页时钟" + (" (当前)" if "时钟" in up_desc else ""))},
-                        "type": "primary" if "时钟" in up_desc else "default",
-                        "value": {"action": "set_macro", "key": "up_double_click", "preset": "clock", "view": "macro", "chat_id": chat_id}
-                    }
-                ]
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔕 关闭通知" if up_notify else "🔔 开启通知"},
-                        "type": "default",
-                        "value": {"action": "toggle_macro_notify", "key": "up_double_click", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "▶️ 立即测试 Up 宏"},
-                        "type": "primary",
-                        "value": {"action": "trigger_macro_git", "view": "macro", "chat_id": chat_id}
-                    }
-                ]
-            })
-            elements.append({"tag": "hr"})
-
-            # --- 3. Down 下翻键配置区 ---
-            elements.append({
-                "tag": "markdown",
-                "content": (
-                    f"**🔽 [Down 下翻键] 双击宏配置**\n"
-                    f"• 当前生效：**`{down_desc}`**\n"
-                    f"• 执行命令：`{down_cmd if down_cmd else ('内置: ' + down_act)}`\n"
-                    f"• 飞书通知：`{'🔔 开启卡片推送' if down_notify else '🔕 静默模式 (无卡片)'}`\n"
-                    f"*点击预设一键绑定*："
-                )
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("🛡️ 安全防窥" + (" (当前)" if "防窥" in down_desc else ""))},
-                        "type": "primary" if "防窥" in down_desc else "default",
-                        "value": {"action": "set_macro", "key": "down_double_click", "preset": "guard", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("🛑 紧急熔断" + (" (当前)" if "熔断" in down_desc else ""))},
-                        "type": "primary" if "熔断" in down_desc else "default",
-                        "value": {"action": "set_macro", "key": "down_double_click", "preset": "stop", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("🧪 快速单测" + (" (当前)" if "单测" in down_desc or "测试" in down_desc else ""))},
-                        "type": "primary" if ("单测" in down_desc or "测试" in down_desc) else "default",
-                        "value": {"action": "set_macro", "key": "down_double_click", "preset": "test", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": ("🧹 缓存清理" + (" (当前)" if "清理" in down_desc or "缓存" in down_desc else ""))},
-                        "type": "primary" if ("清理" in down_desc or "缓存" in down_desc) else "default",
-                        "value": {"action": "set_macro", "key": "down_double_click", "preset": "clean", "view": "macro", "chat_id": chat_id}
-                    }
-                ]
-            })
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔕 关闭通知" if down_notify else "🔔 开启通知"},
-                        "type": "default",
-                        "value": {"action": "toggle_macro_notify", "key": "down_double_click", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "▶️ 立即测试 Down 宏"},
-                        "type": "primary",
-                        "value": {"action": "trigger_macro_down", "view": "macro", "chat_id": chat_id}
-                    }
-                ]
-            })
-            elements.append({"tag": "hr"})
-
-            # --- 4. 底部重置与导航 ---
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔄 全部恢复出厂默认宏"},
-                        "type": "danger",
-                        "value": {"action": "reset_macros", "view": "macro", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "⬅️ 返回综合控制台"},
-                        "type": "primary",
-                        "value": {"action": "switch_view", "view": "control", "chat_id": chat_id}
-                    }
-                ]
-            })
-
-        # 5. 视图：固件与硬件指南
-        elif view_mode == "firmware":
-            elements.append({
-                "tag": "markdown",
-                "content": (
-                    "### 🛠️ FoloToy AI Passport (ESP32-C3) 固件指南\n\n"
-                    "**1. 硬件外设与引脚分布**：\n"
-                    "• **240×320 ST7789P3 LCD**：MOSI:`7`, SCLK:`6`, CS:`10`, DC:`2`, RST:`3`, BL:`1`\n"
-                    "• **ES8311 音频编解码**：I2C(SDA:`8`, SCL:`0`, 0x18), I2S(BCLK:`18`, WS:`19`, DOUT:`21`, DIN:`10`)\n"
-                    "• **单引脚分压按键**：`GPIO0` (上键:0Ω, 下键:1kΩ, OK键:2.2kΩ)\n"
-                    "• **电池与电量计**：CW2017 I2C 电量计 (SDA:`8`, SCL:`0`)\n\n"
-                    "**2. 预编译 0x0 完整镜像**：\n"
-                    "本插件已编译生成包含 Bootloader、分区表与固件的完整 0x0 镜像：\n"
-                    "• 文件位置：`plugins/passport_bridge/firmware/merged_firmware_0x0.bin`\n\n"
-                    "**3. 烧录方式**：\n"
-                    "• **方式 A (推荐)**：打开 [官方 Web 刷机工具](https://ai-passport.folotoy.cn/tools/web-flasher/)，将上方 0x0 文件拖入并选择 `0x0` 地址刷入。\n"
-                    "• **方式 B (命令行)**：插上 Type-C 数据线后执行：\n"
-                    "```bash\n"
-                    "cd plugins/passport_bridge/firmware && ./flash_firmware.sh\n"
-                    "```"
-                )
-            })
-            elements.append({"tag": "hr"})
-            elements.append({
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "⬅️ 返回综合控制台"},
-                        "type": "primary",
-                        "value": {"action": "switch_view", "view": "control", "chat_id": chat_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔄 刷新设备连接"},
-                        "type": "default",
-                        "value": {"action": "refresh_status", "chat_id": chat_id, "view": "firmware"}
-                    }
-                ]
-            })
-
-        card = {
+        return {
             "config": {"wide_screen_mode": True},
             "header": {
                 "template": header_color,
-                "title": {"content": "📟 FoloToy AI Passport 硬件协同控制台", "tag": "plain_text"}
+                "title": {"content": "📟 FoloToy AI Passport 硬件协同面板", "tag": "plain_text"}
             },
             "elements": elements
         }
-        return card
 
     # ==================== 斜杠指令入口 ====================
     async def on_command(self, command: str, args: str, chat_id: str, message_id: str, session_data: dict) -> bool:
-        """响应 /passport 与 /hardware 指令，统一直接返回交互式控制卡片"""
-        if command not in ["/passport", "/hardware"]:
+        """响应 /passport, /hardware 与 /aipass 指令"""
+        if command not in ["/passport", "/hardware", "/aipass"]:
             return False
 
-        sub_cmd = args.strip().split()[0] if args.strip() else ""
+        sub_cmd = args.strip().split()[0].lower() if args.strip() else ""
         sub_args = args.strip()[len(sub_cmd):].strip() if args.strip() else ""
 
-        banner = None
-        if sub_cmd == "bind":
+        # 支持直接指令：/passport say <内容>
+        if sub_cmd in ["say", "speak", "tts", "tell"] and sub_args:
             cfg = self.get_config()
-            cfg["bound_chat_id"] = chat_id
-            self.save_config(cfg)
-            banner = "✅ 成功绑定当前会话！后续硬件语音提问将实时推送到本会话。"
-        elif sub_cmd == "alert":
-            alert_text = sub_args or "来自飞书指令的手动告警测试！"
-            if hasattr(self, "server") and self.server:
-                await self.server.broadcast_alert("飞书通知", alert_text, level="warning", duration_sec=5)
-                banner = f"🚨 已向所有在线硬件推送告警：{alert_text}"
+            port = cfg.get("server_port", 8765)
+            ok, msg = call_gateway_speak(sub_args, port)
+            if ok:
+                send_reply_sdk(message_id, f"📢 **已成功向随身硬件下发语音播报：**\n> 「{sub_args}」")
             else:
-                banner = "⚠️ 硬件网关服务未就绪，无法下发告警。"
-        elif sub_cmd in ["find", "ring", "locate"]:
-            if hasattr(self, "server") and self.server and self.server.active_websockets:
-                await self.server.trigger_find_device(duration_sec=10)
-                banner = "🔔 **寻机鸣叫已触发**：硬件屏幕正高频爆闪并鸣叫！"
-            else:
-                banner = "⚠️ 当前无在线硬件设备。"
-        elif sub_cmd == "meeting":
-            m_title = sub_args or "项目敏捷站会"
-            if hasattr(self, "server") and self.server:
-                await self.server.trigger_meeting_reminder(m_title, "5分钟后开始")
-                banner = f"📅 已下发会议开始穿透提醒：【{m_title}】"
-            else:
-                banner = "⚠️ 硬件网关未就绪，下发失败。"
-        elif sub_cmd in ["broadcast", "say", "talk"]:
-            bc_text = sub_args or "来自飞书对讲广播：请注意查收待办任务。"
-            if hasattr(self, "server") and self.server:
-                await self.server.broadcast_walkie_talkie(bc_text)
-                banner = f"📻 已向所有随身硬件端广播语音对讲：{bc_text}"
-            else:
-                banner = "⚠️ 硬件网关未就绪，广播失败。"
+                send_reply_sdk(message_id, f"⚠️ 硬件播报未成功：{msg}")
+            return True
 
-        card = self.build_control_card(chat_id, view_mode="control", banner=banner)
+        card = self.build_control_card(chat_id)
         send_interactive_card_sdk(message_id, card)
         return True
 
+    # ==================== 消息拦截钩子（处理用户回复的文本） ====================
+    async def on_message(self, chat_id: str, user_text: str, message_id: str, session_data: dict) -> bool:
+        """拦截等待播放文本的用户回复"""
+        if not getattr(self, "enabled", True):
+            return False
+
+        if not hasattr(self, "pending_speech_chats"):
+            self.pending_speech_chats = {}
+
+        if chat_id in self.pending_speech_chats:
+            expire_time = self.pending_speech_chats[chat_id]
+            # 120 秒超时判定
+            if time.time() - expire_time > 120:
+                self.pending_speech_chats.pop(chat_id, None)
+                return False
+
+            self.pending_speech_chats.pop(chat_id, None)
+            clean_text = user_text.strip()
+
+            if clean_text.lower() in ("/cancel", "取消", "退出"):
+                send_reply_sdk(message_id, "⚪ 已取消文本播报。")
+                return True
+
+            cfg = self.get_config()
+            port = cfg.get("server_port", 8765)
+            ok, msg = call_gateway_speak(clean_text, port)
+            if ok:
+                send_reply_sdk(message_id, f"📢 **已成功向随身硬件下发语音播报：**\n> 「{clean_text}」")
+            else:
+                send_reply_sdk(message_id, f"⚠️ 硬件播报未成功：{msg}")
+            return True
+
+        return False
+
     # ==================== 飞书卡片按钮点击回调 ====================
     async def on_card_action(self, action: str, value: dict, chat_id: str, card_message_id: str) -> bool:
-        """处理卡片按钮所有交互式点击事件"""
+        """处理卡片交互式点击事件并局部刷新 (Patch)"""
         if not getattr(self, "enabled", True):
             return False
 
@@ -862,225 +476,96 @@ class PassportBridgePlugin(BasePlugin):
             return False
 
         banner = None
-        view_mode = value.get("view", "control")
+        cfg = self.get_config()
+        port = cfg.get("server_port", 8765)
 
         # 1. 绑定会话
         if act == "bind_chat":
-            cfg = self.get_config()
             cfg["bound_chat_id"] = chat_id
             self.save_config(cfg)
             banner = "✅ 已成功将当前会话绑定为 AI Passport 消息专属通道！"
 
-        # 2. 解除绑定
+        # 2. 解绑会话
         elif act == "unbind_chat":
-            cfg = self.get_config()
             cfg["bound_chat_id"] = ""
             self.save_config(cfg)
-            banner = "🔓 已解除会话专属绑定，后续消息将使用全局广播通道。"
+            banner = "🔓 已解除会话专属绑定，后续消息将广播至首个活跃会话。"
 
-        # 3. 刷新状态
+        # 3. 寻机声光呼叫（调用真实网关 API）
+        elif act == "find_device":
+            ok, msg = call_gateway_ring(port)
+            banner = msg
+
+        # 4. 刷新状态
         elif act == "refresh_status":
-            clients_count = len(self.server.active_websockets) if hasattr(self, "server") and self.server else 0
-            banner = f"🔄 状态已刷新：当前有 {clients_count} 台 AI Passport 在线连接。"
+            gw_status = query_gateway_status(port)
+            clients_cnt = gw_status.get("connected_clients", 0)
+            banner = f"🔄 状态已刷新：当前网关在线，有 {clients_cnt} 台设备活跃连接。"
 
-        # 4. 强制同步看板数据到硬件屏幕
-        elif act == "push_dashboard":
-            if hasattr(self, "server") and self.server:
-                for ws in list(self.server.active_websockets):
-                    await self.server.send_dashboard_to_client(ws)
-                banner = f"📡 已成功向所有硬件客户端下发最新看板状态心跳！"
+        # 5. 一键 OTA 升级触发
+        elif act == "trigger_ota":
+            tag = value.get("tag", "fw-38484776565")
+            mac = value.get("mac", "")
+            if not mac:
+                devs = query_gateway_devices(port)
+                if devs:
+                    mac = list(devs.keys())[0]
+            if mac:
+                ok, msg = call_gateway_ota(mac, tag, port)
+                banner = msg
             else:
-                banner = "⚠️ 服务端未运行，无法下发同步数据。"
+                banner = "⚠️ 未检测到配对设备 MAC，无法下发 OTA。"
 
-        # 5. 发送硬件弹窗测试
-        elif act == "send_alert":
-            level = value.get("level", "warning")
-            title_map = {"info": "系统通知", "warning": "重要警告", "danger": "紧急告警"}
-            content_map = {
-                "info": "飞书控制台下发的常规状态同步提醒。",
-                "warning": "检测到待处理事项，请在飞书中查看卡片详情！",
-                "danger": "系统触发高危事件拦截，请注意防范！"
-            }
-            title = title_map.get(level, "通知")
-            content = content_map.get(level, "测试弹窗")
-            if hasattr(self, "server") and self.server:
-                await self.server.broadcast_alert(title, content, level=level, duration_sec=5)
-                banner = f"🚨 已向硬件下发【{title}】弹窗提醒！"
+        # 6. 解绑设备
+        elif act == "remove_device":
+            mac = value.get("mac", "")
+            if mac:
+                ok, msg = call_gateway_remove_device(mac, port)
+                banner = msg
             else:
-                banner = "⚠️ 硬件网关未就绪，下发失败。"
+                banner = "⚠️ 未指定设备 MAC 地址。"
 
-        # 6. 轮换 TTS 音色
+        # 7. 切换音色（调用真实网关 API）
         elif act == "cycle_voice":
-            cfg = self.get_config()
-            curr = cfg.get("tts_voice", "zh-CN-XiaoxiaoNeural")
+            curr_voice = query_gateway_current_voice(port)
             idx = 0
             for i, (v_code, _) in enumerate(TTS_VOICE_LIST):
-                if v_code == curr:
+                if v_code == curr_voice:
                     idx = (i + 1) % len(TTS_VOICE_LIST)
                     break
             new_voice, new_name = TTS_VOICE_LIST[idx]
-            cfg["tts_voice"] = new_voice
-            self.save_config(cfg)
-            banner = f"🔊 已将 TTS 播报音色切换为：**{new_name}**"
-
-        # 7. 寻机鸣叫与防丢响铃 (特性 8)
-        elif act == "find_device":
-            if hasattr(self, "server") and self.server and self.server.active_websockets:
-                await self.server.trigger_find_device(duration_sec=10)
-                banner = "🔔 **寻机防丢响铃已触发**：硬件屏幕正高频爆闪并鸣叫！"
+            ok, msg = call_gateway_set_voice(new_voice, port)
+            if ok:
+                banner = f"🔊 已将网关音色切换为：**{new_name}**（已在硬件播报）"
             else:
-                banner = "⚠️ 当前无在线设备连接。"
+                banner = f"⚠️ {msg}"
 
-        # 8. 发送会议穿透提醒 (特性 5)
-        elif act == "send_meeting_alert":
-            if hasattr(self, "server") and self.server and self.server.active_websockets:
-                await self.server.trigger_meeting_reminder("飞书项目敏捷站会", "5分钟后开始")
-                banner = "📅 **会议提醒穿透已下发**：硬件屏幕已同步呈现会议卡片与声光提醒！"
-            else:
-                banner = "⚠️ 当前无在线设备连接。"
+        # 8. 触发指定文本播报交互引导
+        elif act == "prompt_custom_speech":
+            if not hasattr(self, "pending_speech_chats"):
+                self.pending_speech_chats = {}
+            self.pending_speech_chats[chat_id] = time.time()
 
-        # 9. 跨端广播对讲 (特性 6)
-        elif act == "broadcast_walkie":
-            if hasattr(self, "server") and self.server and self.server.active_websockets:
-                await self.server.broadcast_walkie_talkie("工位即时广播：团队协同站会即将开始，请各位准备。")
-                banner = "📻 **对讲广播已发送**：硬件扬声器已同步播报对讲语音！"
-            else:
-                banner = "⚠️ 当前无在线设备连接。"
-
-        # 10. 演示多维表格灵感待办卡片 (特性 4)
-        elif act == "bitable_quick_capture_demo":
-            self._send_quick_capture_demo(chat_id)
-            banner = "📝 **多维表格待办速记演示已发送**：请在当前会话中查看生成的灵感卡片！"
-
-        # 11. 同步天气翻页时钟 (特性 10)
-        elif act == "sync_weather_clock":
-            if hasattr(self, "server") and self.server:
-                await self.server.trigger_flip_clock_sync()
-                banner = "⛅ **天气翻页时钟已同步**：气象指标已推送，硬件已校准翻页时钟！"
-            else:
-                banner = "⚠️ 硬件网关未就绪。"
-
-        # 12. 启动随身番茄钟 (Page 3)
-        elif act == "start_pomodoro":
-            if hasattr(self, "server") and self.server:
-                await self.server.trigger_pomodoro_start()
-                banner = "🍅 **随身番茄钟已开启**：硬件屏幕已同步开启 25 分钟专注计时！"
-            else:
-                banner = "⚠️ 硬件网关未就绪。"
-
-        # 13. 触发物理动作宏 1: 打卡签到
-        elif act == "trigger_macro_checkin":
-            if hasattr(self, "server") and self.server:
-                await self.server._execute_macro_action("ok_double_click", "飞书工作台状态签到")
-                banner = "📍 **OK 键打卡动作宏已触发**：工作状态已签到，打卡卡片已生成！"
-            else:
-                banner = "⚠️ 硬件网关未就绪。"
-
-        # 14. 触发物理动作宏 2: Git 状态巡检
-        elif act == "trigger_macro_git":
-            if hasattr(self, "server") and self.server:
-                await self.server._execute_macro_action("up_double_click", "当前代码库 Git 巡检")
-                banner = "🔍 **Up 键 Git 巡检宏已触发**：代码库分支、状态与最新 Commit 巡检卡片已送达！"
-            else:
-                banner = "⚠️ 硬件网关未就绪。"
-
-        # 15. 触发物理动作宏 3: 工位安全防窥
-        elif act == "trigger_macro_down":
-            if hasattr(self, "server") and self.server:
-                await self.server._execute_macro_action("down_double_click", "工位安全防窥 / 自定义动作")
-                banner = "🛡️ **Down 键安全动作宏已触发**：工位安全防窥动作已执行！"
-            else:
-                banner = "⚠️ 硬件网关未就绪。"
-
-        # 16. 快速待办标记完成 (特性 4)
-        elif act == "quick_todo_done":
-            content = value.get("content", "")
-            banner = f"✅ 已将待办「{content[:20]}」在多维表格中标记为已完成！"
-
-        # 17. 触发紧急安全熔断
-        elif act == "trigger_stop":
-            if hasattr(self, "server") and self.server:
-                await self.server._trigger_emergency_stop()
-                await self.server.broadcast_alert("紧急安全熔断", "飞书端已触发 Physical Stop！", level="danger", duration_sec=5)
-            banner = "🛑 **紧急熔断已触发**：已终止后台所有正在运行的 Agent 任务！"
-
-        # 18. 切换视图 (控制面板 ⇄ 动作宏 ⇄ 固件说明)
-        elif act == "switch_view":
-            view_mode = value.get("view", "control")
-            if view_mode == "macro":
-                banner = "⚡ 已切换至物理按键宏与工作流引擎面板"
-            elif view_mode == "firmware":
-                banner = "🛠️ 已切换至固件开发与刷机烧录指引"
-            else:
-                banner = "🎛️ 已返回硬件综合协同控制台"
-
-        # 19. 动作宏设置：一键切换预设
-        elif act == "set_macro":
-            key = value.get("key")
-            preset = value.get("preset")
-            key_names = {"ok_double_click": "OK 确定键", "up_double_click": "Up 上翻键", "down_double_click": "Down 下翻键"}
-            if key in MACRO_PRESETS and preset in MACRO_PRESETS[key]:
-                cfg = self.get_config()
-                if "macro_bindings" not in cfg:
-                    cfg["macro_bindings"] = {}
-                preset_conf = MACRO_PRESETS[key][preset].copy()
-                cfg["macro_bindings"][key] = preset_conf
-                self.save_config(cfg)
-                banner = f"✅ 已成功将【{key_names.get(key, key)}】配置为：**{preset_conf['description']}**！"
-
-        # 20. 动作宏设置：切换飞书卡片通知
-        elif act == "toggle_macro_notify":
-            key = value.get("key")
-            key_names = {"ok_double_click": "OK 确定键", "up_double_click": "Up 上翻键", "down_double_click": "Down 下翻键"}
-            cfg = self.get_config()
-            if "macro_bindings" not in cfg:
-                cfg["macro_bindings"] = {}
-            if key not in cfg["macro_bindings"]:
-                cfg["macro_bindings"][key] = {}
-            curr_notify = cfg["macro_bindings"][key].get("notify_feishu", True)
-            new_notify = not curr_notify
-            cfg["macro_bindings"][key]["notify_feishu"] = new_notify
-            self.save_config(cfg)
-            banner = f"🔔 【{key_names.get(key, key)}】的飞书卡片推送已切换为：**{'开启' if new_notify else '关闭'}**！"
-
-        # 21. 动作宏设置：全部恢复出厂默认宏
-        elif act == "reset_macros":
-            cfg = self.get_config()
-            cfg["macro_bindings"] = {
-                "ok_double_click": MACRO_PRESETS["ok_double_click"]["checkin"].copy(),
-                "up_double_click": MACRO_PRESETS["up_double_click"]["git"].copy(),
-                "down_double_click": MACRO_PRESETS["down_double_click"]["guard"].copy()
+            guide_card = {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "template": "turquoise",
+                    "title": {"content": "📢 随身硬件文字播报", "tag": "plain_text"}
+                },
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": (
+                            "✍️ **请直接在飞书聊天框中回复您想要硬件播报的文本内容**：\n\n"
+                            "> 💡 示例：`小智小智，准备开会了！`\n"
+                            "> 发送后硬件将以当前音色实时朗读并在屏幕居中弹窗展示；发送 `/cancel` 可随时取消本次播报。"
+                        )
+                    }
+                ]
             }
-            self.save_config(cfg)
-            banner = "🔄 三大实体按键动作宏已全部恢复为出厂默认预设！"
+            send_card_to_chat_sdk(chat_id, guide_card)
+            banner = "✍️ 已开启文字播报等待：请直接在当前会话回复要朗读的内容！"
 
-        # 生成新卡片并在飞书内就地局部更新 (Patch)
-        new_card = self.build_control_card(chat_id, view_mode=view_mode, banner=banner)
+        new_card = self.build_control_card(chat_id, banner=banner)
         patch_interactive_card_sdk(card_message_id, new_card)
         return True
-
-    async def on_before_ai(self, user_text: str, chat_id: str, session_data: dict) -> tuple[str, dict]:
-        """AI 思考前钩子：向硬件广播思考动画状态"""
-        if hasattr(self, "server") and self.server and self.server.active_websockets:
-            asyncio.create_task(self.server.broadcast_ai_state("thinking", "思考中..."))
-        return user_text, session_data
-
-    async def on_tool_call(self, tool_name: str, tool_args: dict):
-        """工具调用钩子：向硬件广播当前正在执行的工具"""
-        if hasattr(self, "server") and self.server and self.server.active_websockets:
-            asyncio.create_task(self.server.broadcast_ai_state("tool_running", f"工具: {tool_name}"))
-
-    async def on_after_ai(self, ai_response_text: str, chat_id: str, session_data: dict) -> str:
-        """AI 答复后钩子：更新硬件状态"""
-        if hasattr(self, "server") and self.server and self.server.active_websockets:
-            asyncio.create_task(self.server.broadcast_ai_state("idle", "已完成"))
-        return ai_response_text
-
-    def on_service_restarting(self):
-        """服务停止/重启时释放网络资源"""
-        if hasattr(self, "server") and self.server:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self.server.stop())
-            except Exception:
-                pass

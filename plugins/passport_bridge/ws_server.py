@@ -570,10 +570,8 @@ class PassportServer:
             log.info(f"[PassportBridge] 硬件语音转录成功: '{text}'")
             await self.broadcast_ai_state("thinking", f"AI思考中: {text[:10]}...")
 
-            # 3. 检查飞书绑定会话
-            chat_id = self.plugin.get_config().get("bound_chat_id") if self.plugin else ""
-            if not chat_id and hasattr(app_state, "chat_queues") and app_state.chat_queues:
-                chat_id = list(app_state.chat_queues.keys())[0]
+            # 3. 检查并解析当前飞书绑定的真实主会话与工作区
+            chat_id = await self._resolve_active_chat_id()
 
             # 4. 特性4: 语音灵感一键录入飞书多维表格 / 待办 (Bitable Quick Capture)
             normalized_lower = text.strip().lower()
@@ -634,42 +632,25 @@ class PassportServer:
                     "config": {"wide_screen_mode": True},
                     "header": {
                         "template": "blue",
-                        "title": {"content": "📟 收到来自 FoloToy AI Passport 语音输入", "tag": "plain_text"}
+                        "title": {"content": "📟 FoloToy AI Passport 随身语音输入", "tag": "plain_text"}
                     },
                     "elements": [
                         {
                             "tag": "markdown",
-                            "content": f"🎙️ **硬件端语音提问**：\n> {text}\n\n🤖 *智能体大脑已接单，正在极速处理中...*"
+                            "content": f"🎙️ **硬件端语音提问**：\n> **{text}**\n\n⚡️ *已无缝接入飞书主工程会话，智能体正在执行...*"
                         }
                     ]
                 }
                 await loop.run_in_executor(None, lambda: send_card_to_chat_sdk(chat_id, prompt_card))
 
-            # 5. 调用 AGY Agent 获取回答
-            ai_reply_text = await self._query_ai_agent(text)
+            # 5. 调用飞书主工程 Agent 统一管线执行，继承同一会话与激活工作区
+            ai_reply_text = await self._query_ai_agent(text, chat_id)
             
-            # 5. 生成 TTS 语音推流给硬件
+            # 6. 生成 TTS 语音推流给硬件扬声器播报
             await self._synthesize_and_stream_tts(ws, ai_reply_text)
 
-            # 6. 在飞书端推送 AI 完整答复卡片
-            if chat_id:
-                reply_card = {
-                    "config": {"wide_screen_mode": True},
-                    "header": {
-                        "template": "green",
-                        "title": {"content": "🤖 AI Passport 联动答复完成", "tag": "plain_text"}
-                    },
-                    "elements": [
-                        {
-                            "tag": "markdown",
-                            "content": f"🎙️ **提问**：{text}\n\n💬 **答复**：\n{ai_reply_text}\n\n🔊 *已同步由硬件扬声器播报完毕*"
-                        }
-                    ]
-                }
-                await loop.run_in_executor(None, lambda: send_card_to_chat_sdk(chat_id, reply_card))
-
         except Exception as e:
-            log.error(f"[PassportBridge] 音频处理异常: {e}")
+            log.error(f"[PassportBridge] 音频处理异常: {e}", exc_info=True)
             await self.broadcast_ai_state("idle", "处理失败")
         finally:
             if os.path.exists(wav_file):
@@ -678,22 +659,69 @@ class PassportServer:
                 except Exception:
                     pass
 
-    async def _query_ai_agent(self, prompt: str) -> str:
-        """调用 Antigravity Agent 执行并获取文本输出"""
-        from executor import run_agent_turn
+    async def _resolve_active_chat_id(self) -> str:
+        """解析当前应该绑定的飞书真实主会话 ID"""
+        # 1. 优先读取插件配置的 bound_chat_id
+        chat_id = self.plugin.get_config().get("bound_chat_id") if self.plugin else ""
+        if chat_id:
+            return chat_id
+
+        # 2. 从当前内存活跃队列中查找
+        if hasattr(app_state, "chat_queues") and app_state.chat_queues:
+            chat_id = list(app_state.chat_queues.keys())[0]
+            if chat_id:
+                if self.plugin:
+                    cfg = self.plugin.get_config()
+                    cfg["bound_chat_id"] = chat_id
+                    self.plugin.save_config(cfg)
+                return chat_id
+
+        # 3. 从数据库中查询最近活跃的真实会话
         try:
-            loop = asyncio.get_running_loop()
-            # 默认使用快速回复模式
-            res = await run_agent_turn(
-                user_text=prompt,
-                chat_id="passport_hardware",
-                session_data={"model": "inherit", "workspace_root": os.getcwd()}
-            )
-            if isinstance(res, tuple):
-                return res[0]
-            return str(res) if res else "任务已处理完成。"
+            import sqlite3
+            db_path = "/home/jiang/github/antigravity-feishu-bot/antigravity_bot.db"
+            if os.path.exists(db_path):
+                conn = sqlite3.connect(db_path)
+                c = conn.cursor()
+                row = c.execute("SELECT chat_id FROM chat_sessions LIMIT 1").fetchone()
+                if row and row[0]:
+                    chat_id = row[0]
+                    if self.plugin:
+                        cfg = self.plugin.get_config()
+                        cfg["bound_chat_id"] = chat_id
+                        self.plugin.save_config(cfg)
+                        log.info(f"[PassportBridge] 自动绑定最近活跃飞书会话: {chat_id}")
+                conn.close()
         except Exception as e:
-            log.error(f"[PassportBridge] 调用 Agent 失败: {e}")
+            log.warning(f"[PassportBridge] 自动解析活跃会话失败: {e}")
+
+        return chat_id or ""
+
+    async def _query_ai_agent(self, prompt: str, chat_id: str) -> str:
+        """调用飞书 Antigravity Agent 主工程流水线进行真实执行"""
+        from handlers.pipeline import _process_single_task
+        from database import get_session_async
+        try:
+            task_payload = {
+                "message_id": f"hw_{int(time.time()*1000)}",
+                "message_type": "text",
+                "content_json": {},
+                "content_raw": prompt,
+                "raw_text": prompt,
+                "created_at": int(time.time() * 1000),
+                "from_hardware": True
+            }
+            log.info(f"[PassportBridge] 将硬件语音任务派发至飞书主工程流水线 (chat_id: {chat_id}, prompt: {prompt})")
+            await _process_single_task(chat_id, task_payload)
+            
+            # 读取执行完成并持久化保存的 AI 摘要
+            updated_session = await get_session_async(chat_id)
+            ai_summary = updated_session.get("last_ai_summary", "")
+            if not ai_summary:
+                ai_summary = "任务已执行完成，详情请查看飞书卡片。"
+            return ai_summary
+        except Exception as e:
+            log.error(f"[PassportBridge] 硬件执行飞书 Agent 任务异常: {e}", exc_info=True)
             return f"任务执行遇到异常: {e}"
 
     async def _synthesize_and_stream_tts(self, ws: web.WebSocketResponse, text: str):

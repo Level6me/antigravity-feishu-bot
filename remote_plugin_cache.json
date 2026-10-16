@@ -70,7 +70,7 @@
       "/hardware"
     ],
     "enabled": true,
-    "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
+    "repo_url": "https://github.com/Level6me/passport-bridge"
   },
   {
     "id": "rpi_gpio_api_status",

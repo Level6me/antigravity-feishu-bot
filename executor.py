@@ -960,6 +960,7 @@ async def execute_antigravity(
             last_tool_action = ""
             completed_tool_steps = []
             current_tool_action = ""
+            current_tool_name = ""
             typesafe_tool_audits = []
             typesafe_blocked_info = None
             evaluated_tool_calls = set()
@@ -1018,8 +1019,10 @@ async def execute_antigravity(
                                     completed_tool_steps.append(current_tool_action)
                                 current_tool_action = ""
                                 stream_action = ""
+                                current_tool_name = ""
                                 tool_in_flight_start_time = None
                         elif step_t == "tool":
+                            t_state = step_up.get("state", "ACTIVE")
                             t_name = step_up.get("tool_name") or step_up.get("name") or ""
                             t_info = step_up.get("tool_info", {})
                             if not isinstance(t_info, dict):
@@ -1028,71 +1031,83 @@ async def execute_antigravity(
                             if not isinstance(t_params, dict):
                                 t_params = {}
                             act = format_tool_action(t_name, t_params)
-                            if act:
-                                if current_tool_action and act != current_tool_action:
-                                    if current_tool_action not in completed_tool_steps:
-                                        completed_tool_steps.append(current_tool_action)
-                                current_tool_action = act
-                                stream_action = act
-                                last_tool_action = act
-                                if tool_in_flight_start_time is None:
-                                    tool_in_flight_start_time = now
-                                if planned_steps:
-                                    current_plan_idx = CardBuilder.match_step_index(
-                                        planned_steps, current_plan_idx, act, len(completed_tool_steps)
-                                    )
-                            # Co-Pilot 对高风险工具事件进行语义复核；普通工具由本地规则和 CLI 沙箱保护。
-                            ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
-                            if ts_tier == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
-                                cmd_target = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
-                                if not cmd_target:
-                                    if t_name in ["write_to_file", "replace_file_content"]:
-                                        cmd_target = f"{t_name} target={t_params.get('TargetFile', '')}"
-                                    elif t_name:
-                                        cmd_target = f"tool:{t_name}"
-                                call_key = step_up.get("call_id") or step_up.get("tool_call_id") or f"{t_name}:{cmd_target[:100]}"
-                                if call_key and call_key not in evaluated_tool_calls and cmd_target:
-                                    evaluated_tool_calls.add(call_key)
-                                    try:
-                                        from system_one_gate import evaluate_tool_execution
-                                        tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
-                                        if tool_dec.decision_source == "jev":
-                                            session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
-                                        if not tool_dec.is_allowed:
-                                            log.critical(f"[TypeSafe Co-Pilot] High-risk tool event intercepted: {cmd_target} -> {tool_dec.reason}")
+
+                            if t_state == "DONE":
+                                if act and act not in completed_tool_steps:
+                                    completed_tool_steps.append(act)
+                                elif current_tool_action and current_tool_action not in completed_tool_steps:
+                                    completed_tool_steps.append(current_tool_action)
+                                current_tool_action = ""
+                                stream_action = ""
+                                current_tool_name = ""
+                                tool_in_flight_start_time = None
+                            else:
+                                if act:
+                                    if current_tool_action and act != current_tool_action:
+                                        if current_tool_action not in completed_tool_steps:
+                                            completed_tool_steps.append(current_tool_action)
+                                    current_tool_action = act
+                                    stream_action = act
+                                    last_tool_action = act
+                                    current_tool_name = t_name
+                                    if tool_in_flight_start_time is None:
+                                        tool_in_flight_start_time = now
+                                    if planned_steps:
+                                        current_plan_idx = CardBuilder.match_step_index(
+                                            planned_steps, current_plan_idx, act, len(completed_tool_steps)
+                                        )
+                                # Co-Pilot 对高风险工具事件进行语义复核；普通工具由本地规则和 CLI 沙箱保护。
+                                ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+                                if ts_tier == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
+                                    cmd_target = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
+                                    if not cmd_target:
+                                        if t_name in ["write_to_file", "replace_file_content"]:
+                                            cmd_target = f"{t_name} target={t_params.get('TargetFile', '')}"
+                                        elif t_name:
+                                            cmd_target = f"tool:{t_name}"
+                                    call_key = step_up.get("call_id") or step_up.get("tool_call_id") or f"{t_name}:{cmd_target[:100]}"
+                                    if call_key and call_key not in evaluated_tool_calls and cmd_target:
+                                        evaluated_tool_calls.add(call_key)
+                                        try:
+                                            from system_one_gate import evaluate_tool_execution
+                                            tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
+                                            if tool_dec.decision_source == "jev":
+                                                session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
+                                            if not tool_dec.is_allowed:
+                                                log.critical(f"[TypeSafe Co-Pilot] High-risk tool event intercepted: {cmd_target} -> {tool_dec.reason}")
+                                                typesafe_blocked_info = {
+                                                    "tool": t_name,
+                                                    "target": cmd_target,
+                                                    "reason": tool_dec.reason or "安全策略拒绝了该高风险操作",
+                                                    "risk_level": tool_dec.risk_level,
+                                                    "call_id": call_key,
+                                                    "cwd": session_data.get("project") or ""
+                                                }
+                                                await sess.close()
+                                                should_break = True
+                                                break
+                                            else:
+                                                typesafe_tool_audits.append({
+                                                    "tool": t_name,
+                                                    "risk": tool_dec.risk_level,
+                                                    "latency_ms": tool_dec.latency_ms
+                                                })
+                                        except Exception as e:
+                                            log.warning(f"[TypeSafe Co-Pilot] Tool execution evaluation error: {e}")
                                             typesafe_blocked_info = {
                                                 "tool": t_name,
                                                 "target": cmd_target,
-                                                "reason": tool_dec.reason or "安全策略拒绝了该高风险操作",
-                                                "risk_level": tool_dec.risk_level,
+                                                "reason": "高风险工具检查异常，已停止后续执行",
+                                                "risk_level": "critical_risk",
                                                 "call_id": call_key,
                                                 "cwd": session_data.get("project") or ""
                                             }
                                             await sess.close()
                                             should_break = True
                                             break
-                                        else:
-                                            typesafe_tool_audits.append({
-                                                "tool": t_name,
-                                                "risk": tool_dec.risk_level,
-                                                "latency_ms": tool_dec.latency_ms
-                                            })
-                                    except Exception as e:
-                                        log.warning(f"[TypeSafe Co-Pilot] Tool execution evaluation error: {e}")
-                                        typesafe_blocked_info = {
-                                            "tool": t_name,
-                                            "target": cmd_target,
-                                            "reason": "高风险工具检查异常，已停止后续执行",
-                                            "risk_level": "critical_risk",
-                                            "call_id": call_key,
-                                            "cwd": session_data.get("project") or ""
-                                        }
-                                        await sess.close()
-                                        should_break = True
-                                        break
-                            if act:
-                                from plugin_manager import plugin_manager
-                                await plugin_manager.dispatch_tool_call(act, {})
+                                if act:
+                                    from plugin_manager import plugin_manager
+                                    await plugin_manager.dispatch_tool_call(act, {})
                     elif event_type == "result":
                         if current_tool_action:
                             if current_tool_action not in completed_tool_steps:
@@ -1150,10 +1165,13 @@ async def execute_antigravity(
                 extend_until = app_state.extended_wait_chats.get(chat_id, 0)
                 extended_bonus = max(0, int(extend_until - now)) if extend_until > now else 0
                 
-                has_tool_in_flight = bool(current_tool_action or stream_action)
+                FAST_LOCAL_TOOLS = {"view_file", "write_to_file", "replace_file_content", "search_web", "read_url_content", "ask_question", "schedule"}
+                is_fast_tool = bool(current_tool_name in FAST_LOCAL_TOOLS or any(k in current_tool_action for k in ["查看", "读取", "搜索", "写入", "编辑"]))
+                tool_elapsed = (now - tool_in_flight_start_time) if tool_in_flight_start_time else 0
+                has_tool_in_flight = bool(current_tool_action or stream_action) and not is_fast_tool and (is_worker_active or tool_elapsed < 180)
                 
-                # 若工具正在执行（例如编译、云端打包、测试运行），基准等待时长使用 TOOL_EXECUTION_TIMEOUT (默认 1 小时)
-                if has_tool_in_flight:
+                # 若工具正在真实执行（例如编译、云端打包、测试运行），基准等待时长使用 TOOL_EXECUTION_TIMEOUT (默认 1 小时)
+                if has_tool_in_flight or is_worker_active:
                     effective_stall_timeout = BASE_TOOL_TIMEOUT + extended_bonus
                     effective_stall_hard_timeout = max(BASE_STALL_HARD_TIMEOUT, BASE_TOOL_TIMEOUT) + extended_bonus
                 else:

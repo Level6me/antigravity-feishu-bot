@@ -15,6 +15,7 @@ from logger import log
 from utils import with_retry
 
 api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).timeout(10.0).build()
+upload_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).timeout(120.0).build()
 
 @with_retry()
 def set_emoji_sdk(message_id, emoji_type):
@@ -300,7 +301,7 @@ def upload_file_sdk(file_path, file_type=None, duration_ms=None):
             if duration_ms is not None:
                 builder.duration(int(duration_ms))
             req = CreateFileRequest.builder().request_body(builder.build()).build()
-            resp = api_client.im.v1.file.create(req)
+            resp = upload_client.im.v1.file.create(req)
 
         if resp.code == 0:
             data = json.loads(resp.raw.content).get("data", {})
