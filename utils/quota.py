@@ -27,6 +27,67 @@ from logger import log
 
 _PORT_CACHE = None  # (timestamp, port)
 _PORT_CACHE_TTL = 300
+_AGY_VERSION_CACHE = None
+
+
+def get_agy_version() -> str:
+    """Get the current Antigravity CLI version dynamically with fallback."""
+    global _AGY_VERSION_CACHE
+    if _AGY_VERSION_CACHE:
+        return _AGY_VERSION_CACHE
+
+    ls_ver = os.environ.get("ANTIGRAVITY_LS_VERSION", "").strip()
+    if ls_ver:
+        if ls_ver.startswith("cli-"):
+            ls_ver = ls_ver[4:]
+        _AGY_VERSION_CACHE = ls_ver
+        return _AGY_VERSION_CACHE
+
+    try:
+        from config import ANTIGRAVITY_BIN
+        bin_path = ANTIGRAVITY_BIN or "agy"
+        out = subprocess.check_output([bin_path, "--version"], text=True, timeout=2).strip()
+        if out:
+            _AGY_VERSION_CACHE = out
+            return _AGY_VERSION_CACHE
+    except Exception:
+        pass
+
+    _AGY_VERSION_CACHE = "1.3.6"
+    return _AGY_VERSION_CACHE
+
+
+def _get_csrf_token() -> Optional[str]:
+    """Retrieve CSRF token for the local language server if available."""
+    # 1. Environment variable
+    csrf = os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "").strip()
+    if csrf:
+        return csrf
+
+    # 2. Inspect /proc/<pid>/environ for running agy process
+    if os.path.isdir("/proc"):
+        try:
+            for pid_dir in os.listdir("/proc"):
+                if not pid_dir.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{pid_dir}/cmdline", "rb") as f:
+                        raw = f.read()
+                    parts = [p.decode("utf-8", errors="ignore") for p in raw.split(b"\x00") if p]
+                    if parts and os.path.basename(parts[0]) in ("agy", "antigravity"):
+                        with open(f"/proc/{pid_dir}/environ", "rb") as ef:
+                            env_items = ef.read().split(b"\x00")
+                        for item in env_items:
+                            if item.startswith(b"ANTIGRAVITY_CSRF_TOKEN="):
+                                val = item.split(b"=", 1)[1].decode("utf-8", errors="ignore").strip()
+                                if val:
+                                    return val
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    return None
 
 
 def _ssl_context(insecure_allowed=True):
@@ -49,9 +110,15 @@ def _discover_linux_proc():
                 continue
             try:
                 with open(f"/proc/{pid_dir}/cmdline", "rb") as f:
-                    cmdline = f.read().decode("utf-8", errors="ignore")
-                if "agy" not in cmdline and "antigravity" not in cmdline:
+                    raw = f.read()
+                parts = [p.decode("utf-8", errors="ignore") for p in raw.split(b"\x00") if p]
+                if not parts:
                     continue
+                # Ensure the executable itself is agy or antigravity (not python/sh wrapper)
+                exe = os.path.basename(parts[0])
+                if exe not in ("agy", "antigravity"):
+                    continue
+
                 fd_dir = f"/proc/{pid_dir}/fd"
                 if not os.path.isdir(fd_dir):
                     continue
@@ -63,9 +130,9 @@ def _discover_linux_proc():
                         inode = link.split("[")[1].rstrip("]")
                         with open("/proc/net/tcp", "r") as tcp_f:
                             for tcp_line in tcp_f:
-                                parts = tcp_line.strip().split()
-                                if len(parts) >= 10 and parts[9] == inode and parts[3] == "0A":
-                                    hex_port = parts[1].split(":")[1]
+                                tcp_parts = tcp_line.strip().split()
+                                if len(tcp_parts) >= 10 and tcp_parts[9] == inode and tcp_parts[3] == "0A":
+                                    hex_port = tcp_parts[1].split(":")[1]
                                     candidate_ports.add(int(hex_port, 16))
                     except Exception:
                         continue
@@ -87,11 +154,11 @@ def _discover_lsof():
             stderr=subprocess.DEVNULL,
         )
         for line in out.splitlines():
-            if "agy" not in line and "antigravity" not in line:
-                continue
-            # COMMAND  PID  USER  FD  TYPE DEVICE SIZE/OFF NODE NAME
             parts = line.split()
             if len(parts) >= 9:
+                comm = parts[0].lower()
+                if comm not in ("agy", "antigravity"):
+                    continue
                 m = re.search(r"127\.0\.0\.1:(\d+)|localhost:(\d+)|\[::1\]:(\d+)", parts[8])
                 if m:
                     port = int(m.group(1) or m.group(2) or m.group(3))
@@ -109,10 +176,18 @@ def discover_lsp_port():
         return _PORT_CACHE[1]
 
     port = None
-    # 1. explicit env override
-    env_port = os.environ.get("ANTIGRAVITY_LSP_PORT", "").strip()
-    if env_port.isdigit():
-        port = int(env_port)
+    # 1. explicit env override or LS address
+    env_addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS", "").strip()
+    if env_addr:
+        parts = env_addr.split(":")
+        if len(parts) == 2 and parts[1].isdigit():
+            port = int(parts[1])
+
+    if port is None:
+        env_port = os.environ.get("ANTIGRAVITY_LSP_PORT", "").strip()
+        if env_port.isdigit():
+            port = int(env_port)
+
     # 2. heartbeat file written by agy-daemon (cross-platform)
     if port is None:
         heartbeat = os.path.join(get_antigravity_home(), "lsp_port")
@@ -124,11 +199,13 @@ def discover_lsp_port():
                     port = int(p)
             except Exception as e:
                 log.warning(f"[quota] heartbeat read error: {e}")
-    # 3. Linux /proc scan
+
+    # 3. Linux /proc scan (strictly filtered to agy executable)
     if port is None:
         ports = _discover_linux_proc()
         if ports:
             port = min(ports)
+
     # 4. lsof fallback (macOS/Linux)
     if port is None:
         ports = _discover_lsof()
@@ -140,22 +217,31 @@ def discover_lsp_port():
 
 
 def _probe_lsp(port):
-    """Query the local LSP gRPC endpoint for the quota summary."""
+    """Query the local LSP gRPC/Connect endpoint for the quota summary."""
     try:
         metadata_payload = b'{"metadata": {"ideName": "antigravity", "extensionName": "antigravity"}}'
-        url = f"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
-        req = urllib.request.Request(
-            url,
-            data=metadata_payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        # Local LSP on 127.0.0.1 uses a self-signed cert; bypass local verification
+        headers = {"Content-Type": "application/json"}
+        csrf = _get_csrf_token()
+        if csrf:
+            headers["x-codeium-csrf-token"] = csrf
+
         local_ctx = ssl._create_unverified_context()
-        with urllib.request.urlopen(req, context=local_ctx, timeout=3) as response:
-            data = json.loads(response.read().decode())
-            if "response" in data and "groups" in data["response"]:
-                return data
+        for scheme in ("https", "http"):
+            try:
+                url = f"{scheme}://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+                req = urllib.request.Request(
+                    url,
+                    data=metadata_payload,
+                    headers=headers,
+                    method="POST",
+                )
+                ctx = local_ctx if scheme == "https" else None
+                with urllib.request.urlopen(req, context=ctx, timeout=3) as response:
+                    data = json.loads(response.read().decode())
+                    if "response" in data and "groups" in data["response"] and len(data["response"]["groups"]) > 0:
+                        return data
+            except Exception:
+                continue
     except Exception as e:
         log.warning(f"[quota] LSP probe on port {port} failed: {e}")
     return None
@@ -170,20 +256,19 @@ def _fetch_remote_fallback():
         with open(token_path, "r", encoding="utf-8") as f:
             token_info = json.load(f)
         access_token = token_info["token"]["access_token"]
-        # 脱敏日志：只记录 token 前缀，避免泄露完整凭据
         log.info(f"[quota] remote fallback using token {str(access_token)[:6]}...")
         url = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+        user_agent = f"antigravity/cli/{get_agy_version()}"
         req = urllib.request.Request(
             url,
             data=b'{"project":"high-battery-8d2jw"}',
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
-                "User-Agent": "antigravity/cli/1.1.3",
+                "User-Agent": user_agent,
             },
             method="POST",
         )
-        # Google API always verifies TLS certificates
         with urllib.request.urlopen(req, context=_ssl_context(insecure_allowed=False), timeout=8) as response:
             api_data = json.loads(response.read().decode())
             return {"response": api_data}
@@ -192,14 +277,47 @@ def _fetch_remote_fallback():
     return None
 
 
+def _merge_quota_responses(primary, secondary):
+    """Merge primary and secondary quota summaries so no model group is lost."""
+    if not primary:
+        return secondary
+    if not secondary:
+        return primary
+
+    p_groups = primary.get("response", {}).get("groups", [])
+    s_groups = secondary.get("response", {}).get("groups", [])
+
+    p_names = {g.get("displayName") for g in p_groups if isinstance(g, dict)}
+    merged = list(p_groups)
+    for g in s_groups:
+        if isinstance(g, dict) and g.get("displayName") not in p_names:
+            merged.append(g)
+
+    result = dict(primary)
+    result["response"] = dict(primary.get("response", {}))
+    result["response"]["groups"] = merged
+    return result
+
+
 def fetch_quota():
-    """Return quota data dict (or None). Uses local LSP first, remote fallback."""
+    """Return quota data dict (or None). Uses local LSP first, remote fallback, and merges if needed."""
+    local_data = None
     port = discover_lsp_port()
     if port is not None:
-        data = _probe_lsp(port)
-        if data:
-            return data
-    return _fetch_remote_fallback()
+        local_data = _probe_lsp(port)
+        if local_data and "response" in local_data:
+            groups = local_data["response"].get("groups", [])
+            # If local probe returned both Gemini and 3P groups, it is complete
+            if len(groups) >= 2:
+                return local_data
+
+    remote_data = _fetch_remote_fallback()
+    if not local_data:
+        return remote_data
+    if not remote_data:
+        return local_data
+
+    return _merge_quota_responses(local_data, remote_data)
 
 
 def format_duration(seconds: int) -> str:

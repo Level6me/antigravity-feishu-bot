@@ -115,7 +115,10 @@ def build_quota_card(quota_data):
         groups = quota_data["response"]["groups"]
         for g_idx, group in enumerate(groups):
             group_name = group.get("displayName", "未知模型组")
+            desc = group.get("description", "")
             group_content = f"📁 **{group_name}**\n"
+            if desc:
+                group_content += f"ℹ️ _{desc}_\n"
             
             buckets = group.get("buckets", [])
             for bucket in buckets:

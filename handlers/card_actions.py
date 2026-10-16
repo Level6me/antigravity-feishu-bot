@@ -378,6 +378,15 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     elif action_value.get("action") == "refresh_quota":
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_refresh_quota():
+                try:
+                    import importlib
+                    import utils.quota
+                    importlib.reload(utils.quota)
+                    import cards.stats_cards
+                    importlib.reload(cards.stats_cards)
+                    CardBuilder.build_quota_card = staticmethod(cards.stats_cards.build_quota_card)
+                except Exception as e:
+                    log.warning(f"[card_actions] Quota module reload warning: {e}")
                 from utils.quota import fetch_quota
                 quota_data = await asyncio.get_running_loop().run_in_executor(None, fetch_quota)
                 new_card = CardBuilder.build_quota_card(quota_data)
