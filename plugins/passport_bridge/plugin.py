@@ -23,10 +23,11 @@ from lark_client import (
 import app_state
 
 TTS_VOICE_LIST = [
-    ("zh-CN-XiaoxiaoNeural", "👧 晓晓 (自然女声)"),
-    ("zh-CN-YunxiNeural", "👦 云希 (活力男声)"),
-    ("zh-CN-YunjianNeural", "👨 云健 (稳重男声)"),
-    ("zh-CN-XiaoyiNeural", "👩 晓伊 (温和女声)")
+    ("zh-CN-XiaoxiaoNeural", "👧 晓晓 (自然亲切女声)"),
+    ("zh-CN-YunyangNeural", "🎙️ 云扬 (专业沉稳播音男声)"),
+    ("zh-CN-YunxiNeural", "👦 云希 (活力解说男声)"),
+    ("zh-CN-YunjianNeural", "👨 云健 (影视稳重男声)"),
+    ("zh-CN-XiaoyiNeural", "👩 晓伊 (日常温和女声)")
 ]
 
 
@@ -57,14 +58,24 @@ def query_gateway_devices(port: int = 8765) -> dict:
 
 def query_gateway_current_voice(port: int = 8765) -> str:
     """从 passport-bridge 读取当前实际生效的 TTS 音色"""
-    cfg_file = "/home/jiang/github/passport-bridge/config.json"
-    if os.path.exists(cfg_file):
-        try:
-            with open(cfg_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("tts_voice", "zh-CN-XiaoxiaoNeural")
-        except Exception:
-            pass
+    gw = query_gateway_status(port)
+    if gw and gw.get("tts_voice"):
+        return gw["tts_voice"]
+
+    candidates = [
+        os.environ.get("PASSPORT_CONFIG_FILE"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"),
+        "/home/jiang/github/passport-bridge/config.json"
+    ]
+    for cfg_file in candidates:
+        if cfg_file and os.path.exists(cfg_file):
+            try:
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("tts_voice"):
+                        return data.get("tts_voice")
+            except Exception:
+                pass
     return "zh-CN-XiaoxiaoNeural"
 
 
@@ -134,13 +145,23 @@ def call_gateway_speak(text: str, port: int = 8765) -> tuple:
 
 def query_letgo_git_info() -> dict:
     """获取 Letgo 源码当前提交"""
-    letgo_dir = "/home/jiang/github/Letgo"
+    candidates = [
+        os.environ.get("LETGO_DIR"),
+        "/home/jiang/github/Letgo",
+        os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Letgo"))
+    ]
+    letgo_dir = None
+    for c in candidates:
+        if c and os.path.exists(c):
+            letgo_dir = c
+            break
+
     info = {
         "commit": "ef0c0ab",
         "message": "feat(ui): 状态栏去时长、优化列表滚动与背光控制、音量顶层显示并完成全中文与浅色主题适配",
         "date": "近期"
     }
-    if not os.path.exists(letgo_dir):
+    if not letgo_dir:
         return info
     try:
         res = subprocess.run(
@@ -158,15 +179,20 @@ def query_letgo_git_info() -> dict:
 
 def query_latest_firmware() -> dict:
     """获取最新就绪的 OTA 固件版本"""
-    fw_dir = "/home/jiang/github/passport-bridge/firmware"
-    if os.path.exists(fw_dir):
-        for entry in sorted(os.listdir(fw_dir), reverse=True):
-            sub_path = os.path.join(fw_dir, entry)
-            ota_file = os.path.join(sub_path, "ota.bin")
-            if os.path.isdir(sub_path) and os.path.exists(ota_file):
-                size_mb = round(os.path.getsize(ota_file) / (1024 * 1024), 2)
-                return {"tag": entry, "size_mb": size_mb}
-    return {"tag": "fw-38484776565", "size_mb": 1.95}
+    candidates = [
+        os.environ.get("PASSPORT_FIRMWARE_DIR"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware"),
+        "/home/jiang/github/passport-bridge/firmware"
+    ]
+    for fw_dir in candidates:
+        if fw_dir and os.path.exists(fw_dir):
+            for entry in sorted(os.listdir(fw_dir), reverse=True):
+                sub_path = os.path.join(fw_dir, entry)
+                ota_file = os.path.join(sub_path, "ota.bin")
+                if os.path.isdir(sub_path) and os.path.exists(ota_file):
+                    size_mb = round(os.path.getsize(ota_file) / (1024 * 1024), 2)
+                    return {"tag": entry, "size_mb": size_mb}
+    return {"tag": "fw-38913402242", "size_mb": 1.95}
 
 
 def call_gateway_ota(mac: str, tag: str, port: int = 8765) -> tuple:
@@ -415,6 +441,33 @@ class PassportBridgePlugin(BasePlugin):
 
         sub_cmd = args.strip().split()[0].lower() if args.strip() else ""
         sub_args = args.strip()[len(sub_cmd):].strip() if args.strip() else ""
+
+        # 支持直接指令：/passport voice <音色名称或序号>
+        if sub_cmd in ["voice", "sound", "timbre", "speaker"]:
+            cfg = self.get_config()
+            port = cfg.get("server_port", 8765)
+            target_voice = None
+            target_name = None
+            if sub_args:
+                for v_code, v_name in TTS_VOICE_LIST:
+                    if sub_args in v_code or sub_args in v_name:
+                        target_voice = v_code
+                        target_name = v_name
+                        break
+            if not target_voice:
+                curr_voice = query_gateway_current_voice(port)
+                idx = 0
+                for i, (v_code, _) in enumerate(TTS_VOICE_LIST):
+                    if v_code == curr_voice:
+                        idx = (i + 1) % len(TTS_VOICE_LIST)
+                        break
+                target_voice, target_name = TTS_VOICE_LIST[idx]
+            ok, msg = call_gateway_set_voice(target_voice, port)
+            if ok:
+                send_reply_sdk(message_id, f"🔊 **已将随身硬件音色切换为：** {target_name}（已向硬件播报）")
+            else:
+                send_reply_sdk(message_id, f"⚠️ 切换音色失败：{msg}")
+            return True
 
         # 支持直接指令：/passport say <内容>
         if sub_cmd in ["say", "speak", "tts", "tell"] and sub_args:

@@ -122,8 +122,9 @@ def install_plugin_from_github(repo_url: str, custom_id: str = "") -> tuple[bool
             shutil.rmtree(target_dir, ignore_errors=True)
             return False, "克隆成功但仓库根目录下未找到 `manifest.json` 插件规范文件！"
 
-        # Auto-install requirements.txt if present
+        # Auto-install requirements.txt and execute setup.sh if present
         _install_plugin_requirements(target_dir)
+        _restart_plugin_daemon_if_needed(target_dir)
 
         return True, f"插件 `{plugin_id}` 从 GitHub 安装成功！"
 
@@ -136,7 +137,25 @@ def install_plugin_from_github(repo_url: str, custom_id: str = "") -> tuple[bool
 
 
 def _install_plugin_requirements(target_dir: str):
-    """Automatically pip install requirements.txt if present in plugin directory."""
+    """Automatically execute setup.sh and pip install requirements.txt if present in plugin directory."""
+    manifest_path = os.path.join(target_dir, "manifest.json")
+    setup_script = "setup.sh"
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            setup_script = manifest.get("setup_script", "setup.sh")
+        except Exception:
+            pass
+
+    setup_file = os.path.join(target_dir, setup_script)
+    if os.path.exists(setup_file):
+        try:
+            log.info(f"[PluginStore] Running setup script {setup_file} for {target_dir}")
+            subprocess.run(["bash", setup_file], cwd=target_dir, capture_output=True, timeout=120)
+        except Exception as e:
+            log.warning(f"[PluginStore] Error running setup script for {target_dir}: {e}")
+
     req_file = os.path.join(target_dir, "requirements.txt")
     if os.path.exists(req_file):
         import sys
@@ -144,13 +163,13 @@ def _install_plugin_requirements(target_dir: str):
         python_bin = venv_python if os.path.exists(venv_python) else sys.executable
         try:
             log.info(f"[PluginStore] Installing dependencies from {req_file} using {python_bin}")
-            subprocess.run([python_bin, "-m", "pip", "install", "-r", req_file], capture_output=True, timeout=60, check=True)
+            subprocess.run([python_bin, "-m", "pip", "install", "-r", req_file], capture_output=True, timeout=90, check=True)
         except Exception as e:
             log.error(f"[PluginStore] Failed to install requirements for {target_dir}: {e}")
 
 
 def _restart_plugin_daemon_if_needed(target_dir: str):
-    """If plugin manifest specifies a daemon_script or config specifies daemon_name, reload its PM2 service."""
+    """If plugin manifest specifies a daemon_script or config specifies daemon_name, reload or start its PM2 service."""
     manifest_path = os.path.join(target_dir, "manifest.json")
     if not os.path.exists(manifest_path):
         return
@@ -159,11 +178,27 @@ def _restart_plugin_daemon_if_needed(target_dir: str):
             manifest = json.load(f)
         daemon_script = manifest.get("daemon_script")
         plugin_id = manifest.get("id", "")
-        if daemon_script or plugin_id == "cron_scheduler":
-            daemon_name = "feishu-cron-daemon" if plugin_id == "cron_scheduler" else f"feishu-{plugin_id.replace('_', '-')}-daemon"
-            subprocess.Popen(["pm2", "restart", daemon_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if daemon_script or plugin_id in ("cron_scheduler", "passport_bridge"):
+            daemon_name = manifest.get("daemon_name") or ("feishu-cron-daemon" if plugin_id == "cron_scheduler" else ("passport-bridge" if plugin_id == "passport_bridge" else f"feishu-{plugin_id.replace('_', '-')}-daemon"))
+            
+            # Check if PM2 daemon is already running
+            chk = subprocess.run(["pm2", "describe", daemon_name], capture_output=True, text=True)
+            if chk.returncode == 0:
+                subprocess.Popen(["pm2", "restart", daemon_name, "--update-env"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                log.info(f"[PluginStore] Successfully restarted PM2 service {daemon_name}")
+            elif daemon_script:
+                script_path = os.path.join(target_dir, daemon_script)
+                if os.path.exists(script_path):
+                    import sys
+                    venv_python = os.path.join(BASE_DIR, "venv", "bin", "python3")
+                    python_bin = venv_python if os.path.exists(venv_python) else sys.executable
+                    subprocess.Popen(
+                        ["pm2", "start", script_path, "--name", daemon_name, "--cwd", target_dir, "--interpreter", python_bin],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    log.info(f"[PluginStore] Started new PM2 service {daemon_name} with script {script_path}")
     except Exception as e:
-        log.warning(f"[PluginStore] Failed to restart daemon for {target_dir}: {e}")
+        log.warning(f"[PluginStore] Failed to manage daemon for {target_dir}: {e}")
 
 
 def update_plugin(plugin_id: str) -> tuple[bool, str]:
