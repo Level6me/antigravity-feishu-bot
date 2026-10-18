@@ -528,6 +528,13 @@ class PassportBridgePlugin(BasePlugin):
         if not act:
             return False
 
+        handled_actions = {
+            "bind_chat", "unbind_chat", "find_device", "passport_refresh_status",
+            "trigger_ota", "remove_device", "cycle_voice", "prompt_custom_speech"
+        }
+        if act not in handled_actions:
+            return False
+
         banner = None
         cfg = self.get_config()
         port = cfg.get("server_port", 8765)
