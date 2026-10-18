@@ -260,6 +260,14 @@ async def _process_single_task(chat_id, task):
     if not user_text:
         return
 
+    # 0. 插件前置输入拦截与预处理 (Hook: on_before_ai)
+    # 优先拦截处理处于交互式等待状态的输入 (如配置网关 URL、Token 等)，杜绝无谓的 Jev 认知网关冷启动与 FastPath 串扰
+    from plugin_manager import plugin_manager
+    user_text, session_data = await plugin_manager.dispatch_before_ai(user_text, chat_id, session_data)
+    if not user_text or not user_text.strip():
+        log.info(f"Message in chat {chat_id} was intercepted and consumed by plugin hook. Skipping AI execution.")
+        return
+
     # 🚀 极致性能优化：抢先下发首张打字机/思考交互卡片（秒回卡片）
     # 彻底杜绝因等待 TypeSafe Jev 远程认知网关（~2s）、插件初始化或会话锁导致的前端卡片延迟
     is_voice_message = bool(
@@ -362,7 +370,10 @@ async def _process_single_task(chat_id, task):
         return
 
     # 2. 插件极速直达通道 (Fast-Path / 零模型冷启动延迟)
-    if decision.intent == "typesafe_status" and decision.intent_confidence >= 0.65:
+    typesafe_keywords = ["typesafe", "type_safe", "s1", "system1", "system 1", "system one", "决策网关", "直觉决策"]
+    user_text_lower = user_text.lower()
+    is_explicit_typesafe = any(kw in user_text_lower for kw in typesafe_keywords)
+    if decision.intent == "typesafe_status" and decision.intent_confidence >= 0.65 and is_explicit_typesafe:
         log.info(f"[TypeSafe FastPath] Direct dispatch typesafe config inquiry for chat {chat_id}")
         from system_one_gate import get_typesafe_config_state, test_typesafe_connectivity
         cfg = get_typesafe_config_state()
@@ -451,11 +462,7 @@ async def _process_single_task(chat_id, task):
         except Exception as e:
             log.warning(f"[Pipeline] Selected-effort prewarm failed to schedule: {e}")
 
-    # 3. 运行插件 on_before_ai 钩子
-    user_text, session_data = await plugin_manager.dispatch_before_ai(user_text, chat_id, session_data)
-    if not user_text or not user_text.strip():
-        log.info(f"Message in chat {chat_id} was intercepted and consumed by plugin hook. Skipping AI execution.")
-        return
+    # 3. 插件 on_before_ai 钩子已在流程入口处优先执行完毕 (跳过重复调用)
 
     # 4. 智能意图路由与人机交互规范 (严格贯彻：区分提问与命令)
     # 提问/咨询：纯文本高效解答，不无端调用工具

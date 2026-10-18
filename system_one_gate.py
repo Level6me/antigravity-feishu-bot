@@ -394,7 +394,7 @@ async def evaluate_message_gate(user_text: str, context: Optional[str] = "", tim
                     "notes": "Creating, reading, adding, or listing notes, memos, or todo items",
                     "cron": "Setting a scheduled reminder, timer, recurring alarm, or cron job",
                     "server_health": "Querying current host system stats, CPU load, memory, disk usage, or server health",
-                    "typesafe_status": "Checking, querying, or managing TypeSafe AI gateway status, API key, or settings",
+                    "typesafe_status": "Checking, querying, or managing TypeSafe / System One AI gateway status, API key, or TypeSafe settings specifically",
                     "smart_home": "Controlling, toggling, querying, or adjusting smart home appliances, lights, air conditioning, switches, sensors, or scenes via Home Assistant"
                 }
             ),

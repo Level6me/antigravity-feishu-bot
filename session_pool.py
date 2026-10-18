@@ -128,9 +128,13 @@ class PersistentSession:
             "--input-format", "stream-json",
             "--output-format", "stream-json",
             "--model", self.model,
-            "--effort", self.effort,
             "--print-timeout", "60m"
         ]
+
+        # 仅当模型名称未自带 -low/-medium/-high 等固定 effort 后缀时，才附加 --effort，杜绝 agy 参数冲突报错
+        if not any(self.model.endswith(f"-{e}") for e in ["low", "medium", "high", "xhigh", "max"]):
+            if self.effort:
+                cmd_args.extend(["--effort", self.effort])
 
         if self.conversation_id:
             cmd_args.extend(["--conversation", self.conversation_id])

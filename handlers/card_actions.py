@@ -138,6 +138,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
 
             asyncio.run_coroutine_threadsafe(notify_and_process(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"已选择：{label}"}})
             
     elif action_value.get("action") == "l3_confirm_action":
         decision = action_value.get("decision", "reject")
@@ -363,17 +364,21 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "您的记事本已被全部清空！"}})
         
     elif action_value.get("action") == "refresh_status":
-        if not is_admin(chat_id):
-            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "仅管理员可查看系统状态。"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_refresh_status():
-                from commands import get_system_status_card_data
-                cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats = get_system_status_card_data()
-                new_card = CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_refresh_status(), app_state.main_loop)
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "状态已刷新！"}})
+        if "chat_id" in action_value or action_value.get("plugin"):
+            # 允许插件专属状态刷新逻辑穿透分发至 plugin_manager
+            pass
+        else:
+            if not is_admin(chat_id):
+                return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "仅管理员可查看系统状态。"}})
+            if app_state.main_loop and app_state.main_loop.is_running():
+                async def do_refresh_status():
+                    from commands import get_system_status_card_data
+                    cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats = get_system_status_card_data()
+                    new_card = CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats)
+                    await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+                asyncio.run_coroutine_threadsafe(do_refresh_status(), app_state.main_loop)
+                
+            return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "状态已刷新！"}})
 
     elif action_value.get("action") == "refresh_quota":
         if app_state.main_loop and app_state.main_loop.is_running():

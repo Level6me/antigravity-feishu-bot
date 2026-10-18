@@ -348,7 +348,7 @@ class PassportBridgePlugin(BasePlugin):
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "🔄 刷新状态"},
                     "type": "default",
-                    "value": {"action": "refresh_status", "chat_id": chat_id}
+                    "value": {"action": "passport_refresh_status", "chat_id": chat_id}
                 }
             ]
         })
@@ -550,7 +550,7 @@ class PassportBridgePlugin(BasePlugin):
             banner = msg
 
         # 4. 刷新状态
-        elif act == "refresh_status":
+        elif act in ["passport_refresh_status", "refresh_status"]:
             gw_status = query_gateway_status(port)
             clients_cnt = gw_status.get("connected_clients", 0)
             banner = f"🔄 状态已刷新：当前网关在线，有 {clients_cnt} 台设备活跃连接。"
