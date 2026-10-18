@@ -394,7 +394,8 @@ async def evaluate_message_gate(user_text: str, context: Optional[str] = "", tim
                     "notes": "Creating, reading, adding, or listing notes, memos, or todo items",
                     "cron": "Setting a scheduled reminder, timer, recurring alarm, or cron job",
                     "server_health": "Querying current host system stats, CPU load, memory, disk usage, or server health",
-                    "typesafe_status": "Checking, querying, or managing TypeSafe AI gateway status, API key, or settings"
+                    "typesafe_status": "Checking, querying, or managing TypeSafe AI gateway status, API key, or settings",
+                    "smart_home": "Controlling, toggling, querying, or adjusting smart home appliances, lights, air conditioning, switches, sensors, or scenes via Home Assistant"
                 }
             ),
             "is_operation": Noul(
@@ -469,7 +470,7 @@ async def evaluate_message_gate(user_text: str, context: Optional[str] = "", tim
         needs_terminal = float(term_ans.noul) >= 0.45 if term_ans else False
 
         # Map semantic action_type to intent
-        if action_type in ("notes", "cron", "server_health", "typesafe_status"):
+        if action_type in ("notes", "cron", "server_health", "typesafe_status", "smart_home"):
             intent_choice = action_type
         elif action_type == "execute_task" or is_operation:
             intent_choice = "code_agent"

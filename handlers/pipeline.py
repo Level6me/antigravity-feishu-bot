@@ -421,6 +421,17 @@ async def _process_single_task(chat_id, task):
             except Exception as e:
                 log.warning(f"[TypeSafe FastPath] Failed to parse schedule intent: {e}")
 
+    elif decision.intent == "smart_home" and decision.intent_confidence >= 0.70:
+        ha_plugin = plugin_manager.plugins.get("home_assistant")
+        if ha_plugin and ha_plugin.enabled and getattr(ha_plugin, "is_jev_enabled", lambda: True)():
+            log.info(f"[TypeSafe FastPath] Direct dispatch smart_home to Home Assistant plugin for chat {chat_id}")
+            try:
+                handled = await ha_plugin.handle_nlp_intent(user_text, chat_id, message_id, session_data)
+                if handled:
+                    return
+            except Exception as e:
+                log.warning(f"[TypeSafe FastPath] Home Assistant dispatch failed: {e}")
+
     # Plugin fast paths above do not need an agent process. For model-backed
     # requests, warm the exact selected model/effort before prompt construction.
     if needs_selected_prewarm:
