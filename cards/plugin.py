@@ -40,6 +40,13 @@ FEATURED_REMOTE_PLUGINS = [
         "author": "Antigravity",
         "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
         "description": "检查并拉取 Git 云端最新代码版本，一键自动构建热重启机器人引擎"
+    },
+    {
+        "id": "home_assistant",
+        "name": "🏠 Home Assistant 全屋智能联动",
+        "author": "Antigravity",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "全屋 14 区域智能设备联动、实时状态卡片与 Jev 秒级意图调度"
     }
 ]
 

@@ -385,6 +385,10 @@ def fetch_remote_store_plugins(force_refresh: bool = False) -> list:
                     except Exception as e:
                         log.warning(f"[PluginStore] Error loading manifest for {pid}: {e}")
             if fetched:
+                fetched_ids = {p.get("id") for p in fetched}
+                for feat in DEFAULT_FEATURED_PLUGINS:
+                    if feat.get("id") not in fetched_ids:
+                        fetched.append(feat)
                 _store_cache["plugins"] = fetched
                 save_remote_store_cache(fetched)
                 log.info(f"[PluginStore] Refreshed remote store plugins: {len(fetched)} plugins found.")

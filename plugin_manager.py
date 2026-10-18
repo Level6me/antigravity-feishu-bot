@@ -102,7 +102,17 @@ class PluginManager:
             importlib.reload(_c_cron)
         except Exception:
             pass
-        to_del = [k for k in list(sys.modules.keys()) if k.startswith("bot_plugin_") or k in ["scheduler_db", "scheduler", "executors", "cards.cron"]]
+        try:
+            import cards.plugin as _c_plugin
+            importlib.reload(_c_plugin)
+        except Exception:
+            pass
+        try:
+            import plugin_store as _p_store
+            _p_store._store_cache["plugins"] = None
+        except Exception:
+            pass
+        to_del = [k for k in list(sys.modules.keys()) if k.startswith("bot_plugin_") or k in ["scheduler_db", "scheduler", "executors", "cards.cron", "ha_client", "ha_cards"]]
         for k in to_del:
             sys.modules.pop(k, None)
         self.load_all_plugins()
