@@ -318,6 +318,12 @@ DEFAULT_FEATURED_PLUGINS = [
         "name": "🔄 系统在线热更新",
         "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
         "description": "检查并拉取 Git 云端最新代码版本，一键自动构建热重启机器人引擎"
+    },
+    {
+        "id": "home_assistant",
+        "name": "🏠 Home Assistant 全屋智能控制",
+        "repo_url": "https://github.com/Level6me/feishu-bot-plugin",
+        "description": "全屋 14 区域智能设备控制、实时状态卡片交互与 Jev 策略模型秒级意图分发"
     }
 ]
 

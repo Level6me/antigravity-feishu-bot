@@ -122,5 +122,19 @@
     ],
     "enabled": true,
     "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
+  },
+  {
+    "id": "home_assistant",
+    "name": "🏠 Home Assistant 全屋智能联动",
+    "version": "1.0.0",
+    "author": "Antigravity",
+    "description": "全屋 14 区域智能设备联动、实时状态卡片与 Jev 秒级意图调度",
+    "commands": [
+      "/ha",
+      "/home",
+      "/smart"
+    ],
+    "enabled": true,
+    "repo_url": "https://github.com/Level6me/feishu-bot-plugin"
   }
 ]

@@ -60,9 +60,13 @@ class PluginManager:
                 log.info(f"[PluginManager] Plugin '{plugin_id}' is disabled in manifest.")
                 return
 
+            if p_dir not in sys.path:
+                sys.path.insert(0, p_dir)
+
             # Dynamic import
             spec = importlib.util.spec_from_file_location(f"bot_plugin_{plugin_id}", py_path)
             module = importlib.util.module_from_spec(spec)
+            module.__package__ = f"plugins.{plugin_id}"
             spec.loader.exec_module(module)
 
             # Find class inheriting from BasePlugin
