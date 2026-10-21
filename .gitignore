@@ -69,3 +69,7 @@ github_deploy_key*
 # Hardware / Embedded builds
 .pio/
 *.bin
+
+# Plugin dynamic data
+plugin_data/
+plugins/home_assistant

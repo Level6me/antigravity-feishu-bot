@@ -112,6 +112,30 @@ class PluginManager:
             _p_store._store_cache["plugins"] = None
         except Exception:
             pass
+        try:
+            import handlers.pipeline as _h_pipe
+            importlib.reload(_h_pipe)
+            import handlers.messages as _h_msg
+            _h_msg.process_chat_queue = _h_pipe.process_chat_queue
+            log.info("[PluginManager] Successfully reloaded handlers.pipeline module")
+        except Exception as _e_pipe:
+            log.warning(f"[PluginManager] Failed to reload handlers.pipeline: {_e_pipe}")
+        try:
+            import cards.memory as _c_mem
+            importlib.reload(_c_mem)
+            import commands as _h_cmd
+            importlib.reload(_h_cmd)
+            import handlers.messages as _h_msg
+            _h_msg.handle_slash_command = _h_cmd.handle_slash_command
+            log.info("[PluginManager] Successfully reloaded commands and cards.memory modules")
+        except Exception as _e_cmd:
+            log.warning(f"[PluginManager] Failed to reload commands: {_e_cmd}")
+        self.register_system_commands([
+            "/help", "/model", "/card", "/menu", "/project", "/note", "/notes",
+            "/status", "/context", "/quota", "/clear", "/stop", "/update", "/ping",
+            "/newproj_resolve", "/cron", "/schedule", "/plugin", "/plugins", "/user",
+            "/brain", "/auth", "/s1", "/sys1", "/system1"
+        ])
         to_del = [k for k in list(sys.modules.keys()) if k.startswith("bot_plugin_") or k in ["scheduler_db", "scheduler", "executors", "cards.cron", "ha_client", "ha_cards"]]
         for k in to_del:
             sys.modules.pop(k, None)

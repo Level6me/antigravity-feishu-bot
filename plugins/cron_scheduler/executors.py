@@ -231,9 +231,10 @@ async def execute_task(task: dict, send_card_func=None) -> Tuple[bool, str, int]
             except Exception as _e_sel:
                 log.warning(f"[executors] Proc net socket cleanup error: {_e_sel}")
 
-            time.sleep(0.5)
-
-            plugin_manager.reload_plugins()
+            import importlib
+            import plugin_manager as _pm_mod
+            importlib.reload(_pm_mod)
+            _pm_mod.plugin_manager.reload_plugins()
 
             new_pb = plugin_manager.plugins.get("passport_bridge")
             if new_pb and hasattr(new_pb, "server") and new_pb.server:

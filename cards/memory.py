@@ -203,8 +203,12 @@ def build_global_memory_card(memories):
         # Reverse to show newest first, limit to last 10 for card size
         recent_memories = list(reversed(memories))[:10]
         for idx, mem in enumerate(recent_memories):
-            time_str = mem.get("time", mem.get("timestamp", "未知时间"))
-            content = mem.get("memory", mem.get("content", ""))
+            if isinstance(mem, dict):
+                time_str = mem.get("time", mem.get("timestamp", "未知时间"))
+                content = mem.get("memory", mem.get("content", ""))
+            else:
+                time_str = "偏好设定"
+                content = str(mem)
             elements.append({
                 "tag": "markdown",
                 "content": f"**🕒 {time_str}**\n{content}"

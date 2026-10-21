@@ -205,6 +205,35 @@ async def process_chat_queue(chat_id):
             chat_queues.pop(chat_id, None)
 
 
+async def _finalize_fastpath_turn(message_id: str, chat_id: str, session_data: dict, is_error: bool = False, result_text: str = ""):
+    """Finalizes a FastPath turn by notifying plugins (stopping buzzer/LED thinking state),
+    marking the Feishu message as DONE, and releasing any pending state."""
+    try:
+        from plugin_manager import plugin_manager
+        if is_error:
+            session_data["last_execution_error"] = True
+            await plugin_manager.dispatch_after_ai(result_text or "❌ 操作执行失败", chat_id, session_data)
+        else:
+            session_data["last_execution_error"] = False
+            await plugin_manager.dispatch_after_ai(result_text or "已完成操作", chat_id, session_data)
+    except Exception as e:
+        log.warning(f"[Pipeline] FastPath dispatch_after_ai error: {e}")
+
+    try:
+        from database import save_session_async
+        await save_session_async(chat_id, session_data)
+    except Exception as e:
+        log.debug(f"[Pipeline] FastPath save_session_async error: {e}")
+
+    try:
+        if is_error:
+            await set_emoji(message_id, "CrossMark")
+        else:
+            await set_emoji(message_id, "DONE")
+    except Exception as e:
+        log.debug(f"[Pipeline] FastPath set_emoji error: {e}")
+
+
 async def _process_single_task(chat_id, task):
     message_id = task["message_id"]
     message_type = task["message_type"]
@@ -266,6 +295,7 @@ async def _process_single_task(chat_id, task):
     user_text, session_data = await plugin_manager.dispatch_before_ai(user_text, chat_id, session_data)
     if not user_text or not user_text.strip():
         log.info(f"Message in chat {chat_id} was intercepted and consumed by plugin hook. Skipping AI execution.")
+        await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text="已由插件前置拦截处理。")
         return
 
     # 🚀 极致性能优化：抢先下发首张打字机/思考交互卡片（秒回卡片）
@@ -372,6 +402,7 @@ async def _process_single_task(chat_id, task):
             await app_state.run_feishu_sync(loop, lambda: patch_interactive_card_sdk(bot_reply_msg_id, warn_card))
         else:
             await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, warn_card))
+        await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=True, result_text="⚠️ 安全沙箱门禁拦截危险请求")
         return
 
     # 2. 插件极速直达通道 (Fast-Path / 零模型冷启动延迟)
@@ -395,6 +426,7 @@ async def _process_single_task(chat_id, task):
             await app_state.run_feishu_sync(loop, lambda: patch_interactive_card_sdk(bot_reply_msg_id, ts_card))
         else:
             await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, ts_card))
+        await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text="已展示决策网关配置看板。")
         return
 
     elif decision.intent == "server_health" and decision.intent_confidence >= 0.70:
@@ -403,6 +435,7 @@ async def _process_single_task(chat_id, task):
             log.info(f"[TypeSafe FastPath] Direct dispatch to server_health plugin for chat {chat_id}")
             handled = await health_plugin.on_command("/health", "", chat_id, message_id, session_data)
             if handled:
+                await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text="已查询服务器健康状态。")
                 return
 
     elif decision.intent == "notes" and decision.intent_confidence >= 0.75:
@@ -414,6 +447,7 @@ async def _process_single_task(chat_id, task):
                 log.info(f"[TypeSafe FastPath] Direct dispatch note listing to notes_manager for chat {chat_id}")
                 handled = await notes_plugin.on_command("/notes", "", chat_id, message_id, session_data)
                 if handled:
+                    await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text="已为您列出备忘录。")
                     return
             else:
                 # 提取笔记文本
@@ -422,6 +456,7 @@ async def _process_single_task(chat_id, task):
                     log.info(f"[TypeSafe FastPath] Direct dispatch add note to notes_manager for chat {chat_id}")
                     handled = await notes_plugin.on_command("/note", f"add {cleaned_note}", chat_id, message_id, session_data)
                     if handled:
+                        await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text=f"已成功记录备忘：{cleaned_note}")
                         return
 
     elif decision.intent == "cron" and decision.intent_confidence >= 0.75:
@@ -433,6 +468,7 @@ async def _process_single_task(chat_id, task):
                     log.info(f"[TypeSafe FastPath] Direct dispatch schedule intent to cron_scheduler for chat {chat_id}")
                     handled = await cron_plugin.on_command("/cron", user_text, chat_id, message_id, session_data)
                     if handled:
+                        await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text="已成功添加定时计划任务。")
                         return
             except Exception as e:
                 log.warning(f"[TypeSafe FastPath] Failed to parse schedule intent: {e}")
@@ -442,8 +478,10 @@ async def _process_single_task(chat_id, task):
         if ha_plugin and ha_plugin.enabled and getattr(ha_plugin, "is_jev_enabled", lambda: True)():
             log.info(f"[TypeSafe FastPath] Direct dispatch smart_home to Home Assistant plugin for chat {chat_id}")
             try:
-                handled = await ha_plugin.handle_nlp_intent(user_text, chat_id, message_id, session_data)
+                handled = await ha_plugin.handle_nlp_intent(user_text, chat_id, message_id, session_data, bot_reply_msg_id=bot_reply_msg_id)
                 if handled:
+                    action_msg = getattr(ha_plugin, "last_action_msg", None) or "已为您完成智能家居操作。"
+                    await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text=action_msg)
                     return
             except Exception as e:
                 log.warning(f"[TypeSafe FastPath] Home Assistant dispatch failed: {e}")
@@ -627,6 +665,8 @@ async def _process_single_task(chat_id, task):
         import sys, importlib
         if "config" in sys.modules:
             importlib.reload(sys.modules["config"])
+        if "system_one_gate" in sys.modules:
+            importlib.reload(sys.modules["system_one_gate"])
         if "cards.indicators" in sys.modules:
             importlib.reload(sys.modules["cards.indicators"])
         if "cards" in sys.modules:

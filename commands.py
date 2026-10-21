@@ -130,7 +130,7 @@ from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
 from card_builder import CardBuilder
-from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT, BASE_DIR, GITEE_MIRROR_URL
+from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT, BASE_DIR, GITEE_MIRROR_URL, get_global_memory_path
 from database import list_auth_sessions
 from utils.auth import SCOPE_TIERS, get_admin_chat_id, has_scope, is_admin, set_session_role
 
