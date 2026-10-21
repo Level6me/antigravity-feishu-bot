@@ -805,12 +805,15 @@ async def execute_antigravity(
         logs_dir = os.path.abspath(os.path.join(BASE_DIR, "logs"))
         os.makedirs(logs_dir, exist_ok=True)
         log_file_path = os.path.join(logs_dir, f"agy_log_{uuid.uuid4().hex}.txt")
+        from system_one_gate import infer_effort_from_model
+        safe_model = session_data["model"]
+        safe_effort = infer_effort_from_model(safe_model, session_data.get("reasoning_effort", "medium"))
         cmd_args = [
             ANTIGRAVITY_BIN, 
             "-p", system_instruction + final_prompt, 
             "--output-format", "stream-json",
-            "--model", session_data["model"],
-            "--effort", session_data.get("reasoning_effort", "medium"),
+            "--model", safe_model,
+            "--effort", safe_effort,
             "--print-timeout", "60m",
             "--log-file", log_file_path
         ]
@@ -856,10 +859,10 @@ async def execute_antigravity(
             conv_id_to_resume = session_data.get("conversation", "") if not is_new_conversation else ""
             sess = session_pool.get_or_create(
                 chat_id,
-                session_data["model"],
+                safe_model,
                 cwd_dir,
                 conversation_id=conv_id_to_resume,
-                effort=session_data.get("reasoning_effort", "medium"),
+                effort=safe_effort,
             )
             await sess.lock.acquire()
             sess_locked = True

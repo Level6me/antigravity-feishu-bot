@@ -292,9 +292,10 @@ async def _process_single_task(chat_id, task):
             log.warning(f"[Pipeline] Failed to send early typing card for chat {chat_id}: {e}")
 
     # 先预热上一轮的档位，与 Jev 判定并行；若新档位不同，判定后再切到精确档位。
+    from system_one_gate import infer_effort_from_model
     prewarm_task = None
     prewarmed_model = session_data.get("model", "Default")
-    prewarmed_effort = session_data.get("reasoning_effort", "low")
+    prewarmed_effort = infer_effort_from_model(prewarmed_model, session_data.get("reasoning_effort", "low"))
     try:
         from session_pool import session_pool
         proj_val = session_data.get("project")
@@ -335,10 +336,14 @@ async def _process_single_task(chat_id, task):
         session_data.pop("typesafe_adaptive_tier", None)
         if "base_model" in session_data:
             session_data["model"] = session_data["base_model"]
-        session_data["reasoning_effort"] = "medium"
+        
+        # 兼容处理：若用户显式指定了带档位的模型名（如 -high / -low / -medium），提取对应 effort，避免 CLI 参数冲突报错
+        cur_m = session_data.get("model", "")
+        session_data["reasoning_effort"] = infer_effort_from_model(cur_m, session_data.get("reasoning_effort", "medium"))
 
     selected_model = session_data.get("model", "Default")
-    selected_effort = session_data.get("reasoning_effort", "medium")
+    selected_effort = infer_effort_from_model(selected_model, session_data.get("reasoning_effort", "medium"))
+    session_data["reasoning_effort"] = selected_effort
     needs_selected_prewarm = (
         selected_model != prewarmed_model or selected_effort != prewarmed_effort
     )
