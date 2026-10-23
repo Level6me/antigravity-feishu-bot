@@ -209,7 +209,8 @@ def get_system_status_card_data():
             if "behind" in status_out:
                 update_hint = " ⚠️ **(有新版本可更新)**"
                 
-            git_status = f"分支: `{branch}`\n最新: `{commit_info}`{update_hint}"
+            ver_str = get_version_string("HEAD")
+            git_status = f"版本: `{ver_str}`\n分支: `{branch}`\n最新: `{commit_info}`{update_hint}"
         except Exception:
             git_status = "无法获取 Git 状态"
             
