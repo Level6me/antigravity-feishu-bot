@@ -24,16 +24,20 @@ import time
 import json
 import requests
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Dict, Any, Tuple
 
 from plugin_base import BasePlugin
 from logger import log
 from lark_client import patch_interactive_card_sdk, send_reply_sdk, send_text_to_chat_sdk
 
-DEFAULT_API_URL = "http://127.0.0.1:8080"
-DEFAULT_API_TOKEN = "REDACTED_ROTATE_ME"
-DEFAULT_BUZZER_URL = "http://127.0.0.1:8001"
-DEFAULT_BUZZER_TOKEN = "REDACTED_ROTATE_ME"
+DEFAULT_API_URL = os.getenv("RPI_LED_API_URL", "http://127.0.0.1:8080")
+DEFAULT_API_TOKEN = os.getenv("RPI_LED_API_TOKEN", "")
+DEFAULT_BUZZER_URL = os.getenv("RPI_BUZZER_API_URL", "http://127.0.0.1:8001")
+DEFAULT_BUZZER_TOKEN = os.getenv("RPI_BUZZER_API_TOKEN", "")
+
+_GPIO_HTTP_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gpio_http")
+_GPIO_HTTP_SESSION = requests.Session()
 
 def _is_valid_url(url: str) -> bool:
     """Validate if the string is likely a valid HTTP(S) URL or IP endpoint."""
@@ -157,6 +161,15 @@ class RpiGpioApiStatusPlugin(BasePlugin):
         # 触发启动/重启时的音画联动（开机自检绿灯闪烁 + 马里奥通关城堡升旗音效）
         self._trigger_startup_sound_and_led(is_restart=is_ota)
 
+    def on_unload(self):
+        """插件热重载或卸载时安全清理后台定时器线程与事件状态"""
+        try:
+            self.stop_timer_event.set()
+            self.current_buzzer_mode = "idle"
+            cleanup_orphan_timer_threads()
+        except Exception as e:
+            log.warning(f"[Plugin:{self.plugin_id}] Error during on_unload: {e}")
+
     def _trigger_startup_sound_and_led(self, is_restart: bool = False):
         """服务启动或重启就绪时音画联动：开机自检快闪 + 马里奥通关城堡升旗号角 (Flagpole)"""
         if not getattr(self, "enabled", True):
@@ -249,26 +262,29 @@ class RpiGpioApiStatusPlugin(BasePlugin):
     # ==================== 异步调用网关 ====================
 
     def _call_api_async(self, endpoint: str, method: str = "POST", json_data: Optional[dict] = None):
-        """Asynchronous HTTP request to LED gateway without blocking AI/bot thread."""
+        """Asynchronous HTTP request to LED gateway using bounded ThreadPoolExecutor + persistent Session."""
         def _worker():
             try:
                 url = f"{self.api_url}{endpoint}"
                 headers = self._get_led_headers()
                 if method.upper() == "POST":
-                    requests.post(url, json=json_data or {}, headers=headers, timeout=2.5)
+                    _GPIO_HTTP_SESSION.post(url, json=json_data or {}, headers=headers, timeout=2.5)
                 elif method.upper() == "DELETE":
-                    requests.delete(url, headers=headers, timeout=2.5)
+                    _GPIO_HTTP_SESSION.delete(url, headers=headers, timeout=2.5)
                 elif method.upper() == "GET":
-                    requests.get(url, headers=headers, timeout=2.5)
+                    _GPIO_HTTP_SESSION.get(url, headers=headers, timeout=2.5)
             except Exception as e:
                 log.debug(f"[Plugin:{self.plugin_id}] Call LED {endpoint} error: {e}")
-        threading.Thread(target=_worker, daemon=True).start()
+        try:
+            _GPIO_HTTP_POOL.submit(_worker)
+        except Exception:
+            pass
 
     def _fetch_snapshot_sync(self) -> Optional[dict]:
         """Synchronously fetch current LED snapshot from gateway."""
         try:
             url = f"{self.api_url}/api/status"
-            res = requests.get(url, headers=self._get_led_headers(), timeout=2.0)
+            res = _GPIO_HTTP_SESSION.get(url, headers=self._get_led_headers(), timeout=2.0)
             if res.status_code == 200:
                 return res.json()
         except Exception as e:
@@ -276,7 +292,7 @@ class RpiGpioApiStatusPlugin(BasePlugin):
         return None
 
     def _call_buzzer_api_async(self, endpoint: str, json_data: Optional[dict] = None):
-        """Asynchronously call buzzer-api without blocking AI thread."""
+        """Asynchronously call buzzer-api using bounded ThreadPoolExecutor + persistent Session."""
         if not getattr(self, "buzzer_enabled", True):
             return
 
@@ -284,10 +300,13 @@ class RpiGpioApiStatusPlugin(BasePlugin):
             try:
                 url = f"{self.buzzer_api_url}{endpoint}"
                 headers = self._get_buzzer_headers()
-                requests.post(url, json=json_data or {}, headers=headers, timeout=2.5)
+                _GPIO_HTTP_SESSION.post(url, json=json_data or {}, headers=headers, timeout=2.5)
             except Exception as e:
                 log.debug(f"[Plugin:{self.plugin_id}] Call Buzzer {endpoint} error: {e}")
-        threading.Thread(target=_worker, daemon=True).start()
+        try:
+            _GPIO_HTTP_POOL.submit(_worker)
+        except Exception:
+            pass
 
     def _fetch_buzzer_status_sync(self) -> Optional[dict]:
         """Synchronously fetch current Buzzer status from gateway."""

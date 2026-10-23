@@ -19,6 +19,7 @@ scratch/
 
 # Test and scratch files
 test_*.py
+!tests/test_*.py
 add_*.py
 do_patch*.py
 fix_*.py
@@ -70,6 +71,8 @@ github_deploy_key*
 .pio/
 *.bin
 
-# Plugin dynamic data
+# Plugin dynamic data & local plugin configs
 plugin_data/
 plugins/home_assistant
+plugins/*/config.json
+backups/

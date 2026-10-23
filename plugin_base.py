@@ -64,6 +64,13 @@ class BasePlugin:
         """Hook called when feishu-bot service is shutting down / restarting."""
         pass
 
+    def on_unload(self):
+        """Hook called when plugin is being unloaded or hot-reloaded to clean up threads/sockets/timers."""
+        try:
+            self.on_service_restarting()
+        except Exception:
+            pass
+
     def send_card(self, chat_id: str, card_content: dict):
         """向指定 chat 发送交互卡片（非阻塞提交，返回 Future）。
         

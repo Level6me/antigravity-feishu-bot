@@ -31,7 +31,7 @@ from scheduler_db import (
     update_task_status,
     get_recent_logs
 )
-from scheduler import compute_next_run, parse_schedule_intent
+from scheduler import compute_next_run, parse_schedule_intent, is_valid_schedule_expr
 from executors import execute_task
 
 
@@ -288,9 +288,7 @@ class CronSchedulerPlugin(BasePlugin):
             except Exception:
                 tasks = get_all_tasks(chat_id)
             try:
-                import importlib
                 import cards.cron as _c_cron
-                importlib.reload(_c_cron)
                 card = _c_cron.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
             except Exception:
                 card = build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
@@ -336,6 +334,12 @@ class CronSchedulerPlugin(BasePlugin):
             if len(parts) >= 3:
                 name, expr, prompt = parts[0], parts[1], parts[2]
                 task_type = "delay" if re.match(r"^\d+\s*[s|m|h|d]?$", expr.lower()) else "cron"
+                if not is_valid_schedule_expr(expr, task_type):
+                    self.send_reply_text(
+                        message_id,
+                        f"❌ 调度规则 `{expr}` 格式无效！请使用秒级倒计时（如 `60s`、`10m`）或标准 5 段式 Cron 表达式（如 `0 9 * * *`）。"
+                    )
+                    return True
                 now_ts = int(time.time())
                 next_run = compute_next_run(expr, task_type, now_ts)
                 task_id = f"task_usr_{now_ts}"
@@ -392,45 +396,46 @@ class CronSchedulerPlugin(BasePlugin):
         return True
 
     async def on_card_action(self, action: str, value: dict, chat_id: str, card_message_id: str) -> bool:
-        """处理卡片交互按钮回调"""
+        """处理卡片交互按钮回调（使用 run_in_executor 避免同步 SQLite/HTTP 阻塞事件循环）"""
+        loop = asyncio.get_running_loop()
         if action == "switch_cron_tab":
             tab = value.get("tab", "user")
-            tasks = get_all_tasks(chat_id)
+            tasks = await loop.run_in_executor(None, lambda: get_all_tasks(chat_id))
             new_card = build_cron_panel_card(tasks, active_tab=tab, session_data={})
-            patch_interactive_card_sdk(card_message_id, new_card)
+            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             return True
 
         elif action == "open_cron_panel":
-            tasks = get_all_tasks(chat_id)
+            tasks = await loop.run_in_executor(None, lambda: get_all_tasks(chat_id))
             new_card = build_cron_panel_card(tasks, active_tab="user", session_data={})
-            send_card_to_chat_sdk(chat_id, new_card)
+            await loop.run_in_executor(None, lambda: send_card_to_chat_sdk(chat_id, new_card))
             return True
 
         elif action == "open_cron_create":
             guide_card = build_quick_create_guide_card()
-            send_card_to_chat_sdk(chat_id, guide_card)
+            await loop.run_in_executor(None, lambda: send_card_to_chat_sdk(chat_id, guide_card))
             return True
 
         elif action == "toggle_cron_active":
             task_id = value.get("task_id")
             is_active = bool(value.get("is_active", True))
-            update_task_status(task_id, is_active)
-            tasks = get_all_tasks(chat_id)
+            await loop.run_in_executor(None, lambda: update_task_status(task_id, is_active))
+            tasks = await loop.run_in_executor(None, lambda: get_all_tasks(chat_id))
             new_card = build_cron_panel_card(tasks, active_tab="user", session_data={})
-            patch_interactive_card_sdk(card_message_id, new_card)
+            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             return True
 
         elif action == "delete_cron_task":
             task_id = value.get("task_id")
-            delete_task(task_id)
-            tasks = get_all_tasks(chat_id)
+            await loop.run_in_executor(None, lambda: delete_task(task_id))
+            tasks = await loop.run_in_executor(None, lambda: get_all_tasks(chat_id))
             new_card = build_cron_panel_card(tasks, active_tab="user", session_data={})
-            patch_interactive_card_sdk(card_message_id, new_card)
+            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             return True
 
         elif action == "run_cron_now":
             task_id = value.get("task_id")
-            task = get_task(task_id)
+            task = await loop.run_in_executor(None, lambda: get_task(task_id))
             if task:
                 asyncio.create_task(execute_task(task, lambda c_id, c_data: send_card_to_chat_sdk(c_id, c_data)))
             return True

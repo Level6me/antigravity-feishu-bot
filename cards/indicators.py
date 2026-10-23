@@ -182,17 +182,34 @@ def is_complex_task(user_text: str) -> bool:
 
 
 def parse_task_plan(text: str) -> list[str] | None:
-    """Parse custom task plan tags emitted by the model: [TASK_PLAN] step1 | step2 ... [/TASK_PLAN]"""
+    """Parse custom task plan tags emitted by the model: [TASK_PLAN] step1 | step2 ... [/TASK_PLAN]
+    Strictly enforces the 3-4 step display rule.
+    """
     if not text:
         return None
     match = re.search(r'\[TASK_PLAN\]\s*(.*?)\s*\[/TASK_PLAN\]', text, flags=re.DOTALL | re.IGNORECASE)
+    is_closed = bool(match)
     if not match:
-        match = re.search(r'\[TASK_PLAN\]\s*(.*?)(?=\n\n|\n\#|\Z)', text, flags=re.DOTALL | re.IGNORECASE)
+        match = re.search(r'\[TASK_PLAN\]\s*([^\n\r]+)', text, flags=re.IGNORECASE)
     if match:
         raw = match.group(1).strip()
-        steps = [s.strip() for s in re.split(r'[\|\n\r]+', raw) if s.strip()]
-        if len(steps) >= 2:
-            return steps[:5]
+        if "|" in raw:
+            steps = [s.strip() for s in raw.split("|") if s.strip()]
+        elif is_closed:
+            steps = [s.strip() for s in re.split(r'[\|\n\r]+', raw) if s.strip()]
+        else:
+            return None
+        # Clean leading numbering like "1. " or "步骤1：" to normalize
+        cleaned_steps = []
+        for s in steps:
+            cs = re.sub(r'^(?:步骤\s*\d+[:：\.\、\s]*|\d+[\.\、\s]+)', '', s).strip()
+            if cs and len(cs) <= 36:
+                cleaned_steps.append(cs)
+        if len(cleaned_steps) >= 2:
+            if len(cleaned_steps) > 4:
+                # Strictly compress >4 steps into 4 macro stages (first 3 + final delivery stage)
+                cleaned_steps = cleaned_steps[:3] + [cleaned_steps[-1]]
+            return cleaned_steps
     return None
 
 
@@ -417,9 +434,19 @@ def build_tool_indicator(
     is_all_completed=False,
     process_status=None,
 ):
+    completed_steps = completed_steps or []
+    # Fallback: If model did not emit [TASK_PLAN], automatically synthesize a 3-4 step macro plan
+    # so the card ALWAYS adheres to the 3-4 step rule instead of dumping raw tool history!
+    if not planned_steps and (tool_action or completed_steps):
+        planned_steps = generate_task_plan(user_text)[:4]
+        latest_act = tool_action or (completed_steps[-1] if completed_steps else "")
+        current_step_idx = match_step_index(
+            planned_steps, current_step_idx, latest_act, len(completed_steps)
+        )
+
     if planned_steps:
         return build_planned_steps_indicator(
-            planned_steps=planned_steps,
+            planned_steps=planned_steps[:4],
             current_step_idx=current_step_idx,
             tool_action=tool_action,
             user_text=user_text,
@@ -429,8 +456,6 @@ def build_tool_indicator(
             is_all_completed=is_all_completed,
             process_status=process_status,
         )
-
-    completed_steps = completed_steps or []
     action_disp = clean_action_text(tool_action) if tool_action else ""
     
     time_hint = f"已运行 {think_seconds}s" if think_seconds > 0 else "请稍候..."

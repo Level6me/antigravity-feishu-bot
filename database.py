@@ -14,6 +14,11 @@ DB_TIMEOUT = 20.0
 def get_db():
     conn = sqlite3.connect(DB_FILE, timeout=DB_TIMEOUT)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute('PRAGMA busy_timeout=5000')
+        conn.execute('PRAGMA synchronous=NORMAL')
+    except Exception:
+        pass
     return conn
 
 def init_db():
@@ -70,6 +75,8 @@ def init_db():
             category     TEXT NOT NULL DEFAULT 'user',
             name         TEXT NOT NULL,
             task_type    TEXT NOT NULL DEFAULT 'cron',
+            action_type  TEXT NOT NULL DEFAULT 'reminder',
+            command      TEXT NOT NULL DEFAULT '',
             cron_expr    TEXT NOT NULL,
             prompt       TEXT NOT NULL,
             project_path TEXT NOT NULL DEFAULT '',
@@ -82,6 +89,15 @@ def init_db():
             run_count    INTEGER NOT NULL DEFAULT 0
         )
     ''')
+    # Migrate existing cron_tasks schema if columns action_type / command are missing
+    for col_def in (
+        "action_type TEXT NOT NULL DEFAULT 'reminder'",
+        "command TEXT NOT NULL DEFAULT ''",
+    ):
+        try:
+            cursor.execute(f"ALTER TABLE cron_tasks ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS cron_logs (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,6 +169,7 @@ from config import DEFAULT_MODEL
 async def get_session_async(chat_id):
     async with _get_session_lock(chat_id):
         async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
+            await db.execute('PRAGMA busy_timeout=5000')
             db.row_factory = aiosqlite.Row
             async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
                 row = await cursor.fetchone()
@@ -166,6 +183,7 @@ async def get_session_async(chat_id):
 async def save_session_async(chat_id, data):
     async with _get_session_lock(chat_id):
         async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
+            await db.execute('PRAGMA busy_timeout=5000')
             await db.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
             await db.commit()
 
@@ -506,14 +524,16 @@ def save_cron_task(task_data: dict):
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO cron_tasks (
-                id, chat_id, category, name, task_type, cron_expr, prompt,
+                id, chat_id, category, name, task_type, action_type, command, cron_expr, prompt,
                 project_path, is_active, created_by, created_at, updated_at,
                 last_run_at, next_run_at, run_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 category=excluded.category,
                 name=excluded.name,
                 task_type=excluded.task_type,
+                action_type=excluded.action_type,
+                command=excluded.command,
                 cron_expr=excluded.cron_expr,
                 prompt=excluded.prompt,
                 project_path=excluded.project_path,
@@ -528,6 +548,8 @@ def save_cron_task(task_data: dict):
             task_data.get('category', 'user'),
             task_data.get('name', '未命名任务'),
             task_data.get('task_type', 'cron'),
+            task_data.get('action_type', 'reminder'),
+            task_data.get('command', ''),
             task_data.get('cron_expr', '0 9 * * *'),
             task_data.get('prompt', ''),
             task_data.get('project_path', ''),

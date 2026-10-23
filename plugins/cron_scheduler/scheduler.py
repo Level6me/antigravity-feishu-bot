@@ -23,6 +23,19 @@ def parse_delay_seconds(expr: str) -> int:
     return val
 
 
+def is_valid_schedule_expr(cron_expr: str, task_type: str = 'cron') -> bool:
+    """Validate delay or standard 5-field cron expression."""
+    expr = str(cron_expr or "").strip()
+    if not expr:
+        return False
+    if task_type == 'delay':
+        return bool(re.match(r'^(\d+)\s*([s|m|h|d])?$', expr.lower()))
+    try:
+        return bool(croniter.is_valid(expr))
+    except Exception:
+        return False
+
+
 def compute_next_run(cron_expr: str, task_type: str = 'cron', base_time: float = None) -> int:
     """Compute next execution timestamp (epoch seconds)."""
     now = base_time or time.time()

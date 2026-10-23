@@ -209,10 +209,10 @@ def _get_process_tree_status(root_pid: int) -> dict:
                 "sleeping_count": 0, "deadlock_suspect": False
             }
 
-def _is_process_group_active(pid: int, min_cpu_percent: float = 0.02) -> dict:
-    """深度检测整个进程树是否有实际活动：
-    涵盖本地高 CPU 运算、活跃构建进程、云端网络/系统调用 I/O 等待，
-    并能够准确识别是否真的死锁（D状态/挂起），返回高可读性的状态描述。
+def _is_process_group_active(pid: int, min_cpu_percent: float = 0.02, vitality_state=None) -> dict:
+    """深度检测整个进程树是否有真实进展活动（HMDM Layer 4B I/O + CPU EWMA 活性模型）：
+    涵盖本地高 CPU 运算、/proc/<pid>/io 真实读写字节增量、本轮新派生的活跃子进程，
+    彻底剔除“温池常驻休眠子进程 (S态) 永远重置看门狗导致卡死 12 小时”的假活漏洞。
     """
     if not pid:
         return {"active": False, "reason": "no_pid", "workers": [], "status_desc": "无活动进程", "detail_cmd": ""}
@@ -232,10 +232,28 @@ def _is_process_group_active(pid: int, min_cpu_percent: float = 0.02) -> dict:
             cpu_usage_pct = (cpu_delta / time_delta) * 100.0
             cpu_active = (cpu_delta / time_delta) > min_cpu_percent
     else:
+        if len(_process_cpu_tracker) > 500:
+            oldest_pid = min(_process_cpu_tracker, key=lambda k: _process_cpu_tracker[k][0])
+            _process_cpu_tracker.pop(oldest_pid, None)
         _process_cpu_tracker[pid] = (now, current_cputime)
+    if len(_transcript_read_state) > 500:
+        for _old_k in list(_transcript_read_state.keys())[:100]:
+            _transcript_read_state.pop(_old_k, None)
 
     workers = status["worker_names"]
     detail_cmd = status["detail_cmd"]
+
+    # 使用 HMDM Layer 4B 采集进程树真实 I/O 增量与非基线新子进程
+    vitality_info = {}
+    if vitality_state is not None:
+        try:
+            from math_decision_model import measure_process_tree_vitality
+            vitality_info = measure_process_tree_vitality(pid, vitality_state)
+        except Exception:
+            vitality_info = {}
+
+    io_delta = vitality_info.get("io_delta", 0)
+    new_active_pids = vitality_info.get("new_active_pids", [])
 
     # 1. 本地高强度 CPU 编译/运算中
     if cpu_active:
@@ -250,29 +268,29 @@ def _is_process_group_active(pid: int, min_cpu_percent: float = 0.02) -> dict:
             "detail_cmd": detail_cmd
         }
     
-    # 2. 识别到明确的编译/构建/远程/打包子进程（即便在等待I/O或云端响应）
-    if workers:
-        worker_str = ", ".join(workers[:2])
+    # 2. 存在真实磁盘/管道 I/O 读写增量，或本轮新派生的活跃工作子进程（非温池启动前残留的休眠守护进程）
+    if io_delta > 128 or (workers and (new_active_pids or status["running_count"] > 0)):
+        worker_str = ", ".join(workers[:2]) if workers else f"IO+{io_delta}B"
         return {
             "active": True,
-            "reason": "active_worker",
+            "reason": "active_io_or_worker",
             "workers": workers,
             "status_desc": f"任务执行中 ({worker_str} 正在推进)",
             "detail_cmd": detail_cmd
         }
 
-    # 3. 存在子进程树且处于正常可中断睡眠(S)或运行(R)态（多为网络请求、云端编译轮询或管道读写）
-    if len(status["all_pids"]) > 1 and (status["running_count"] > 0 or status["sleeping_count"] > 0):
-        desc = "等待外部响应与网络 I/O 中" if status["running_count"] == 0 else "后台子任务处理中"
+    # 3. 存在处于运行态(R)或本轮新拉起且未超时的子命令进程
+    if status["running_count"] > 0 or len(new_active_pids) > 0:
+        desc = "后台子任务运行中" if status["running_count"] > 0 else "等待子命令网络/外部 I/O 响应"
         return {
             "active": True,
-            "reason": "subprocesses_alive",
+            "reason": "new_subprocesses_active",
             "workers": workers,
             "status_desc": desc,
             "detail_cmd": detail_cmd
         }
 
-    # 4. 疑似内核不可中断死锁 (D 状态)
+    # 4. 疑似内核不可中断死锁 (D 状态且无 I/O 增量)
     if status["deadlock_suspect"]:
         return {
             "active": False,
@@ -513,10 +531,14 @@ def parse_transcript_turn(transcript_path, initial_size=0):
         return ([], set(), False)
 
 def extract_final_response_from_turn_lines(turn_lines):
+    """Extract only the final conclusion response from transcript turn lines.
+    Strictly excludes intermediate pre-tool commentary/thinking turns to prevent leaking background reasoning.
+    """
     if not turn_lines:
         return None
     try:
-        valid_candidates = []
+        final_non_tool_candidates = []
+        all_valid_candidates = []
         for data in turn_lines:
             if data.get("source") == "MODEL" and data.get("type") == "PLANNER_RESPONSE":
                 content = (data.get("content") or "").strip()
@@ -530,29 +552,19 @@ def extract_final_response_from_turn_lines(turn_lines):
                     clean_text.startswith('The command exited with code') or
                     'completed with exit code' in clean_text):
                     continue
-                if not valid_candidates or valid_candidates[-1] != clean_text:
-                    valid_candidates.append(clean_text)
+                if not all_valid_candidates or all_valid_candidates[-1] != clean_text:
+                    all_valid_candidates.append(clean_text)
+                tool_calls = data.get("tool_calls")
+                if not tool_calls:
+                    if not final_non_tool_candidates or final_non_tool_candidates[-1] != clean_text:
+                        final_non_tool_candidates.append(clean_text)
 
-        if not valid_candidates:
-            return None
-
-        if len(valid_candidates) == 1:
-            return valid_candidates[0]
-
-        last_cand = valid_candidates[-1]
-        if len(last_cand) >= 80 or '\n' in last_cand:
-            prev_cand = valid_candidates[-2]
-            if len(prev_cand) > 100 and prev_cand not in last_cand:
-                return f"{prev_cand}\n\n{last_cand}"
-            return last_cand
-        else:
-            detailed_cands = [c for c in valid_candidates if len(c) > len(last_cand) and len(c) >= 60]
-            if detailed_cands:
-                best_detailed = detailed_cands[-1]
-                if last_cand not in best_detailed:
-                    return f"{best_detailed}\n\n{last_cand}"
-                return best_detailed
-            return last_cand
+        if final_non_tool_candidates:
+            # Always return ONLY the final non-tool planner response, never concatenating earlier pre-tool thoughts!
+            return final_non_tool_candidates[-1]
+        if all_valid_candidates:
+            return all_valid_candidates[-1]
+        return None
     except Exception as e:
         log.error(f"extract_final_response_from_turn_lines error: {e}")
         return None
@@ -575,8 +587,11 @@ def extract_final_chinese_response(text):
     text = re.sub(r'\[/TASK_PLAN\]', '', text, flags=re.IGNORECASE).strip()
 
     # 1. 移除被 XML 标签包裹的思考过程与思维链，如 <thought>...</thought>, <thinking>...</thinking>, <think>...</think>
+    # 以及流式分片导致缺少开标签但残留闭合标签 </thought> 之前的所有思考内容
     text = re.sub(r'<(?:thought|thinking|think)>.*?</(?:thought|thinking|think)>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'^.*?</(?:thought|thinking|think)>\s*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
     text = re.sub(r'^<(?:thought|thinking|think)>.*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = re.sub(r'```(?:thinking|thought)\b.*?```', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
     
     # 2. 移除 Task 执行日志 (例如 Task "timeout 15s bash ..." completed with exit code 0. Output: ...)
     text = re.sub(r'Task\s+"[^"]*"\s+(?:completed|finished)\s+with\s+exit\s+code\s+\d+.*?(?:Output:\s*.*?)?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
@@ -604,8 +619,14 @@ def extract_final_chinese_response(text):
         flags=re.IGNORECASE | re.DOTALL
     ).strip()
 
-    # 6. 移除包含 Thinking Process, Thought:, Plan:, Thinking: 等小标题的说明段落
-    text = re.sub(r'(?:\*\*|\#\#?\s*)?(?:Thinking Process|Thought|Thinking|\bPlan\b|Reasoning)(?:\*\*|:)?\s*.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    # 6. 移除包含 Thinking Process, Thought:, Plan:, Thinking:, 思考过程 等小标题的内部推理段落（支持跨多段英文思考清除）
+    text = re.sub(
+        r'^(?:\*\*|\#\#?\s*)?(?:Thinking Process|Internal Reasoning|Thought|Thinking)(?:\*\*|:)?\s*.*?(?=\n(?:\#|\*\*|[\u4e00-\u9fa5])|\Z)',
+        '',
+        text,
+        flags=re.DOTALL | re.IGNORECASE
+    ).strip()
+    text = re.sub(r'(?:\*\*|\#\#?\s*)?(?:Thinking Process|Thought|Thinking|\bPlan\b|Reasoning|思考过程|内部推理)(?:\*\*|:|：)?\s*.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
 
     # 7. 移除内部消息包装 (例如 [Message] timestamp=... content=...)
     text = re.sub(r'\[Message\]\s+timestamp=.*?content=.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL).strip()
@@ -854,11 +875,12 @@ async def execute_antigravity(
         custom_env["STDOUT_LINE_BUFFERED"] = "1"
         sess_locked = False
         turn_stream = None
+        pool_key = session_data.get("_isolated_pool_key") or chat_id
         try:
             from session_pool import session_pool
             conv_id_to_resume = session_data.get("conversation", "") if not is_new_conversation else ""
             sess = session_pool.get_or_create(
-                chat_id,
+                pool_key,
                 safe_model,
                 cwd_dir,
                 conversation_id=conv_id_to_resume,
@@ -869,7 +891,7 @@ async def execute_antigravity(
             if not sess.is_alive():
                 await sess.start()
             process = sess.process
-            running_processes[chat_id] = process
+            running_processes[pool_key] = process
             
             planned_steps = []
             current_plan_idx = 0
@@ -922,6 +944,7 @@ async def execute_antigravity(
                     log.warning(f"[Executor] Initial typing card send failed for chat {chat_id}; will fall back to sending final card as new message")
             
             accumulated_text = ""
+            current_turn_text = ""
             stderr_text = ""
             stream_result_response = None
             stream_error_msg = ""
@@ -976,6 +999,12 @@ async def execute_antigravity(
             BASE_QUIET_WARNING_THRESHOLD = 120
             TOOL_QUIET_WARNING_THRESHOLD = 300
 
+            # Snapshot warm-pool baseline PIDs BEFORE sending the turn prompt so pre-existing sleeping children never fool the watchdog
+            from math_decision_model import ProcessVitalityState, snapshot_process_group_pids
+            vitality_state = ProcessVitalityState(
+                baseline_pids=snapshot_process_group_pids(process.pid) if process and process.pid else set()
+            )
+
             turn_stream = await sess.send_prompt_and_stream(system_instruction + final_prompt)
 
             while True:
@@ -1013,6 +1042,7 @@ async def execute_antigravity(
                             delta = step_up.get("text_delta")
                             if delta:
                                 accumulated_text += delta
+                                current_turn_text += delta
                                 parsed_steps = CardBuilder.parse_task_plan(accumulated_text)
                                 if parsed_steps and parsed_steps != planned_steps:
                                     planned_steps = parsed_steps
@@ -1034,6 +1064,19 @@ async def execute_antigravity(
                             if not isinstance(t_params, dict):
                                 t_params = {}
                             act = format_tool_action(t_name, t_params)
+
+                            # Isolate turn buffer: any text emitted BEFORE a tool invocation is transitional pre-tool thinking/commentary,
+                            # so clear current_turn_text so only post-tool final conclusion text is delivered as final_reply!
+                            if current_turn_text:
+                                parsed_steps = CardBuilder.parse_task_plan(accumulated_text)
+                                if parsed_steps and parsed_steps != planned_steps:
+                                    planned_steps = parsed_steps
+                                current_turn_text = ""
+
+                            # Guarantee 3-4 step planned roadmap even if model omitted [TASK_PLAN]
+                            if not planned_steps:
+                                planned_steps = CardBuilder.generate_task_plan(user_text)[:4]
+                                current_plan_idx = 0
 
                             if t_state == "DONE":
                                 if act and act not in completed_tool_steps:
@@ -1131,13 +1174,16 @@ async def execute_antigravity(
                             log.warning(f"[Executor] Model turn finished with non-dict result: {res_obj}")
                         should_break = True
                         break
-                    elif event_type in ["process_exit", "read_error"]:
-                        stream_error_msg = str(ev.get("error") or "")
-                        log.warning(f"[Executor] Stream ended prematurely with {event_type}: {ev}")
+                    elif event_type in ["process_exit", "read_error", "error", "turn_error", "cancelled", "fatal"]:
+                        stream_error_msg = str(ev.get("error") or ev.get("message") or "")
+                        log.warning(f"[Executor] Stream ended with {event_type}: {ev}")
                         should_break = True
                         break
                     elif event_type == "raw_log":
-                        accumulated_text += ev.get("text", "") + "\n"
+                        # Never append non-JSON raw stdout log lines into user-facing response text!
+                        raw_line = ev.get("text", "")
+                        if raw_line:
+                            stderr_text = f"{stderr_text}\n{raw_line}".strip()[-16384:]
 
                 if should_break or stream_is_done:
                     break
@@ -1148,21 +1194,21 @@ async def execute_antigravity(
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
 
-                # 进程树状态与心跳检测（每 2 秒采集一次）
+                # 进程树状态与心跳检测（每 2 秒采集一次，基于 HMDM I/O + CPU + 非基线子进程活性）
                 if now - last_cpu_check_time >= 2.0:
                     last_cpu_check_time = now
                     worker_status = await loop.run_in_executor(
-                        None, lambda: _is_process_group_active(process.pid)
+                        None, lambda: _is_process_group_active(process.pid, vitality_state=vitality_state)
                     )
                     is_worker_active = worker_status.get("active", False)
                     active_worker_reason = worker_status.get("reason", "idle")
                     active_worker_list = worker_status.get("workers", [])
                     process_status_info = worker_status
 
-                    # 如果检测到本地编译 CPU 活跃，或存在活跃的构建/编译/云端通信子进程，
-                    # 自动刷新心跳推进时间，证明子任务正在稳步推进中，绝非假死卡死！
+                    # 仅当检测到真实 CPU/IO 脉冲或本轮新派生的活跃子进程时才刷新进度计时器
                     if is_worker_active:
                         last_progress_time = now
+                        stall_seconds = 0
 
                 # 动态计算等待与硬上限阈值
                 extend_until = app_state.extended_wait_chats.get(chat_id, 0)
@@ -1173,30 +1219,38 @@ async def execute_antigravity(
                 tool_elapsed = (now - tool_in_flight_start_time) if tool_in_flight_start_time else 0
                 has_tool_in_flight = bool(current_tool_action or stream_action) and not is_fast_tool and (is_worker_active or tool_elapsed < 180)
                 
-                # 若工具正在真实执行（例如编译、云端打包、测试运行），基准等待时长使用 TOOL_EXECUTION_TIMEOUT (默认 1 小时)
+                # 若工具正在真实执行（例如编译、云端打包、测试运行），基准等待时长使用 TOOL_EXECUTION_TIMEOUT
+                THINK_STALL_TIMEOUT = getattr(config, "THINK_STALL_TIMEOUT", 120)
                 if has_tool_in_flight or is_worker_active:
                     effective_stall_timeout = BASE_TOOL_TIMEOUT + extended_bonus
                     effective_stall_hard_timeout = max(BASE_STALL_HARD_TIMEOUT, BASE_TOOL_TIMEOUT) + extended_bonus
+                elif vitality_state.ewma_vitality < 0.005:
+                    # HMDM Layer 4B: 当 EWMA 活性指数衰减至 < 0.005 且无在途工具时，120s 极速识别假活死锁并触发自愈重试
+                    effective_stall_timeout = min(BASE_STALL_TIMEOUT, THINK_STALL_TIMEOUT) + extended_bonus
+                    effective_stall_hard_timeout = BASE_STALL_HARD_TIMEOUT + extended_bonus
                 else:
                     effective_stall_timeout = BASE_STALL_TIMEOUT + extended_bonus
                     effective_stall_hard_timeout = BASE_STALL_HARD_TIMEOUT + extended_bonus
 
-                # 假死判定逻辑
-                if think_seconds >= effective_stall_timeout and stall_seconds >= effective_stall_timeout:
+                # 假死判定逻辑：移除 think_seconds >= effective_stall_timeout 的冗余前置限制，只要静默卡死达到阈值立即自愈
+                if stall_seconds >= effective_stall_timeout:
                     # 即使 stall_seconds 达到阈值，只要进程树仍有活跃编译/网络子进程，且未突破硬上限，绝不误杀！
                     if is_worker_active and stall_seconds < effective_stall_hard_timeout:
                         worker_desc = f" [{', '.join(active_worker_list[:3])}]" if active_worker_list else ""
                         log.info(f"[Executor] No event for {stall_seconds}s but workers active ({active_worker_reason}{worker_desc}), extending wait")
                     else:
-                        log.error(f"[Executor] Process stalled for chat {chat_id} (stall={stall_seconds}s, limit={effective_stall_timeout}s, hard={effective_stall_hard_timeout}s), closing session...")
+                        log.error(f"[Executor] Process stalled for chat {chat_id} (stall={stall_seconds}s, vitality={vitality_state.ewma_vitality:.4f}, limit={effective_stall_timeout}s), closing session...")
                         await sess.close()
+                        if attempt < 2 and not completed_tool_steps:
+                            log.warning(f"[Executor] Turn stalled on attempt {attempt}; triggering automatic self-healing retry (attempt 2/2)...")
+                            return {"has_reply": False, "returncode": -9, "is_error": True, "is_quota_error": False}
                         error_card = CardBuilder.build_stall_error_card(user_text, think_seconds, stall_seconds)
                         if bot_reply_msg_id:
                             await _feishu_call(
                                 lambda: patch_interactive_card_sdk(bot_reply_msg_id, error_card),
                                 label="stall error card patch"
                             )
-                        stderr_text = f"⚠️ 任务已检测到假死并自动终止（连续 {stall_seconds // 60} 分钟没有任何输出、进程树无任何 CPU 活跃且无任何工具在运行）。"
+                        stderr_text = f"⚠️ 任务已检测到假死并自动终止（连续 {stall_seconds // 60} 分钟没有任何输出、进程树无任何 CPU/IO 活跃且无任何工具在运行）。"
                         session_data["last_execution_error"] = True
                         return {"has_reply": True, "reply_text": stderr_text, "is_error": True}
 
@@ -1212,8 +1266,9 @@ async def execute_antigravity(
                 effective_warning_threshold += extended_bonus
 
                 clean_partial = ""
-                if accumulated_text and accumulated_text.strip():
-                    raw_extracted = extract_final_chinese_response(accumulated_text.strip())
+                active_stream_buf = current_turn_text if current_turn_text.strip() else (accumulated_text if not completed_tool_steps else "")
+                if active_stream_buf and active_stream_buf.strip():
+                    raw_extracted = extract_final_chinese_response(active_stream_buf.strip())
                     if raw_extracted:
                         cp = re.sub(r'\[CHOICE_CARD\]\s*Q:.*?(?:\[/CHOICE_CARD\]|\Z)', '', raw_extracted, flags=re.DOTALL | re.IGNORECASE).strip()
                         cp = re.sub(r'\[TASK_PLAN\].*?\[/TASK_PLAN\]\s*', '', cp, flags=re.DOTALL | re.IGNORECASE).strip()
@@ -1338,13 +1393,18 @@ async def execute_antigravity(
 
             transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
 
-            # 优先从本轮直接实时接收到的流式文本 / 最终 result 中提取回答，完全避免读取到历史轮次的 transcript
+            # 优先从本轮最后一阶段（工具调用结束后）的 current_turn_text / 最终 result / transcript 中提取回答，
+            # 彻底杜绝将多步工具调用前序轮次的过渡推理（Thinking/Chatter）拼接到最终结果中！
             if typesafe_blocked_info:
                 pass
+            elif current_turn_text and current_turn_text.strip():
+                final_reply = current_turn_text.strip()
             elif stream_result_response and stream_result_response.strip():
-                final_reply = stream_result_response.strip()
+                tx_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
+                final_reply = tx_reply if (tx_reply and completed_tool_steps) else stream_result_response.strip()
             elif accumulated_text and accumulated_text.strip():
-                final_reply = accumulated_text.strip()
+                tx_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
+                final_reply = tx_reply if tx_reply else accumulated_text.strip()
             else:
                 final_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
             
@@ -1458,6 +1518,14 @@ async def execute_antigravity(
                     transcript_path=transcript_path,
                     initial_transcript_size=initial_transcript_size
                 )
+                # Record whether this turn proposed a plan or asked a follow-up question for HMDM Markov state transition
+                tail_snippet = (reply_text or "")[-250:]
+                session_data["last_turn_proposed_plan"] = bool(
+                    choice_card_data
+                    or any(kw in tail_snippet for kw in ("是否", "请告知", "确认", "方案", "选择", "？", "?"))
+                )
+            else:
+                session_data["last_turn_proposed_plan"] = False
 
             if reply_text:
                 log.info(f"[Agent text]: {reply_text[:100]}...")
@@ -1547,7 +1615,7 @@ async def execute_antigravity(
                 log.warning(f"[TypeSafe] Failed to build audit summary: {e}")
 
             # 保存最近一轮 AI 回复和用户指令摘要到 session_data，供下一轮决策网关精准判断上下文任务
-            if reply_text and not is_error:
+            if reply_text and not is_error and not session_data.get("_isolated_pool_key"):
                 clean_reply = re.sub(r'```.*?```', '[代码块]', reply_text, flags=re.DOTALL)
                 clean_reply = re.sub(r'[\r\n]+', ' ', clean_reply).strip()
                 session_data["last_ai_summary"] = clean_reply[:500]
@@ -1600,6 +1668,13 @@ async def execute_antigravity(
                 await turn_stream.aclose()
             if sess_locked and 'sess' in dir() and sess.lock.locked():
                 sess.lock.release()
+            if session_data.get("_isolated_pool_key"):
+                running_processes.pop(pool_key, None)
+                try:
+                    from session_pool import session_pool
+                    await session_pool.reset_session(pool_key)
+                except Exception:
+                    pass
             if os.path.exists(log_file_path):
                 try:
                     await _sync_conversation_id_from_log(log_file_path)

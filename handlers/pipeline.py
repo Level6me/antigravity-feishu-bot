@@ -321,39 +321,34 @@ async def _process_single_task(chat_id, task):
         except Exception as e:
             log.warning(f"[Pipeline] Failed to send early typing card for chat {chat_id}: {e}")
 
-    # 先预热上一轮的档位，与 Jev 判定并行；若新档位不同，判定后再切到精确档位。
-    from system_one_gate import infer_effort_from_model
-    prewarm_task = None
-    prewarmed_model = session_data.get("model", "Default")
-    prewarmed_effort = infer_effort_from_model(prewarmed_model, session_data.get("reasoning_effort", "low"))
-    try:
-        from session_pool import session_pool
-        proj_val = session_data.get("project")
-        cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
-        conv_id_to_resume = session_data.get("conversation", "") if not is_resumed else ""
-        prewarm_task = asyncio.create_task(
-            session_pool.prewarm(
-                chat_id, prewarmed_model, cwd_dir,
-                conversation_id=conv_id_to_resume, effort=prewarmed_effort
-            )
-        )
-    except Exception:
-        pass
-
-    # === System One (Jev) Decision Gateway & Guardrail ===
-    from system_one_gate import evaluate_message_gate
+    # === System One (Jev) + HMDM Hybrid Mathematical Decision Gateway ===
+    from system_one_gate import evaluate_message_gate, infer_effort_from_model, evaluate_adaptive_tier, resolve_adaptive_model
     from plugin_manager import plugin_manager
 
     recent_context = get_recent_conversation_context(session_data)
-    decision = await evaluate_message_gate(user_text, context=recent_context)
+
+    # Use HMDM (<0.3ms) to predict effort before prewarming so we don't spawn and immediately kill a mismatched process
+    prewarm_task = None
+    prewarmed_model = session_data.get("model", "Default")
+    prewarmed_effort = infer_effort_from_model(prewarmed_model, session_data.get("reasoning_effort", "medium"))
+    try:
+        from math_decision_model import math_decision_engine
+        local_preview = math_decision_engine.evaluate_decision(chat_id, user_text, remote_jev_data=None)
+        if getattr(config, "TYPESAFE_AUTO_MODE", True) and local_preview.effort_tier:
+            base_m = session_data.get("base_model") or session_data.get("model", "Default")
+            prewarmed_model = resolve_adaptive_model(base_m, local_preview.effort_tier)
+            prewarmed_effort = infer_effort_from_model(prewarmed_model, local_preview.effort_tier.lower())
+    except Exception:
+        pass
+
+    decision = await evaluate_message_gate(user_text, context=recent_context, chat_id=chat_id)
     was_local_fast_path = bool(decision.raw_answers.get("fast_path"))
     if not decision.is_fallback and not was_local_fast_path:
         session_data["typesafe_decision_count"] = 1
     else:
         session_data["typesafe_decision_count"] = 0
 
-    from system_one_gate import evaluate_adaptive_tier, resolve_adaptive_model
-    # 纯语义判定自适应思考层级（基于 System One 对上下文与待办任务的认知评估）
+    # 纯语义 + HMDM 连续数理模型判定自适应思考层级
     adaptive_tier = evaluate_adaptive_tier(decision)
 
     if adaptive_tier:
@@ -488,35 +483,40 @@ async def _process_single_task(chat_id, task):
 
     # Plugin fast paths above do not need an agent process. For model-backed
     # requests, warm the exact selected model/effort before prompt construction.
-    if needs_selected_prewarm:
-        try:
-            if prewarm_task:
-                await prewarm_task
-            from session_pool import session_pool
-            proj_val = session_data.get("project")
-            cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
-            conv_id_to_resume = session_data.get("conversation", "") if not is_resumed else ""
-            prewarm_task = asyncio.create_task(
-                session_pool.prewarm(
-                    chat_id, selected_model, cwd_dir,
-                    conversation_id=conv_id_to_resume, effort=selected_effort
-                )
+    try:
+        if prewarm_task:
+            await prewarm_task
+        from session_pool import session_pool
+        proj_val = session_data.get("project")
+        cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
+        conv_id_to_resume = session_data.get("conversation", "") if not is_resumed else ""
+        prewarm_task = asyncio.create_task(
+            session_pool.prewarm(
+                chat_id, selected_model, cwd_dir,
+                conversation_id=conv_id_to_resume, effort=selected_effort
             )
-        except Exception as e:
-            log.warning(f"[Pipeline] Selected-effort prewarm failed to schedule: {e}")
+        )
+    except Exception as e:
+        log.warning(f"[Pipeline] Selected-effort prewarm failed to schedule: {e}")
 
     # 3. 插件 on_before_ai 钩子已在流程入口处优先执行完毕 (跳过重复调用)
 
-    # 4. 智能意图路由与人机交互规范 (严格贯彻：区分提问与命令)
+    # 4. 智能意图路由与人机交互规范 (严格贯彻：区分提问与命令 + 正交任务规划协议)
     # 提问/咨询：纯文本高效解答，不无端调用工具
-    # 命令/操作：自主决策并调用工具执行到底，绝对严禁推诿让用户手动在终端执行！
-    # Keep the full planning protocol for genuinely complex work. Simple
-    # operations still retain the execution-capable interaction instructions
-    # below, but avoid paying the prompt/latency cost of a multi-step plan.
+    # 命令/操作（包含 Medium 与 High 档位）：统一注入 [TASK_PLAN] 3~4 步规划协议并自主调用工具执行到底！
+    is_pure_non_op_chat = (
+        decision.action_type in ("casual_greeting", "informational_inquiry")
+        and not decision.is_operation
+        and not decision.needs_terminal
+        and not getattr(decision, "needs_task_plan", False)
+    )
     is_complex_agent = (
         session_data.get("mode") == "agent"
-        or adaptive_tier == "High"
-    )
+        or adaptive_tier in ("Medium", "High")
+        or getattr(decision, "needs_task_plan", False)
+        or decision.is_operation
+        or decision.needs_terminal
+    ) and not is_pure_non_op_chat
     if not adaptive_tier:  # Preserve the legacy behavior when auto mode is off.
         is_complex_agent = is_complex_agent or (
             decision.is_operation
@@ -525,6 +525,7 @@ async def _process_single_task(chat_id, task):
             or decision.intent in ("server_health", "cron", "notes")
             or decision.complexity_score >= 0.6
         )
+    session_data["needs_task_plan"] = bool(is_complex_agent)
 
     # Inject protocol into prompt
     current_proj = session_data.get("project", "默认")
@@ -584,11 +585,11 @@ async def _process_single_task(chat_id, task):
             "2. 【受限递归与安全避让】：严禁系统全盘无限制递归搜索；严禁重启当前飞书机器人自身进程。\n"
             "3. 【计划任务调度能力】：用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
         )
-        if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot":
+        if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot" or getattr(decision, "security_level", "L0") == "L2":
             system_instruction += (
-                "[System One Co-Pilot Safety & Reflection Directive / 全链路执行与自愈规则]\n"
-                "当前系统处于 System One Level 3 (全链路保护) 模式。\n"
-                "1. 【工具调用前审慎】：核验命令参数的安全性与受控性，严禁超出项目目录的不可逆破坏操作。\n"
+                "[System One Co-Pilot & HMDM L2 Safety Directive / 全链路高风险受控执行规则]\n"
+                "当前请求触发了 System One Level 3 或 HMDM L2 累积风险门禁（不受 Low/Medium 复杂度档位豁免）。\n"
+                "1. 【工具调用前审慎】：核验命令参数的安全性与受控性，严禁超出项目目录的不可逆破坏操作（如批量删除、强制重置、停止核心服务）。\n"
                 "2. 【报错自愈反思】：命令执行失败退出码非 0 时，深入分析根因自愈修正，严禁机械重复失败命令。\n\n"
             )
         project_prompts = session_data.get("project_prompts", {})
@@ -659,24 +660,8 @@ async def _process_single_task(chat_id, task):
             memory_block = "\n".join([f"- {m}" for m in memories])
             final_prompt = f"[System Context: User preferences:]\n{memory_block}\n\n[User's Message:]\n{user_text}"
             
-    # Delegate execution to executor
-    # 动态热加载最新模块（确保所有新代码逻辑即改即生效，无需外部重启进程中断会话）
-    try:
-        import sys, importlib
-        if "config" in sys.modules:
-            importlib.reload(sys.modules["config"])
-        if "system_one_gate" in sys.modules:
-            importlib.reload(sys.modules["system_one_gate"])
-        if "cards.indicators" in sys.modules:
-            importlib.reload(sys.modules["cards.indicators"])
-        if "cards" in sys.modules:
-            importlib.reload(sys.modules["cards"])
-        if "executor" in sys.modules:
-            importlib.reload(sys.modules["executor"])
-        from executor import execute_antigravity as _current_execute_antigravity
-    except Exception as reload_err:
-        log.warning(f"[Pipeline] Dynamic module reload warning: {reload_err}")
-        _current_execute_antigravity = execute_antigravity
+    # Delegate execution to executor (without destructive per-message importlib.reload that wipes global state)
+    _current_execute_antigravity = execute_antigravity
 
     # 43200s (12小时) 总超时兜底：支持长达数小时至十几小时的超大型自动化工程任务
     # 超时时 CancelledError 会进入 execute_antigravity，其 finally 块仍会执行清理
@@ -696,7 +681,21 @@ async def _process_single_task(chat_id, task):
     except Exception as e:
         log.error(f"[Pipeline] execute_antigravity raised for chat {chat_id}: {e}")
         is_error = True
-    
+
+    # Update HMDM Markov dialog state post-turn
+    try:
+        from math_decision_model import math_decision_engine
+        math_decision_engine.update_post_turn_state(
+            chat_id,
+            had_error=bool(is_error),
+            proposed_plan_or_question=bool(session_data.get("last_turn_proposed_plan", False)),
+            tier_used=(adaptive_tier if adaptive_tier in ("Low", "Medium", "High") else "Medium"),
+            needs_plan_used=bool(is_complex_agent),
+            complexity_used=float(decision.complexity_score),
+        )
+    except Exception as e:
+        log.debug(f"[HMDM] Post-turn state update skipped: {e}")
+
     if is_error:
         await set_emoji(message_id, "CrossMark")
     else:

@@ -270,6 +270,27 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 
     # If user is responding to an interactive prompt (pending_command) and didn't type a registered slash command, handle it first!
     if not is_registered_slash and pending_command:
+        if pending_command in (PendingCommand.CUSTOM_WORKSPACE_ROOT.value, PendingCommand.CUSTOM_PROJECT_PATH.value):
+            if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+                session_data.pop("pending_command", None)
+                await save_session_async(chat_id, session_data)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_reply_sdk(message_id, "🔒 权限不足：当前会话无工作区目录切换权限 (`SCOPE_PROJECT`)。")
+                )
+                return True, user_text
+            target_path = user_text.strip()
+            if target_path.startswith("~"):
+                target_path = os.path.expanduser(target_path)
+            target_path = os.path.abspath(target_path)
+            forbidden_sys_dirs = ("/etc", "/root", "/proc", "/sys", "/boot", "/dev", "/var/log")
+            if not is_admin(chat_id) and any(target_path == d or target_path.startswith(d + "/") for d in forbidden_sys_dirs):
+                session_data.pop("pending_command", None)
+                await save_session_async(chat_id, session_data)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_reply_sdk(message_id, f"🔒 安全拦截：禁止非管理员绑定系统敏感目录 `{target_path}`。")
+                )
+                return True, user_text
+
         if pending_command == PendingCommand.CUSTOM_WORKSPACE_ROOT.value:
             target_path = user_text.strip()
             if target_path.startswith("~"):
@@ -542,6 +563,13 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 chat_workers[chat_id].cancel()
                 chat_workers.pop(chat_id, None)
 
+            # Reset warm session in session_pool so no corrupted stdout/lock state remains
+            try:
+                from session_pool import session_pool
+                await session_pool.reset_session(chat_id)
+            except Exception as e:
+                log.debug(f"[commands] session_pool.reset_session on /stop: {e}")
+
             # 触发所有插件的 on_task_stop 钩子，立即终止蜂鸣器循环音与报警
             try:
                 from plugin_manager import plugin_manager
@@ -789,12 +817,23 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 
 
     elif user_text.startswith("/project"):
+        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "🔒 权限不足：当前会话未授予工作区目录管理权限 (`SCOPE_PROJECT`)。")
+            )
+            return True, user_text
         args = user_text[len("/project"):].strip()
         if args:
             target_path = args
             if target_path.startswith("~"):
                 target_path = os.path.expanduser(target_path)
             target_path = os.path.abspath(target_path)
+            forbidden_sys_dirs = ("/etc", "/root", "/proc", "/sys", "/boot", "/dev", "/var/log")
+            if not is_admin(chat_id) and any(target_path == d or target_path.startswith(d + "/") for d in forbidden_sys_dirs):
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: send_reply_sdk(message_id, f"🔒 安全拦截：禁止非管理员绑定系统敏感目录 `{target_path}`。")
+                )
+                return True, user_text
             
             if not os.path.exists(target_path):
                 reply_text = f"❌ **路径设定失败！**\n\n您输入的物理路径在系统上不存在，请核对拼写：\n`{target_path}`"
@@ -888,6 +927,11 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         return True, user_text
 
     elif first_word in ["/s1", "/sys1", "/system1"]:
+        if not is_admin(chat_id):
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "🔒 该命令仅管理员可用。")
+            )
+            return True, user_text
         from system_one_gate import get_typesafe_config_state
         cfg = get_typesafe_config_state()
         ts_card = CardBuilder.build_typesafe_config_card(

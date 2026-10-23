@@ -22,9 +22,12 @@ from config import (
     BASE_DIR,
     DANGEROUSLY_SKIP_PERMISSIONS,
 )
-from utils.auth import is_admin, has_scope, SCOPE_PROJECT
+from utils.auth import is_admin, has_scope, SCOPE_PROJECT, SCOPE_SHELL
+from math_decision_model import snapshot_process_group_pids
 from logger import log
 import app_state
+
+_TERMINAL_TURN_EVENTS = {"result", "error", "turn_error", "cancelled", "fatal", "process_exit", "read_error"}
 
 class TurnEventStream:
     """A thread-safe, non-cancellable stream of parsed JSON events for a single dialogue turn.
@@ -50,7 +53,7 @@ class TurnEventStream:
             else:
                 event = await self._queue.get()
 
-            if event.get("event") in ["result", "process_exit", "read_error"]:
+            if event.get("event") in _TERMINAL_TURN_EVENTS or event.get("type") in ("result", "error", "turn_error", "cancelled", "fatal"):
                 self.is_done = True
             return event
         except asyncio.TimeoutError:
@@ -63,7 +66,7 @@ class TurnEventStream:
             try:
                 ev = self._queue.get_nowait()
                 events.append(ev)
-                if ev.get("event") in ["result", "process_exit", "read_error"]:
+                if ev.get("event") in _TERMINAL_TURN_EVENTS or ev.get("type") in ("result", "error", "turn_error", "cancelled", "fatal"):
                     self.is_done = True
                     break
             except asyncio.QueueEmpty:
@@ -217,13 +220,13 @@ class PersistentSession:
                     except Exception:
                         event_data = {"event": "raw_log", "text": line}
 
-                    event_type = event_data.get("event")
+                    event_type = event_data.get("event") or event_data.get("type")
                     if event_type == "init":
                         self.conversation_id = event_data.get("conversation_id", "")
 
                     await queue.put(event_data)
 
-                    if event_type == "result":
+                    if event_type in ("result", "error", "turn_error", "cancelled", "fatal"):
                         return
         except asyncio.CancelledError:
             pass
@@ -264,21 +267,8 @@ class PersistentSession:
             app_state.running_processes.pop(self.chat_id, None)
         if proc:
             try:
-                # Collect descendant pids to prevent orphaned commands (e.g. brew, shell tasks) from lingering
-                descendant_pids = []
-                try:
-                    out = subprocess.check_output(["pgrep", "-P", str(proc.pid)], text=True).strip()
-                    if out:
-                        for p in out.split():
-                            try:
-                                descendant_pids.append(int(p))
-                                sub_out = subprocess.check_output(["pgrep", "-P", p], text=True).strip()
-                                if sub_out:
-                                    descendant_pids.extend([int(sp) for sp in sub_out.split()])
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                # Non-blocking pure /proc descendant PID discovery (never blocks asyncio event loop with subprocess.check_output)
+                descendant_pids = [p for p in snapshot_process_group_pids(proc.pid) if p != proc.pid]
 
                 if proc.returncode is None:
                     try:
@@ -290,7 +280,7 @@ class PersistentSession:
                             os.kill(d_pid, signal.SIGTERM)
                         except Exception:
                             pass
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.15)
                 if proc.returncode is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -316,7 +306,10 @@ class SessionPool:
         conv_mismatch = bool(conversation_id and sess and sess.conversation_id and sess.conversation_id != conversation_id)
 
         normalized_effort = effort if effort in ("low", "medium", "high") else "medium"
-        sandbox_enabled = bool(config.TYPESAFE_ENABLED and config.TYPESAFE_TIER == "copilot")
+        # Enforce CLI sandbox both when Co-Pilot mode is active AND when a non-admin user lacks SCOPE_SHELL
+        real_chat_id = str(chat_id).split("cron_")[-1] if str(chat_id).startswith("cron_") else str(chat_id)
+        user_lacks_shell = not is_admin(real_chat_id) and not has_scope(real_chat_id, SCOPE_SHELL)
+        sandbox_enabled = bool((config.TYPESAFE_ENABLED and config.TYPESAFE_TIER == "copilot") or user_lacks_shell)
         # --model, --effort and sandbox policy are fixed when agy starts.
         # Reuse only a process that exactly matches the current request.
         model_mismatch = bool(sess and (

@@ -629,3 +629,8 @@ class PassportBridgePlugin(BasePlugin):
         new_card = self.build_control_card(chat_id, banner=banner)
         patch_interactive_card_sdk(card_message_id, new_card)
         return True
+
+    def on_unload(self):
+        """插件热重载或卸载时清理内存状态"""
+        if hasattr(self, "pending_speech_chats"):
+            self.pending_speech_chats.clear()

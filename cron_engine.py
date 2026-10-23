@@ -37,6 +37,19 @@ def parse_delay_seconds(expr: str) -> int:
     return val
 
 
+def is_valid_schedule_expr(cron_expr: str, task_type: str = 'cron') -> bool:
+    """Validate delay or standard 5-field cron expression."""
+    expr = str(cron_expr or "").strip()
+    if not expr:
+        return False
+    if task_type == 'delay':
+        return bool(re.match(r'^(\d+)\s*([s|m|h|d])?$', expr.lower()))
+    try:
+        return bool(croniter.is_valid(expr))
+    except Exception:
+        return False
+
+
 def compute_next_run(cron_expr: str, task_type: str = 'cron', base_time: float = None) -> int:
     """Compute next execution timestamp (epoch seconds)."""
     now = base_time or time.time()
@@ -154,8 +167,11 @@ class CronEngine:
                     None, lambda: send_card_to_chat_sdk(chat_id, start_card)
                 )
 
-                # 2. Prepare Session Context
-                session_data = await get_session_async(chat_id)
+                # 2. Prepare Isolated Session Context (prevent cron task from colliding with or polluting live user PersistentSession)
+                base_session_data = await get_session_async(chat_id)
+                session_data = dict(base_session_data)
+                session_data["conversation"] = ""
+                session_data["_isolated_pool_key"] = f"cron_{task_id}"
                 if task.get('project_path'):
                     session_data['project'] = task['project_path']
                 
@@ -172,7 +188,7 @@ class CronEngine:
                     message_id="",
                     bot_reply_msg_id=None,
                     session_data=session_data,
-                    is_new_conversation=False,
+                    is_new_conversation=True,
                     system_instruction="你是由 Cron 引擎调度的自动化定时任务。请按照用户预设的 Prompt 准确执行，并生成详尽专业的结构化分析报告。",
                     final_prompt=prompt,
                     downloaded_file_name=None,

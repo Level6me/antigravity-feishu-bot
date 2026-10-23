@@ -31,6 +31,12 @@ class PluginManager:
     def load_all_plugins(self):
         """Discover and load all valid plugins from plugins/ directory."""
         self.ensure_plugins_dir()
+        for old_id, old_inst in list(self.plugins.items()):
+            try:
+                if hasattr(old_inst, "on_unload"):
+                    old_inst.on_unload()
+            except Exception as e:
+                log.debug(f"[PluginManager] on_unload warning for {old_id}: {e}")
         self.plugins.clear()
         self.command_map.clear()
 

@@ -234,6 +234,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已确认继续等待，后台保持执行并已延长 15 分钟等待。"}})
         
     elif action_value.get("action") == "browse_dir":
+        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无目录浏览权限"}})
         target_path = action_value.get("path")
         
         if app_state.main_loop and app_state.main_loop.is_running():
@@ -249,7 +251,13 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在载入目录..."}})
         
     elif action_value.get("action") == "select_project":
+        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无工作区切换权限"}})
         target_path = action_value.get("path")
+        if target_path and not is_admin(chat_id):
+            abs_tp = os.path.abspath(target_path)
+            if any(abs_tp == d or abs_tp.startswith(d + "/") for d in ("/etc", "/root", "/proc", "/sys", "/boot", "/dev")):
+                return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 禁止绑定系统敏感目录"}})
         
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_select_project():
@@ -421,6 +429,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功擦除该偏好记录！"}})
 
     elif action_value.get("action") == "create_project_prompt":
+        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无创建项目权限"}})
         parent_path = action_value.get("parent_path")
         
         if app_state.main_loop and app_state.main_loop.is_running():
@@ -442,6 +452,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "请输入项目名或Git仓库地址！"}})
 
     elif action_value.get("action") == "prompt_custom_workspace_root":
+        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无工作区根目录设置权限"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_prompt_ws_root():
                 session_data = await get_session_async(chat_id)
@@ -460,6 +472,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复公共项目根目录绝对路径！"}})
 
     elif action_value.get("action") == "prompt_custom_project_path":
+        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无开发工作区设置权限"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_prompt_custom():
                 session_data = await get_session_async(chat_id)
@@ -805,6 +819,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "自适应思考模式状态已更新！"}})
 
     elif action_value.get("action") == "open_typesafe_tier_menu":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_open_tier_menu():
                 from system_one_gate import get_typesafe_config_state
@@ -817,6 +833,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已载入介入深度级别说明与设置面板"}})
 
     elif action_value.get("action") == "open_typesafe_main_card":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_open_main_card():
                 from system_one_gate import get_typesafe_config_state
@@ -887,6 +905,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"System One 模型已切换为 {target_model}"}})
 
     elif action_value.get("action") == "test_typesafe_ping":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_ts_ping():
                 from system_one_gate import test_typesafe_connectivity, get_typesafe_config_state

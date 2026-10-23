@@ -217,6 +217,10 @@ class _RateLimiter:
         now = _now()
         window = self._minute_window(now)
         with self._lock:
+            if len(self._minute) > 500:
+                stale = [k for k, v in self._minute.items() if v[0] < window - 1]
+                for k in stale:
+                    self._minute.pop(k, None)
             entry = self._minute.get(chat_id)
             if not entry or entry[0] != window:
                 self._minute[chat_id] = [window, 1]
@@ -230,6 +234,10 @@ class _RateLimiter:
         now = _now()
         day = self._day_key(now)
         with self._lock:
+            if len(self._daily) > 500:
+                stale = [k for k, v in self._daily.items() if v[0] != day]
+                for k in stale:
+                    self._daily.pop(k, None)
             entry = self._daily.get(chat_id)
             if not entry or entry[0] != day:
                 self._daily[chat_id] = [day, 1]

@@ -2,12 +2,25 @@ import re
 import os
 import json
 import time
+import asyncio
 import tempfile
 import subprocess
 import lark_oapi as lark
 from logger import log
 from config import get_brain_dir
 from lark_client import upload_file_sdk, reply_file_sdk, reply_voice_sdk, send_file_to_chat_sdk, send_voice_to_chat_sdk
+
+MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB Feishu image limit
+MAX_FILE_UPLOAD_BYTES = 30 * 1024 * 1024    # 30 MB Feishu file limit
+
+
+async def extract_and_upload_resources_async(text, message_id, api_client, additional_safe_dirs=None, chat_id=None):
+    """Non-blocking async wrapper for extract_and_upload_resources."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: extract_and_upload_resources(text, message_id, api_client, additional_safe_dirs, chat_id)
+    )
 
 
 def extract_and_upload_resources(text, message_id, api_client, additional_safe_dirs=None, chat_id=None):
@@ -52,6 +65,14 @@ def extract_and_upload_resources(text, message_id, api_client, additional_safe_d
             abs_path = os.path.abspath(path)
             if abs_path == home_dir:
                 return False
+            base_name = os.path.basename(abs_path).lower()
+            # Block sensitive credential, key, database, and system files from ever being auto-uploaded
+            if base_name in (".env", "id_rsa", "id_ed25519", "authorized_keys", "shadow", "passwd", "antigravity_bot.db"):
+                return False
+            if any(seg in abs_path for seg in ("/.ssh/", "/.aws/", "/.gnupg/", "/etc/", "/proc/", "/sys/")):
+                return False
+            if base_name.endswith((".pem", ".key", ".sqlite", ".sqlite3")):
+                return False
             for prefix in safe_prefixes:
                 p = os.path.abspath(prefix)
                 # 目录边界判断：/safe 不能通过 /safe_evil 的校验
@@ -88,6 +109,9 @@ def extract_and_upload_resources(text, message_id, api_client, additional_safe_d
             continue
         if os.path.exists(img_path):
             try:
+                if os.path.getsize(img_path) > MAX_IMAGE_UPLOAD_BYTES:
+                    log.warning(f"[Multimodal] Skipping oversized image (>10MB): {img_path}")
+                    continue
                 with open(img_path, "rb") as f:
                     req = lark.api.im.v1.CreateImageRequest.builder().request_body(
                         lark.api.im.v1.CreateImageRequestBody.builder().image_type("message").image(f).build()
@@ -174,6 +198,9 @@ def extract_and_upload_resources(text, message_id, api_client, additional_safe_d
 
         if os.path.exists(abs_file):
             try:
+                if os.path.getsize(abs_file) > MAX_FILE_UPLOAD_BYTES:
+                    log.warning(f"[Multimodal] Skipping oversized file (>30MB): {abs_file}")
+                    continue
                 uploaded_files.add(file_path)
                 duration_ms = None
                 is_opus_voice = (ext_lower == ".opus")

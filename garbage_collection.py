@@ -10,11 +10,24 @@ BACKUP_KEEP = 7
 
 
 def backup_database_if_due():
-    """Daily SQLite backup via VACUUM INTO; keeps the newest BACKUP_KEEP copies."""
-    from database import DB_FILE
+    """Daily SQLite backup via VACUUM INTO + cron_logs retention pruning."""
+    from database import DB_FILE, DB_TIMEOUT
 
     if not os.path.exists(DB_FILE):
         return
+
+    # Prune cron_logs older than 30 days to prevent unbounded SQLite growth
+    try:
+        cutoff_ts = int(time.time()) - 30 * 86400
+        conn = sqlite3.connect(DB_FILE, timeout=DB_TIMEOUT)
+        try:
+            conn.execute("DELETE FROM cron_logs WHERE executed_at > 0 AND executed_at < ?", (cutoff_ts,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.debug(f"[GC] cron_logs pruning skipped: {e}")
+
     today = time.strftime("%Y%m%d", time.localtime())
     os.makedirs(BACKUP_DIR, exist_ok=True)
     target = os.path.join(BACKUP_DIR, f"antigravity_bot_{today}.db")
@@ -22,10 +35,9 @@ def backup_database_if_due():
         return  # 当天已备份
 
     try:
-        from database import DB_TIMEOUT
         conn = sqlite3.connect(DB_FILE, timeout=DB_TIMEOUT)
         try:
-            conn.execute(f"VACUUM INTO '{target}'")
+            conn.execute("VACUUM INTO ?", (target,))
         finally:
             conn.close()
         log.info(f"[GC] Database backup created: {target}")
@@ -58,8 +70,8 @@ async def garbage_collector(interval_seconds=3600, max_age_seconds=86400):
             now = time.time()
             deleted_count = 0
 
-            # 每日数据库备份
-            backup_database_if_due()
+            # 每日数据库备份与过期日志清理（放入后台线程池执行，避免 VACUUM 阻塞主 asyncio 事件循环）
+            await asyncio.to_thread(backup_database_if_due)
             
             # Clean structured directories
             for d in directories_to_clean:

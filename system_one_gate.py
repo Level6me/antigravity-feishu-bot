@@ -43,6 +43,11 @@ class TypeSafeDecision:
     is_fallback: bool = False
     fallback_reason: Optional[str] = None
     raw_answers: Dict[str, Any] = field(default_factory=dict)
+    needs_task_plan: bool = False
+    security_level: str = "L0"
+    local_entropy: float = 0.0
+    math_tier: str = ""
+    math_reason: str = ""
 
     def __post_init__(self):
         if not self.action_type:
@@ -55,6 +60,8 @@ class TypeSafeDecision:
                 self.action_type = self.intent
             else:
                 self.action_type = "informational_inquiry"
+        if not self.needs_task_plan and (self.is_operation or self.needs_terminal or self.action_type == "execute_task"):
+            self.needs_task_plan = True
 
 
 @dataclass
@@ -347,15 +354,32 @@ def is_instant_chat_or_greeting(user_text: str, context: Optional[str] = "") -> 
 
 
 
-async def evaluate_message_gate(user_text: str, context: Optional[str] = "", timeout_seconds: float = 4.0) -> TypeSafeDecision:
-    """Evaluate user message with TypeSafe System One (Jev model).
+async def evaluate_message_gate(
+    user_text: str,
+    context: Optional[str] = "",
+    timeout_seconds: float = 4.0,
+    chat_id: str = "default",
+) -> TypeSafeDecision:
+    """Evaluate user message with Hybrid Mathematical Decision Model (HMDM) + TypeSafe System One (Jev).
     
-    Pure semantic evaluation with zero-latency local fast-path:
-    1. First checks for trivial casual greetings/identity/thanks in <0.01ms (bypassing 2.1s remote HTTP call).
-    2. For substantive messages, combines conversation context, pending task proposals, and user message into state,
-       and relies entirely on Jev cognitive model to evaluate intent, operation nature,
-       terminal requirements, and execution complexity without hardcoded keyword whitelists.
+    1. Zero-latency local fast-path for trivial casual greetings/identity/thanks (<0.01ms).
+    2. Layer 1 & 2 HMDM local feature extraction, Markov state transition, and Shannon entropy gating (<0.5ms).
+    3. For high-entropy or plugin-specific requests, queries remote Jev cognitive model and performs Bayesian pooling.
     """
+    start_hmdm_t = time.perf_counter()
+
+    # Sync Markov dialog state if context indicates a pending task proposal
+    try:
+        from math_decision_model import math_decision_engine
+        st = math_decision_engine.get_session_state(chat_id)
+        if context:
+            c_low = context.lower()
+            if any(kw in c_low for kw in ("pending task", "proposal", "待确认", "执行方案", "是否执行", "是否立即", "请告知")):
+                if st.dialog_state == "idle":
+                    st.dialog_state = "proposal_pending"
+    except Exception as e:
+        log.debug(f"[HMDM] State sync skipped: {e}")
+
     # 0. 毫秒级极速零网络开销旁路（针对纯寒暄/身份咨询/日常致谢/闲聊）
     instant_decision = is_instant_chat_or_greeting(user_text, context=context)
     if instant_decision is not None:
@@ -365,12 +389,62 @@ async def evaluate_message_gate(user_text: str, context: Optional[str] = "", tim
         )
         return instant_decision
 
+    # 0.5 HMDM Layer 1 & 2 Entropy-Gated Local Mathematical Decision (<0.5ms)
+    try:
+        from math_decision_model import math_decision_engine
+        fv = math_decision_engine.extract_features(user_text)
+        st = math_decision_engine.get_session_state(chat_id)
+        local_post, norm_entropy = math_decision_engine.compute_local_posterior(fv, st)
+
+        lower_u = user_text.lower()
+        might_be_plugin = any(
+            kw in lower_u
+            for kw in (
+                "备忘", "笔记", "待办", "提醒", "定时", "闹钟", "系统负载", "服务器状态",
+                "内存占用", "磁盘", "typesafe", "system one", "智能家居", "开灯", "关灯", "空调",
+            )
+        )
+        if not might_be_plugin and not math_decision_engine.should_call_remote_jev(fv, local_post, norm_entropy):
+            orth = math_decision_engine.evaluate_decision(chat_id, user_text, remote_jev_data=None)
+            elapsed_hmdm = (time.perf_counter() - start_hmdm_t) * 1000.0
+            is_op = not orth.is_pure_qa and (orth.needs_task_plan or orth.effort_tier in ("Medium", "High"))
+            act_type = "casual_greeting" if orth.is_pure_qa else ("execute_task" if is_op else "informational_inquiry")
+            intent_str = "general_chat" if orth.is_pure_qa else "code_agent"
+            log.info(
+                f"[HMDM FastPath] Entropy-gated local math decision in {elapsed_hmdm:.2f}ms: "
+                f"{orth.reason_summary}"
+            )
+            return TypeSafeDecision(
+                is_dangerous=(orth.security_level == "L3"),
+                danger_prob=min(0.99, orth.risk_score),
+                intent=intent_str,
+                intent_confidence=round(max(orth.posterior_probs.values()), 3),
+                intent_probabilities=dict(orth.posterior_probs),
+                complexity_score=orth.complexity_index,
+                complexity_confidence=round(1.0 - orth.local_entropy * 0.4, 3),
+                needs_terminal=is_op,
+                is_operation=is_op,
+                action_type=act_type,
+                latency_ms=round(elapsed_hmdm, 2),
+                is_fallback=False,
+                raw_answers={"fast_path": "hmdm_local", "orth_reason": orth.reason_summary},
+                needs_task_plan=orth.needs_task_plan,
+                security_level=orth.security_level,
+                local_entropy=orth.local_entropy,
+                math_tier=orth.effort_tier,
+                math_reason=orth.reason_summary,
+            )
+    except Exception as e:
+        log.warning(f"[HMDM] Local evaluation warning, proceeding to remote JEV: {e}")
+
     if not config.TYPESAFE_ENABLED:
-        return _fallback_heuristic_eval(user_text, "TypeSafe disabled in config", context=context)
+        fb = _fallback_heuristic_eval(user_text, "TypeSafe disabled in config", context=context)
+        return _enrich_with_hmdm(chat_id, user_text, fb)
 
     client = get_typesafe_client()
     if not client:
-        return _fallback_heuristic_eval(user_text, "No TYPESAFE_API_KEY configured", context=context)
+        fb = _fallback_heuristic_eval(user_text, "No TYPESAFE_API_KEY configured", context=context)
+        return _enrich_with_hmdm(chat_id, user_text, fb)
 
     start_t = time.perf_counter()
     try:
@@ -484,7 +558,7 @@ async def evaluate_message_gate(user_text: str, context: Optional[str] = "", tim
             f"act={action_type}, op={is_operation}, comp={complexity_score:.2f}, term={needs_terminal}"
         )
 
-        return TypeSafeDecision(
+        dec = TypeSafeDecision(
             is_dangerous=is_dangerous,
             danger_prob=danger_prob,
             intent=intent_choice,
@@ -499,15 +573,58 @@ async def evaluate_message_gate(user_text: str, context: Optional[str] = "", tim
             is_fallback=False,
             raw_answers=answers
         )
+        return _enrich_with_hmdm(chat_id, user_text, dec)
 
     except asyncio.TimeoutError:
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         log.warning(f"[TypeSafe] Evaluation timed out after {elapsed_ms:.1f}ms, using fallback heuristic.")
-        return _fallback_heuristic_eval(user_text, f"Timeout after {elapsed_ms:.1f}ms", context=context)
+        fb = _fallback_heuristic_eval(user_text, f"Timeout after {elapsed_ms:.1f}ms", context=context)
+        return _enrich_with_hmdm(chat_id, user_text, fb)
     except Exception as e:
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         log.warning(f"[TypeSafe] Evaluation failed ({e}), using fallback heuristic.")
-        return _fallback_heuristic_eval(user_text, f"API Error: {e}", context=context)
+        fb = _fallback_heuristic_eval(user_text, f"API Error: {e}", context=context)
+        return _enrich_with_hmdm(chat_id, user_text, fb)
+
+
+def _enrich_with_hmdm(chat_id: str, user_text: str, dec: TypeSafeDecision) -> TypeSafeDecision:
+    """Fuse remote Jev or fallback TypeSafeDecision with HMDM Layer 3 & 4 Bayesian pooling."""
+    try:
+        from math_decision_model import math_decision_engine
+        remote_payload = {
+            "pillar_1_router": {
+                "is_conversational": (dec.action_type == "casual_greeting" and not dec.is_operation),
+                "needs_terminal": dec.needs_terminal,
+                "intent_confidence": dec.intent_confidence,
+            },
+            "pillar_2_complexity": {
+                "complexity_score": dec.complexity_score,
+                "confidence": dec.complexity_confidence,
+            },
+            "pillar_3_security": {
+                "is_high_risk": dec.is_dangerous,
+            },
+        }
+        orth = math_decision_engine.evaluate_decision(
+            chat_id, user_text, remote_jev_data=remote_payload
+        )
+        dec.needs_task_plan = orth.needs_task_plan or dec.is_operation or dec.needs_terminal
+        dec.security_level = orth.security_level
+        dec.local_entropy = orth.local_entropy
+        dec.math_tier = orth.effort_tier
+        dec.math_reason = orth.reason_summary
+        # Protect short confirmations of pending tasks from being downgraded to casual chat
+        if orth.needs_task_plan and dec.action_type == "casual_greeting":
+            dec.action_type = "execute_task"
+            dec.intent = "code_agent"
+            dec.is_operation = True
+            dec.complexity_score = max(dec.complexity_score, orth.complexity_index)
+        if orth.security_level == "L3":
+            dec.is_dangerous = True
+            dec.danger_prob = max(dec.danger_prob, orth.risk_score)
+    except Exception as e:
+        log.debug(f"[HMDM] Enrich skipped: {e}")
+    return dec
 
 
 async def test_typesafe_connectivity() -> Dict[str, Any]:
@@ -893,8 +1010,14 @@ def evaluate_adaptive_tier(decision: TypeSafeDecision) -> str:
 
     # Only explicit non-operational casual conversation is Low. Plugin intents
     # are tasks; if they reach the model path, keep them at least Medium.
-    if decision.action_type == "casual_greeting" and not decision.is_operation and not decision.needs_terminal:
+    if decision.action_type == "casual_greeting" and not decision.is_operation and not decision.needs_terminal and not decision.needs_task_plan:
         return "Low"
+
+    # Use calibrated HMDM continuous complexity & Bayesian pooling tier when available
+    if getattr(decision, "math_tier", "") in ("Low", "Medium", "High"):
+        if decision.math_tier == "Low" and (decision.is_operation or decision.needs_terminal or decision.needs_task_plan):
+            return "Medium"
+        return decision.math_tier
 
     # Low-confidence routing is also uncertain: avoid a costly High by default,
     # but do not classify it as simple chat.

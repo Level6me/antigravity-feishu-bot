@@ -12,6 +12,9 @@ from config import TTS_VOICE, ENABLE_VOICE_REPLY
 from logger import log
 from lark_client import upload_file_sdk, reply_voice_sdk, send_voice_to_chat_sdk
 
+# Serialize TTS + ffmpeg conversion to prevent CPU saturation on Raspberry Pi / edge nodes
+_TTS_SEMAPHORE = asyncio.Semaphore(1)
+
 
 def clean_text_for_speech(text: str, max_chars: int = 180) -> str:
     """Prepares markdown/raw LLM text for natural Chinese TTS speech."""
@@ -92,54 +95,55 @@ async def text_to_opus(text: str, voice: Optional[str] = None) -> Tuple[Optional
     opus_path = os.path.join(temp_dir, f"tts_{file_id}.opus")
 
     try:
-        # Step 1: Synthesize to MP3 via edge-tts
-        communicate = edge_tts.Communicate(clean_text, voice)
-        await communicate.save(mp3_path)
+        async with _TTS_SEMAPHORE:
+            # Step 1: Synthesize to MP3 via edge-tts
+            communicate = edge_tts.Communicate(clean_text, voice)
+            await asyncio.wait_for(communicate.save(mp3_path), timeout=25.0)
 
-        if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) == 0:
-            log.error("[VoiceService] edge-tts output file is empty")
-            return None, 0
+            if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) == 0:
+                log.error("[VoiceService] edge-tts output file is empty")
+                return None, 0
 
-        # Step 2: Convert to OPUS using ffmpeg (Lark IM audio format requirement)
-        loop = asyncio.get_running_loop()
-        cmd_convert = [
-            "ffmpeg", "-y", "-i", mp3_path,
-            "-c:a", "libopus", "-b:a", "32k", "-vbr", "on",
-            opus_path
-        ]
-        proc = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(cmd_convert, capture_output=True, text=True)
-        )
-        if proc.returncode != 0 or not os.path.exists(opus_path):
-            log.error(f"[VoiceService] ffmpeg conversion failed: {proc.stderr}")
-            return None, 0
-
-        # Step 3: Extract duration directly from ffmpeg output (saves ~400ms vs separate ffprobe)
-        duration_ms = 0
-        matches = re.findall(r'time=(\d+):(\d+):(\d+(?:\.\d+)?)', proc.stderr or "")
-        if matches:
-            h, m, s = matches[-1]
-            sec = float(h) * 3600.0 + float(m) * 60.0 + float(s)
-            duration_ms = max(1000, int(sec * 1000))
-
-        if duration_ms <= 0:
-            cmd_probe = [
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1", opus_path
+            # Step 2: Convert to OPUS using ffmpeg (Lark IM audio format requirement)
+            loop = asyncio.get_running_loop()
+            cmd_convert = [
+                "ffmpeg", "-y", "-i", mp3_path,
+                "-c:a", "libopus", "-b:a", "32k", "-vbr", "on",
+                opus_path
             ]
-            probe_res = await loop.run_in_executor(
+            proc = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(cmd_probe, capture_output=True, text=True)
+                lambda: subprocess.run(cmd_convert, capture_output=True, text=True, timeout=25)
             )
-            duration_sec = 0.0
-            try:
-                duration_sec = float(probe_res.stdout.strip())
-            except Exception:
-                pass
-            duration_ms = max(1000, int(duration_sec * 1000))
+            if proc.returncode != 0 or not os.path.exists(opus_path):
+                log.error(f"[VoiceService] ffmpeg conversion failed: {proc.stderr}")
+                return None, 0
 
-        return opus_path, duration_ms
+            # Step 3: Extract duration directly from ffmpeg output (saves ~400ms vs separate ffprobe)
+            duration_ms = 0
+            matches = re.findall(r'time=(\d+):(\d+):(\d+(?:\.\d+)?)', proc.stderr or "")
+            if matches:
+                h, m, s = matches[-1]
+                sec = float(h) * 3600.0 + float(m) * 60.0 + float(s)
+                duration_ms = max(1000, int(sec * 1000))
+
+            if duration_ms <= 0:
+                cmd_probe = [
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", opus_path
+                ]
+                probe_res = await loop.run_in_executor(
+                    None,
+                    lambda: subprocess.run(cmd_probe, capture_output=True, text=True, timeout=15)
+                )
+                duration_sec = 0.0
+                try:
+                    duration_sec = float(probe_res.stdout.strip())
+                except Exception:
+                    pass
+                duration_ms = max(1000, int(duration_sec * 1000))
+
+            return opus_path, duration_ms
 
     except Exception as e:
         log.error(f"[VoiceService] text_to_opus failed: {e}")

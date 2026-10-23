@@ -428,6 +428,7 @@ class PassportServer:
             # 通用命令执行
             output_msg = ""
             if cmd:
+                proc = None
                 try:
                     proc = await asyncio.create_subprocess_shell(
                         cmd,
@@ -437,6 +438,14 @@ class PassportServer:
                     )
                     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
                     output_msg = (stdout.decode('utf-8', errors='ignore') or stderr.decode('utf-8', errors='ignore')).strip()
+                except asyncio.TimeoutError:
+                    if proc and proc.returncode is None:
+                        try:
+                            proc.kill()
+                            await proc.wait()
+                        except Exception:
+                            pass
+                    output_msg = "执行超时 (15s)"
                 except Exception as e:
                     output_msg = f"执行出错: {e}"
 
@@ -679,7 +688,10 @@ class PassportServer:
         # 3. 从数据库中查询最近活跃的真实会话
         try:
             import sqlite3
-            db_path = "/home/jiang/github/antigravity-feishu-bot/antigravity_bot.db"
+            try:
+                from database import DB_FILE as db_path
+            except ImportError:
+                db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "antigravity_bot.db"))
             if os.path.exists(db_path):
                 conn = sqlite3.connect(db_path)
                 c = conn.cursor()
