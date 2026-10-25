@@ -65,7 +65,6 @@ def query_gateway_current_voice(port: int = 8765) -> str:
     candidates = [
         os.environ.get("PASSPORT_CONFIG_FILE"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"),
-        "/home/jiang/github/passport-bridge/config.json"
     ]
     for cfg_file in candidates:
         if cfg_file and os.path.exists(cfg_file):
@@ -147,7 +146,6 @@ def query_letgo_git_info() -> dict:
     """获取 Letgo 源码当前提交"""
     candidates = [
         os.environ.get("LETGO_DIR"),
-        "/home/jiang/github/Letgo",
         os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Letgo"))
     ]
     letgo_dir = None
@@ -182,7 +180,6 @@ def query_latest_firmware() -> dict:
     candidates = [
         os.environ.get("PASSPORT_FIRMWARE_DIR"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware"),
-        "/home/jiang/github/passport-bridge/firmware"
     ]
     for fw_dir in candidates:
         if fw_dir and os.path.exists(fw_dir):
