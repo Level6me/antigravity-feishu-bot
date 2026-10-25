@@ -800,7 +800,8 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
     # 清理 timeout 前缀再检测
     clean_cmd = re.sub(r'^timeout\s+\d+\s+', '', cmd_strip).strip()
     if any(clean_cmd == p or clean_cmd.startswith(p + " ") for p in safe_readonly_prefixes):
-        if not re.search(r"[|;&><`]|\$\(", clean_cmd):
+        # 拒绝复合 shell 语法（含换行拆分的第二段命令），避免 `cat ...\nrm -rf /` 绕过检查
+        if not re.search(r"[|;&><`\r\n]|\$\(", clean_cmd):
             return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.01, decision_source="local")
 
     # 2. 本地高危物理特征速断拦截（无需等待远程 Jev 决策）
