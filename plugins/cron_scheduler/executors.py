@@ -148,6 +148,7 @@ async def execute_task(task: dict, send_card_func=None) -> Tuple[bool, str, int]
     action_type = task.get("action_type", "reminder")
     prompt = task.get("prompt", "")
     command = task.get("command", "")
+    is_success = True
     # 运行时兜底：扫描并清理进程内所有残留的孤儿 _timer_worker 循环发声线程
     try:
         _k = 0
