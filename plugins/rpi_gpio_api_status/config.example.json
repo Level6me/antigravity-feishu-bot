@@ -1,10 +1,10 @@
 {
   "enabled": true,
   "api_url": "http://127.0.0.1:8080",
-  "api_token": "REDACTED_ROTATE_ME",
+  "api_token": "",
   "buzzer_api_url": "http://127.0.0.1:8001",
-  "buzzer_api_token": "REDACTED_ROTATE_ME",
-  "buzzer_enabled": false,
+  "buzzer_api_token": "",
+  "buzzer_enabled": true,
   "buzzer_volume": 1,
   "buzzer_interval": 15,
   "auto_indicator_enabled": true,
