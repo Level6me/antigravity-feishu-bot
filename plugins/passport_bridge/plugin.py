@@ -62,9 +62,11 @@ def query_gateway_current_voice(port: int = 8765) -> str:
     if gw and gw.get("tts_voice"):
         return gw["tts_voice"]
 
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.environ.get("PASSPORT_CONFIG_FILE"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"),
+        os.path.abspath(os.path.join(plugin_dir, "..", "..", "..", "passport-bridge", "config.json")),
+        os.path.join(plugin_dir, "config.json"),
     ]
     for cfg_file in candidates:
         if cfg_file and os.path.exists(cfg_file):
@@ -144,9 +146,11 @@ def call_gateway_speak(text: str, port: int = 8765) -> tuple:
 
 def query_letgo_git_info() -> dict:
     """获取 Letgo 源码当前提交"""
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.environ.get("LETGO_DIR"),
-        os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Letgo"))
+        os.path.abspath(os.path.join(plugin_dir, "..", "..", "..", "Letgo")),
+        os.path.abspath(os.path.join(plugin_dir, "..", "..", "Letgo")),
     ]
     letgo_dir = None
     for c in candidates:
@@ -177,9 +181,11 @@ def query_letgo_git_info() -> dict:
 
 def query_latest_firmware() -> dict:
     """获取最新就绪的 OTA 固件版本"""
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.environ.get("PASSPORT_FIRMWARE_DIR"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware"),
+        os.path.join(plugin_dir, "firmware"),
+        os.path.abspath(os.path.join(plugin_dir, "..", "..", "..", "passport-bridge", "firmware")),
     ]
     for fw_dir in candidates:
         if fw_dir and os.path.exists(fw_dir):

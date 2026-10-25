@@ -134,14 +134,15 @@ class BasePlugin:
         return await loop.run_in_executor(None, lambda: send_reply_sdk(message_id, text))
 
     def get_config(self) -> dict:
-        """Load plugin config.json if present."""
-        cfg_path = os.path.join(self.plugin_dir, "config.json")
-        if os.path.exists(cfg_path):
-            try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                log.error(f"[Plugin:{self.plugin_id}] Failed to load config: {e}")
+        """Load plugin config.json if present, falling back to config.example.json."""
+        for filename in ("config.json", "config.example.json"):
+            cfg_path = os.path.join(self.plugin_dir, filename)
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception as e:
+                    log.error(f"[Plugin:{self.plugin_id}] Failed to load {filename}: {e}")
         return {}
 
     def get_data_dir(self) -> str:
