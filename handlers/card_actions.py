@@ -2,7 +2,7 @@
 import asyncio
 import json
 import os
-import subprocess
+import re
 import time
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -23,7 +23,7 @@ from logger import log
 import app_state
 from handlers.messages import _handle_message_async_internal
 from handlers.auth_actions import handle_auth_card_action
-from utils.auth import get_role, is_admin
+from utils.auth import SCOPE_PROJECT, get_role, has_scope, is_admin
 
 # Compatibility aliases for extracted body
 running_processes = app_state.running_processes
