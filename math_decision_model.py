@@ -34,6 +34,7 @@ class FeatureVector:
     phi_multistep: float = 0.0    # phi_6: Multi-step structural connectors
     phi_hazard: float = 0.0       # phi_7: Destructive / high-privilege operation indicator
     phi_entropy: float = 0.0      # phi_8: Normalized character Shannon entropy
+    raw_text: str = ""            # Original prompt text (for lexical checks on markers)
 
 
 @dataclass
@@ -303,6 +304,7 @@ class HybridMathDecisionEngine:
             phi_multistep=round(phi_multistep, 4),
             phi_hazard=round(phi_hazard, 4),
             phi_entropy=round(phi_entropy, 4),
+            raw_text=clean,
         )
 
     # ------------------------------------------------------------------
@@ -325,7 +327,7 @@ class HybridMathDecisionEngine:
         # Special Markov Transition: Short confirmation ("好的", "我全都要", "开始吧")
         if fv.phi_confirm >= 0.8:
             if effective_state in ("proposal_pending", "task_executing", "error_recovery"):
-                if state.last_tier == "High" or "全都要" in str(fv.phi_imperative):
+                if state.last_tier == "High" or "全都要" in fv.raw_text:
                     return {"chat": 0.02, "standard_op": 0.23, "deep_arch": 0.75}, 0.25
                 return {"chat": 0.04, "standard_op": 0.68, "deep_arch": 0.28}, 0.32
             elif fv.phi_imperative >= 0.7:
