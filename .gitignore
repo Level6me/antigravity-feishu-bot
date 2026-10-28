@@ -11,6 +11,7 @@ pip-delete-this-directory.txt
 # State and logs
 chat_sessions.json
 user_profiles.json
+.model_cache.json
 agy_log_*.txt
 *.log
 logs/
@@ -76,3 +77,4 @@ plugin_data/
 plugins/home_assistant
 plugins/*/config.json
 backups/
+scripts/

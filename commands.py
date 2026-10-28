@@ -126,6 +126,7 @@ import os
 import signal
 import json
 import re
+import time
 from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
@@ -133,6 +134,127 @@ from card_builder import CardBuilder
 from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT, BASE_DIR, GITEE_MIRROR_URL, get_global_memory_path
 from database import list_auth_sessions
 from utils.auth import SCOPE_TIERS, get_admin_chat_id, has_scope, is_admin, set_session_role
+
+# --- Available Models Cache (In-Memory + Disk + Stale-While-Revalidate) ---
+_MODEL_CACHE = []
+_MODEL_CACHE_TIME = 0.0
+_MODEL_FETCH_LOCK = None
+_MODEL_CACHE_FILE = os.path.join(BASE_DIR, ".model_cache.json")
+_MODEL_CACHE_TTL = 3600 * 4  # 4 hours TTL
+
+DEFAULT_FALLBACK_MODELS = [
+    "gemini-4-argon-medium\tGemini 4 Argon (Medium)",
+    "gemini-4-argon-high\tGemini 4 Argon (High)",
+    "gemini-4-argon-low\tGemini 4 Argon (Low)",
+    "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+    "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)",
+    "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)",
+    "claude-opus-5-5-low\tClaude Opus 5.5 (Low)",
+    "claude-opus-5-5-medium\tClaude Opus 5.5 (Medium)",
+    "claude-opus-5-5-high\tClaude Opus 5.5 (High)",
+    "claude-sonnet-5-5-low\tClaude Sonnet 5.5 (Low)",
+    "claude-sonnet-5-5-medium\tClaude Sonnet 5.5 (Medium)",
+    "claude-sonnet-5-5-high\tClaude Sonnet 5.5 (High)",
+    "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)",
+]
+
+def load_model_cache_from_disk() -> list:
+    global _MODEL_CACHE, _MODEL_CACHE_TIME
+    if os.path.exists(_MODEL_CACHE_FILE):
+        try:
+            with open(_MODEL_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "models" in data and isinstance(data["models"], list) and data["models"]:
+                    _MODEL_CACHE = data["models"]
+                    _MODEL_CACHE_TIME = float(data.get("timestamp", 0.0))
+                    return _MODEL_CACHE
+        except Exception as e:
+            log.warning(f"[ModelCache] Failed to load disk cache: {e}")
+    return []
+
+def save_model_cache_to_disk(models: list):
+    try:
+        with open(_MODEL_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"timestamp": time.time(), "models": models}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.warning(f"[ModelCache] Failed to save disk cache: {e}")
+
+async def _fetch_models_from_cli(timeout_sec: int = 25) -> list:
+    if not ANTIGRAVITY_BIN or not os.path.exists(ANTIGRAVITY_BIN):
+        log.warning(f"[ModelCache] ANTIGRAVITY_BIN invalid or not found: {ANTIGRAVITY_BIN}")
+        return []
+    try:
+        fetch_proc = await asyncio.create_subprocess_exec(
+            ANTIGRAVITY_BIN, "models",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=subprocess.DEVNULL
+        )
+        stdout, stderr = await asyncio.wait_for(fetch_proc.communicate(), timeout=timeout_sec)
+        models_output = stdout.decode().strip()
+        models = [line.strip() for line in models_output.split('\n') if line.strip()]
+        if models:
+            return models
+        else:
+            log.warning(f"[ModelCache] Empty output from CLI, stderr: {stderr.decode()[:200]}")
+    except asyncio.TimeoutError:
+        try:
+            fetch_proc.kill()
+        except Exception:
+            pass
+        log.warning(f"[ModelCache] Fetch models timed out after {timeout_sec}s")
+    except Exception as e:
+        log.warning(f"[ModelCache] Fetch models failed: {e}")
+    return []
+
+async def get_available_models_cached(force_refresh: bool = False) -> list:
+    global _MODEL_CACHE, _MODEL_CACHE_TIME, _MODEL_FETCH_LOCK
+    if _MODEL_FETCH_LOCK is None:
+        _MODEL_FETCH_LOCK = asyncio.Lock()
+
+    now = time.time()
+    if not _MODEL_CACHE:
+        load_model_cache_from_disk()
+
+    is_cache_valid = bool(_MODEL_CACHE) and (now - _MODEL_CACHE_TIME < _MODEL_CACHE_TTL)
+
+    # 1. 命中有效缓存且非强制刷新：立即返回（毫秒级响应）
+    if is_cache_valid and not force_refresh:
+        return list(_MODEL_CACHE)
+
+    # 2. 已有旧缓存但已过期：先返回旧缓存保证即时响应，后台异步静默刷新 (Stale-While-Revalidate)
+    if _MODEL_CACHE and not force_refresh:
+        if not _MODEL_FETCH_LOCK.locked():
+            async def _bg_refresh():
+                async with _MODEL_FETCH_LOCK:
+                    new_models = await _fetch_models_from_cli(timeout_sec=30)
+                    if new_models:
+                        global _MODEL_CACHE, _MODEL_CACHE_TIME
+                        _MODEL_CACHE = new_models
+                        _MODEL_CACHE_TIME = time.time()
+                        save_model_cache_to_disk(new_models)
+                        log.info(f"[ModelCache] Background refresh completed with {len(new_models)} models")
+            asyncio.create_task(_bg_refresh())
+        return list(_MODEL_CACHE)
+
+    # 3. 强制刷新或冷启动无任何缓存：执行同步等待拉取
+    async with _MODEL_FETCH_LOCK:
+        if not force_refresh and _MODEL_CACHE and (time.time() - _MODEL_CACHE_TIME < _MODEL_CACHE_TTL):
+            return list(_MODEL_CACHE)
+
+        new_models = await _fetch_models_from_cli(timeout_sec=25)
+        if new_models:
+            _MODEL_CACHE = new_models
+            _MODEL_CACHE_TIME = time.time()
+            save_model_cache_to_disk(new_models)
+            return list(_MODEL_CACHE)
+
+        if _MODEL_CACHE:
+            return list(_MODEL_CACHE)
+        return list(DEFAULT_FALLBACK_MODELS)
+
+# 模块加载时预读磁盘缓存
+load_model_cache_from_disk()
 
 def get_version_string(commit_ref="HEAD"):
     try:
@@ -873,34 +995,18 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         return True, user_text
         
     elif user_text.startswith("/model") or user_text.startswith("/card") or user_text.startswith("/menu"):
-        fetch_proc = await asyncio.create_subprocess_exec(
-            ANTIGRAVITY_BIN, "models",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=subprocess.DEVNULL
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(fetch_proc.communicate(), timeout=10)
-        except asyncio.TimeoutError:
-            try:
-                fetch_proc.kill()
-            except Exception:
-                pass
+        args = user_text.split()
+        force_refresh = len(args) > 1 and args[1].lower() in ["refresh", "reload", "update", "sync"]
+        
+        if force_refresh:
             await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: send_reply_sdk(message_id, "⏳ 模型列表获取超时，请稍后重试。"),
+                lambda: send_reply_sdk(message_id, "🔄 正在向服务端拉取最新模型列表，请稍候..."),
             )
-            return True, user_text
-        models_output = stdout.decode().strip()
-        
-        available_models = [line.strip() for line in models_output.split('\n') if line.strip()]
+            
+        available_models = await get_available_models_cached(force_refresh=force_refresh)
         if not available_models:
-            available_models = [
-                "gemini-3.7-flash-low Gemini 3.7 Flash (Low)",
-                "gemini-3.8-flash-high Gemini 3.8 Flash (High)",
-                "claude-sonnet-4-6 Claude Sonnet 4.6 (Thinking)",
-                "gpt-oss-120b-medium GPT-OSS 120B (Medium)"
-            ]
+            available_models = DEFAULT_FALLBACK_MODELS
             
         card_content = CardBuilder.build_model_panel(available_models, session_data.get('model', 'Default'))
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, card_content))
