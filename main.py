@@ -15,6 +15,19 @@ os.environ["PATH"] += (
     + os.pathsep + os.path.join(_home, ".local/bin")
 )
 
+# Strip transient Antigravity CLI session env vars that may have been leaked into
+# PM2's saved environment if `pm2 restart --update-env` was run inside an agy session.
+for _stale_env in (
+    "ANTIGRAVITY_LS_VERSION",
+    "ANTIGRAVITY_LS_ADDRESS",
+    "ANTIGRAVITY_CSRF_TOKEN",
+    "ANTIGRAVITY_CONVERSATION_ID",
+    "ANTIGRAVITY_TRAJECTORY_ID",
+    "ANTIGRAVITY_SOURCE_METADATA",
+    "ANTIGRAVITY_AGENT",
+):
+    os.environ.pop(_stale_env, None)
+
 import lark_oapi as lark
 
 from config import APP_ID, APP_SECRET, BASE_DIR

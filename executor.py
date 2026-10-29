@@ -5,6 +5,7 @@ import json
 import uuid
 import re
 import subprocess
+from typing import Optional
 from config import ANTIGRAVITY_BIN, DANGEROUSLY_SKIP_PERMISSIONS, get_brain_dir, get_transcript_path, BASE_DIR
 import config
 from logger import log
@@ -639,6 +640,25 @@ def extract_final_chinese_response(text):
     text = re.sub(r'^\s*\[TASK_PLAN\][^\n]*(?:\n|$)', '', text, flags=re.IGNORECASE).strip()
 
     return text
+
+def detect_and_format_agent_system_error(raw_text: str = "") -> Optional[str]:
+    """Detect non-quota fatal Antigravity agent system errors and return a user-friendly explanation."""
+    if not raw_text:
+        return None
+    lower_text = raw_text.lower()
+    if "blocked by content safety filters" in lower_text or "content safety filter" in lower_text:
+        return (
+            "🛡️ **[模型内容安全策略阻断 / Content Safety Filter]**\n\n"
+            "本次模型生成被底层供应商的内容安全审查过滤器阻断（Agent Executor 连续 4 次重试均触发审查规则）。\n\n"
+            "📌 **核心诱因**：\n"
+            "1. 生成的规格书、系统代码或请求中包含被大模型审查网关误判为敏感的高危特征（如权限绕过、逆向工程、密钥凭据等）。\n"
+            "2. 当前所选模型在此类超长或复杂技术规划场景下的安全过滤策略过于严苛。\n\n"
+            "💡 **建议解决方案**：\n"
+            "- **切换模型**：点击卡片或使用 `/model` 切换为 `gemini-3.8-flash-high` 或 `gemini-3.8-pro` 重试。\n"
+            "- **拆解任务**：避免单次让模型生成涵盖全栈架构、代码、UI 与配置的超长规格书；拆解为小步分阶段推进。\n"
+            "- **排除敏感词**：检查请求中是否有涉及高敏词汇或敏感代码文件引用并进行规避。"
+        )
+    return None
 
 def extract_choice_card_data(reply_text, transcript_path=None, initial_transcript_size=0):
     """
@@ -1417,6 +1437,11 @@ async def execute_antigravity(
                 if quota_err_reply:
                     is_quota_exhausted = True
                     final_reply = quota_err_reply
+                else:
+                    system_err_reply = detect_and_format_agent_system_error(combined_err_text)
+                    if system_err_reply:
+                        final_reply = system_err_reply
+                        is_error = True
 
             # 若提取最终回答失败且进程非正常退出（如 API 抖动 EOF、卡死强死、进程崩溃），且非配额用尽，且在允许重试范围内：
             # 暂不向飞书推送报错卡片，直接返回 has_reply=False 触发自动重试机制！
@@ -1495,10 +1520,18 @@ async def execute_antigravity(
                     reply_text = quota_err_reply
                     is_quota_exhausted = True
                 else:
-                    reply_text = stderr_text.strip() or "⚠️ 模型未返回任何有效回复，请重试或更换模型。"
+                    system_err_reply = detect_and_format_agent_system_error(combined_err_text)
+                    if system_err_reply:
+                        reply_text = system_err_reply
+                    else:
+                        reply_text = stderr_text.strip() or "⚠️ 模型未返回任何有效回复，请重试或更换模型。"
                 is_error = True
             elif is_quota_exhausted:
                 is_error = True
+            elif is_error:
+                system_err_reply = detect_and_format_agent_system_error(combined_err_text)
+                if system_err_reply:
+                    reply_text = system_err_reply
             else:
                 approx_tokens = len(user_text) + len(reply_text)
                 if transcript_path and os.path.exists(transcript_path):

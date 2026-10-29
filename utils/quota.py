@@ -36,13 +36,6 @@ def get_agy_version() -> str:
     if _AGY_VERSION_CACHE:
         return _AGY_VERSION_CACHE
 
-    ls_ver = os.environ.get("ANTIGRAVITY_LS_VERSION", "").strip()
-    if ls_ver:
-        if ls_ver.startswith("cli-"):
-            ls_ver = ls_ver[4:]
-        _AGY_VERSION_CACHE = ls_ver
-        return _AGY_VERSION_CACHE
-
     try:
         from config import ANTIGRAVITY_BIN
         bin_path = ANTIGRAVITY_BIN or "agy"
@@ -53,7 +46,14 @@ def get_agy_version() -> str:
     except Exception:
         pass
 
-    _AGY_VERSION_CACHE = "1.3.6"
+    ls_ver = os.environ.get("ANTIGRAVITY_LS_VERSION", "").strip()
+    if ls_ver:
+        if ls_ver.startswith("cli-"):
+            ls_ver = ls_ver[4:]
+        _AGY_VERSION_CACHE = ls_ver
+        return _AGY_VERSION_CACHE
+
+    _AGY_VERSION_CACHE = "1.4.9"
     return _AGY_VERSION_CACHE
 
 
@@ -301,15 +301,19 @@ def _merge_quota_responses(primary, secondary):
 
 def fetch_quota():
     """Return quota data dict (or None). Uses local LSP first, remote fallback, and merges if needed."""
+    global _PORT_CACHE
     local_data = None
     port = discover_lsp_port()
     if port is not None:
         local_data = _probe_lsp(port)
         if local_data and "response" in local_data:
             groups = local_data["response"].get("groups", [])
-            # If local probe returned both Gemini and 3P groups, it is complete
-            if len(groups) >= 2:
+            has_argon = any("argon" in g.get("displayName", "").lower() for g in groups if isinstance(g, dict))
+            # If local probe returned Gemini, 3P, and Argon groups, it is complete
+            if len(groups) >= 3 or (len(groups) >= 2 and has_argon):
                 return local_data
+        else:
+            _PORT_CACHE = None
 
     remote_data = _fetch_remote_fallback()
     if not local_data:
@@ -359,8 +363,11 @@ def get_reset_duration_for_model(quota_data: Optional[dict], model_name: str = "
     for g in groups:
         d_name = g.get("displayName", "").lower()
         desc = g.get("description", "").lower()
-        if "gemini" in model_lower:
-            if "gemini" in d_name or "gemini" in desc:
+        if "argon" in model_lower:
+            if "argon" in d_name or "argon" in desc:
+                target_groups.append(g)
+        elif "gemini" in model_lower:
+            if ("gemini" in d_name or "gemini" in desc) and "argon" not in d_name:
                 target_groups.append(g)
         elif any(k in model_lower for k in ["claude", "gpt", "3p"]):
             if any(k in d_name or k in desc for k in ["claude", "gpt", "3p"]):
@@ -478,7 +485,9 @@ async def detect_and_format_quota_error(raw_text: str = "", model: str = "") -> 
                     d_name = g.get("displayName", "").lower()
                     desc = g.get("description", "").lower()
                     match_group = False
-                    if "gemini" in model_lower and ("gemini" in d_name or "gemini" in desc):
+                    if "argon" in model_lower and ("argon" in d_name or "argon" in desc):
+                        match_group = True
+                    elif "gemini" in model_lower and "argon" not in model_lower and ("gemini" in d_name or "gemini" in desc) and "argon" not in d_name:
                         match_group = True
                     elif any(k in model_lower for k in ["claude", "gpt", "3p"]) and any(k in d_name or k in desc for k in ["claude", "gpt", "3p"]):
                         match_group = True
