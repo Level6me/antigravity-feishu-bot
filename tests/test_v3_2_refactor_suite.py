@@ -237,7 +237,7 @@ class TestV32RefactorSuite(unittest.TestCase):
             self.assertFalse(out_secret.is_safe)
 
             # 4. Normal long prose (>120 chars) without secret/danger markers fast-paths locally
-            normal_prose = "这是一段完全正常的架构分析说明文本，不涉及任何私钥、密码、令牌或破坏性系统指令。" * 5
+            normal_prose = "这是一段完全正常的架构分析说明文本，包含模块分层设计、异步任务调度以及数据库索引优化方案。" * 5
             with patch("system_one_gate.get_typesafe_client") as mock_get_client:
                 out_ok = asyncio.run(evaluate_output_guard(normal_prose))
                 self.assertTrue(out_ok.is_safe)
