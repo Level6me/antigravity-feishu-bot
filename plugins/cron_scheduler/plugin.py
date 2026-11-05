@@ -28,6 +28,7 @@ from scheduler_db import (
     get_task,
     get_all_tasks,
     delete_task,
+    cleanup_completed_delay_tasks,
     update_task_status,
     get_recent_logs
 )
@@ -75,9 +76,22 @@ BADGE_MAP = {
 
 
 def build_cron_panel_card(tasks: List[Dict[str, Any]], active_tab: str = "user", session_data: dict = None) -> dict:
-    """构建计划任务总控中心交互卡片"""
-    user_tasks = [t for t in tasks if t.get("category") in ["user", None, "", "default"]]
-    sys_tasks = [t for t in tasks if t.get("category") in ["system", "maintenance"]]
+    """构建计划任务总控中心交互卡片（统一委托给 cards.cron，消除双份视图逻辑分叉）"""
+    try:
+        import cards.cron as _c_cron
+        return _c_cron.build_cron_panel_card(tasks, active_tab=active_tab, session_data=session_data)
+    except Exception:
+        pass
+    valid_tasks = [
+        t for t in (tasks or [])
+        if not (
+            t.get("task_type") == "delay"
+            and not bool(t.get("is_active", 1))
+            and (int(t.get("run_count", 0) or 0) > 0 or int(t.get("last_run_at", 0) or 0) > 0)
+        )
+    ]
+    user_tasks = [t for t in valid_tasks if t.get("category") in ["user", None, "", "default"]]
+    sys_tasks = [t for t in valid_tasks if t.get("category") in ["system", "maintenance"]]
     displayed_tasks = user_tasks if active_tab == "user" else sys_tasks
 
     elements = []
@@ -85,7 +99,11 @@ def build_cron_panel_card(tasks: List[Dict[str, Any]], active_tab: str = "user",
     # 顶部标签页切换栏
     elements.append({
         "tag": "markdown",
-        "content": f"**⏱️ 计划任务管理中心 (Cron Center v3.0)**\n由独立 PM2 守护引擎驱动，精准倒计时与周期巡检调度。\n当前选中的分类：**{'👤 用户主动任务' if active_tab == 'user' else '⚙️ 系统后台任务'}**"
+        "content": (
+            f"**⏱️ 计划任务管理中心 (Cron Center)**\n"
+            f"当前分类：**{'👤 用户主动任务' if active_tab == 'user' else '⚙️ 系统后台任务'}**（共 **{len(displayed_tasks)}** 项） · "
+            f"*一次性任务触发后自动移除*"
+        )
     })
 
     header_actions = [
@@ -121,7 +139,7 @@ def build_cron_panel_card(tasks: List[Dict[str, Any]], active_tab: str = "user",
             "content": f"*(暂无{'用户主动' if active_tab == 'user' else '系统后台'}计划任务)*\n可以直接在聊天中发送：`一分钟后提醒我喝水` 或点击上方 **[ ➕ 快捷新建 ]** 快速添加！"
         })
     else:
-        for t in displayed_tasks:
+        for t in displayed_tasks[:15]:
             t_id = t.get("id")
             is_active = bool(t.get("is_active", 1))
             status_icon = "🟢 启用中" if is_active else "🔴 已暂停"
@@ -172,7 +190,7 @@ def build_cron_panel_card(tasks: List[Dict[str, Any]], active_tab: str = "user",
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "⏱️ 计划任务管理中心 (Cron Center v3.0)"},
+            "title": {"tag": "plain_text", "content": "⏱️ 计划任务管理中心 (Cron Center)"},
             "template": "blue"
         },
         "elements": elements
@@ -180,14 +198,25 @@ def build_cron_panel_card(tasks: List[Dict[str, Any]], active_tab: str = "user",
 
 
 def build_cron_created_card(task_data: dict) -> dict:
-    """构建任务创建成功的富交互确认卡片"""
+    """构建任务创建成功的富交互确认卡片（统一委托给 cards.cron）"""
+    try:
+        import cards.cron as _c_cron
+        return _c_cron.build_cron_created_card(task_data)
+    except Exception:
+        pass
     t_name = task_data.get("name", "计划任务")
     t_id = task_data.get("id", "")
     expr = task_data.get("cron_expr", "")
-    task_type = "标准 Cron 周期" if task_data.get("task_type") == "cron" else "秒级倒计时"
+    is_delay = task_data.get("task_type") == "delay"
+    task_type = "一次性倒计时" if is_delay else "标准 Cron 周期"
     prompt = task_data.get("prompt", "")
     next_ts = task_data.get("next_run_at", 0)
     next_str = format_ts(next_ts)
+    lifecycle_note = (
+        "🛡️ *该一次性任务已持久化，触发完成后将自动从任务列表移除（执行记录保留于审计日志）。*"
+        if is_delay else
+        "🛡️ *任务已由后台守护服务持久化，断电或重启均自动恢复调度。*"
+    )
 
     elements = [
         {
@@ -200,7 +229,7 @@ def build_cron_created_card(task_data: dict) -> dict:
         {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": f"**📝 预设执行内容 / Prompt**：\n`{prompt}`\n\n🛡️ *任务已由后台守护服务持久化，断电或重启均自动恢复调度。*"
+            "content": f"**📝 预设执行内容 / Prompt**：\n`{prompt}`\n\n{lifecycle_note}"
         },
         {"tag": "hr"},
         {
@@ -295,10 +324,16 @@ class CronSchedulerPlugin(BasePlugin):
             self.send_reply_card(message_id, card)
             return True
 
+        # 1.5 批量清理已完成/已暂停任务: /cron clean
+        if args_clean in ["clean", "clear", "prune"]:
+            removed = cleanup_completed_delay_tasks(chat_id, include_paused=True)
+            self.send_reply_text(message_id, f"🧹 已清理 **{removed}** 个已完成或已暂停的计划任务（执行审计日志已保留）。")
+            return True
+
         # 2. 删除任务: /cron del <task_id>
         if args_clean.startswith(("del ", "rm ", "delete ")):
             task_id = args_clean.split(None, 1)[1].strip()
-            delete_task(task_id)
+            delete_task(task_id, keep_logs=False)
             self.send_reply_text(message_id, f"🗑️ 计划任务 `{task_id}` 已成功删除。")
             return True
 
@@ -427,7 +462,14 @@ class CronSchedulerPlugin(BasePlugin):
 
         elif action == "delete_cron_task":
             task_id = value.get("task_id")
-            await loop.run_in_executor(None, lambda: delete_task(task_id))
+            await loop.run_in_executor(None, lambda: delete_task(task_id, keep_logs=False))
+            tasks = await loop.run_in_executor(None, lambda: get_all_tasks(chat_id))
+            new_card = build_cron_panel_card(tasks, active_tab="user", session_data={})
+            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            return True
+
+        elif action == "clear_completed_cron":
+            await loop.run_in_executor(None, lambda: cleanup_completed_delay_tasks(chat_id, include_paused=True))
             tasks = await loop.run_in_executor(None, lambda: get_all_tasks(chat_id))
             new_card = build_cron_panel_card(tasks, active_tab="user", session_data={})
             await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))

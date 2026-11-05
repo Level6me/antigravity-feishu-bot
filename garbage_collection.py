@@ -16,17 +16,20 @@ def backup_database_if_due():
     if not os.path.exists(DB_FILE):
         return
 
-    # Prune cron_logs older than 30 days to prevent unbounded SQLite growth
+    # Prune cron_logs older than 30 days and completed one-shot delay tasks to prevent unbounded SQLite growth
     try:
         cutoff_ts = int(time.time()) - 30 * 86400
         conn = sqlite3.connect(DB_FILE, timeout=DB_TIMEOUT)
         try:
             conn.execute("DELETE FROM cron_logs WHERE executed_at > 0 AND executed_at < ?", (cutoff_ts,))
+            conn.execute(
+                "DELETE FROM cron_tasks WHERE task_type = 'delay' AND is_active = 0 AND (run_count > 0 OR last_run_at > 0)"
+            )
             conn.commit()
         finally:
             conn.close()
     except Exception as e:
-        log.debug(f"[GC] cron_logs pruning skipped: {e}")
+        log.debug(f"[GC] cron_logs/cron_tasks pruning skipped: {e}")
 
     today = time.strftime("%Y%m%d", time.localtime())
     os.makedirs(BACKUP_DIR, exist_ok=True)

@@ -24,6 +24,7 @@ from scheduler_db import (
     get_active_tasks,
     update_task_run,
     update_task_status,
+    delete_task,
     record_log,
     get_task,
     claim_task
@@ -113,13 +114,11 @@ class CronDaemon:
             duration_ms=duration_ms
         )
 
-        # 2. 计算并更新下一次执行时间
+        # 2. 一次性任务完成后自动移除（仅保留审计日志），周期性任务计算下次触发时间
         task_type = task.get("task_type", "cron")
         if task_type == "delay":
-            # 倒计时一次性任务，完成后置为暂停
-            update_task_status(task_id, False)
-            update_task_run(task_id, now_ts, 0, inc_count=True)
-            logger.info(f"Delay task '{task_name}' completed and deactivated.")
+            delete_task(task_id, keep_logs=True)
+            logger.info(f"Delay task '{task_name}' ({task_id}) completed and auto-removed (audit log preserved).")
         else:
             # 周期性 Cron 任务，计算下次触发时间
             next_run = compute_next_run(task["cron_expr"], "cron", now_ts)

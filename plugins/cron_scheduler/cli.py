@@ -18,6 +18,7 @@ from scheduler_db import (
     get_task,
     get_all_tasks,
     delete_task,
+    cleanup_completed_delay_tasks,
     update_task_status,
     get_recent_logs
 )
@@ -87,8 +88,16 @@ def list_tasks_cli(args):
 
 
 def delete_task_cli(args):
-    ok = delete_task(args.id)
+    ok = delete_task(args.id, keep_logs=False)
     print(json.dumps({"success": ok, "task_id": args.id}, ensure_ascii=False))
+
+
+def clean_tasks_cli(args):
+    removed = cleanup_completed_delay_tasks(
+        chat_id=getattr(args, "chat_id", None),
+        include_paused=bool(getattr(args, "include_paused", False)),
+    )
+    print(json.dumps({"success": True, "removed_count": removed}, ensure_ascii=False))
 
 
 def main():
@@ -119,6 +128,11 @@ def main():
     p_del = subparsers.add_parser("delete", help="Delete a task")
     p_del.add_argument("--id", required=True, help="Task ID to delete")
 
+    # clean
+    p_clean = subparsers.add_parser("clean", help="Clean completed one-shot tasks")
+    p_clean.add_argument("--chat-id", help="Filter by chat_id")
+    p_clean.add_argument("--include-paused", action="store_true", help="Also remove paused user tasks")
+
     args = parser.parse_args()
     if args.subcommand == "add":
         add_task_cli(args)
@@ -126,6 +140,8 @@ def main():
         list_tasks_cli(args)
     elif args.subcommand == "delete":
         delete_task_cli(args)
+    elif args.subcommand == "clean":
+        clean_tasks_cli(args)
     else:
         parser.print_help()
 

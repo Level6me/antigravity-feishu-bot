@@ -11,7 +11,11 @@ DEFAULT_DB_PATH = os.path.join(BASE_DIR, "antigravity_bot.db")
 
 
 def get_db(db_path: str = None) -> sqlite3.Connection:
-    path = db_path or DEFAULT_DB_PATH
+    if not db_path:
+        import sys
+        db_mod = sys.modules.get("database")
+        db_path = getattr(db_mod, "DB_FILE", None) or DEFAULT_DB_PATH
+    path = db_path
     conn = sqlite3.connect(path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL;")
@@ -135,6 +139,12 @@ def get_all_tasks(chat_id: Optional[str] = None, db_path: str = None) -> List[Di
     conn = get_db(db_path)
     try:
         cursor = conn.cursor()
+        # 自动清理已触发完毕的历史一次性倒计时任务（仅保留 cron_logs 审计日志）
+        cursor.execute(
+            "DELETE FROM cron_tasks WHERE task_type = 'delay' AND is_active = 0 AND (run_count > 0 OR last_run_at > 0)"
+        )
+        if cursor.rowcount > 0:
+            conn.commit()
         if chat_id:
             cursor.execute('''
                 SELECT * FROM cron_tasks 
@@ -160,13 +170,47 @@ def get_active_tasks(db_path: str = None) -> List[Dict[str, Any]]:
         conn.close()
 
 
-def delete_task(task_id: str, db_path: str = None) -> bool:
+def delete_task(task_id: str, db_path: str = None, keep_logs: bool = True) -> bool:
     conn = get_db(db_path)
     try:
         cursor = conn.cursor()
         cursor.execute('DELETE FROM cron_tasks WHERE id = ?', (task_id,))
+        if not keep_logs:
+            cursor.execute('DELETE FROM cron_logs WHERE task_id = ?', (task_id,))
         conn.commit()
         return True
+    finally:
+        conn.close()
+
+
+def cleanup_completed_delay_tasks(chat_id: Optional[str] = None, include_paused: bool = False, db_path: str = None) -> int:
+    """清理已完成的一次性任务（当 include_paused=True 时同时清理已暂停的用户任务），保留 cron_logs 执行日志。"""
+    conn = get_db(db_path)
+    try:
+        cursor = conn.cursor()
+        if include_paused:
+            if chat_id:
+                cursor.execute(
+                    "DELETE FROM cron_tasks WHERE is_active = 0 AND (chat_id = ? OR chat_id = '' OR chat_id IS NULL) AND category NOT IN ('system', 'maintenance')",
+                    (chat_id,),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM cron_tasks WHERE is_active = 0 AND category NOT IN ('system', 'maintenance')"
+                )
+        else:
+            if chat_id:
+                cursor.execute(
+                    "DELETE FROM cron_tasks WHERE task_type = 'delay' AND (is_active = 0 OR run_count > 0 OR last_run_at > 0) AND (chat_id = ? OR chat_id = '' OR chat_id IS NULL)",
+                    (chat_id,),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM cron_tasks WHERE task_type = 'delay' AND (is_active = 0 OR run_count > 0 OR last_run_at > 0)"
+                )
+        deleted = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        conn.commit()
+        return deleted
     finally:
         conn.close()
 

@@ -607,7 +607,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_delete_cron():
                 from database import delete_cron_task, get_all_cron_tasks
-                await asyncio.get_running_loop().run_in_executor(None, lambda: delete_cron_task(task_id))
+                await asyncio.get_running_loop().run_in_executor(None, lambda: delete_cron_task(task_id, keep_logs=False))
                 tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
                 session_data = await get_session_async(chat_id)
                 new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
@@ -615,15 +615,30 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_delete_cron(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "计划任务已物理删除！"}})
 
+    elif action_value.get("action") == "clear_completed_cron":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_clear_completed_cron():
+                from database import cleanup_completed_delay_tasks, get_all_cron_tasks
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: cleanup_completed_delay_tasks(chat_id, include_paused=True)
+                )
+                tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
+                session_data = await get_session_async(chat_id)
+                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
+                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_clear_completed_cron(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已清理所有已完成/已暂停任务！"}})
+
     elif action_value.get("action") == "run_cron_now":
         task_id = action_value.get("task_id")
+        from database import get_cron_task
+        task_snapshot = get_cron_task(task_id) if task_id else None
+        if not task_snapshot:
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "该一次性任务已完成并自动移除"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_run_now():
-                from database import get_cron_task
-                task = await asyncio.get_running_loop().run_in_executor(None, lambda: get_cron_task(task_id))
-                if task:
-                    from cron_engine import cron_engine
-                    asyncio.create_task(cron_engine._run_task_wrapper(task))
+                from cron_engine import cron_engine
+                asyncio.create_task(cron_engine._run_task_wrapper(task_snapshot))
             asyncio.run_coroutine_threadsafe(do_run_now(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已触发即刻运行计划任务！"}})
 

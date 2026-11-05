@@ -214,21 +214,22 @@ class CronEngine:
             try:
                 duration_ms = int((time.time() - start_time) * 1000)
                 now_ts = int(time.time())
-                next_run = compute_next_run(task['cron_expr'], task.get('task_type', 'cron'), now_ts)
-                
-                # If it's a one-shot delay task, deactivate after single execution
-                if task.get('task_type') == 'delay':
-                    from database import update_cron_task_status
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: update_cron_task_status(task_id, False)
-                    )
-                
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: update_cron_task_run(task_id, now_ts, next_run)
-                )
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: record_cron_log(task_id, "failed" if is_error else "success", result_text, "", duration_ms)
                 )
+
+                # 一次性倒计时任务触发完毕后立即从任务主表移除（仅保留 cron_logs 审计日志）
+                if task.get('task_type') == 'delay':
+                    from database import delete_cron_task
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: delete_cron_task(task_id, keep_logs=True)
+                    )
+                    log.info(f"[CronEngine] One-shot delay task '{name}' ({task_id}) completed and auto-removed (log preserved).")
+                else:
+                    next_run = compute_next_run(task['cron_expr'], task.get('task_type', 'cron'), now_ts)
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: update_cron_task_run(task_id, now_ts, next_run)
+                    )
             except Exception as ex:
                 log.error(f"[CronEngine] Error in finally state update: {ex}")
             finally:

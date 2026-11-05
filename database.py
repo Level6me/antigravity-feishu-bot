@@ -476,6 +476,12 @@ def get_all_cron_tasks(chat_id=None):
     conn = get_db()
     try:
         cursor = conn.cursor()
+        # 自动清理已触发完毕的历史一次性倒计时任务（仅保留 cron_logs 审计日志）
+        cursor.execute(
+            "DELETE FROM cron_tasks WHERE task_type = 'delay' AND is_active = 0 AND (run_count > 0 OR last_run_at > 0)"
+        )
+        if cursor.rowcount > 0:
+            conn.commit()
         if chat_id:
             cursor.execute('SELECT * FROM cron_tasks WHERE chat_id = ? OR chat_id = "" OR chat_id IS NULL OR category IN ("system", "maintenance") ORDER BY created_at DESC', (chat_id,))
         else:
@@ -623,17 +629,53 @@ def claim_cron_task(task_id: str, now_ts: int, tentative_next_run: int) -> bool:
         conn.close()
 
 
-def delete_cron_task(task_id: str):
+def delete_cron_task(task_id: str, keep_logs: bool = False):
     conn = get_db()
     try:
         cursor = conn.cursor()
         cursor.execute('DELETE FROM cron_tasks WHERE id = ?', (task_id,))
-        cursor.execute('DELETE FROM cron_logs WHERE task_id = ?', (task_id,))
+        if not keep_logs:
+            cursor.execute('DELETE FROM cron_logs WHERE task_id = ?', (task_id,))
         conn.commit()
         return True
     except Exception as e:
         log.error(f"[cron] delete_cron_task failed: {e}")
         return False
+    finally:
+        conn.close()
+
+
+def cleanup_completed_delay_tasks(chat_id: str = None, include_paused: bool = False) -> int:
+    """清理已完成的一次性任务（当 include_paused=True 时同时清理已暂停的用户任务），保留 cron_logs 执行日志。"""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        if include_paused:
+            if chat_id:
+                cursor.execute(
+                    "DELETE FROM cron_tasks WHERE is_active = 0 AND (chat_id = ? OR chat_id = '' OR chat_id IS NULL) AND category NOT IN ('system', 'maintenance')",
+                    (chat_id,),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM cron_tasks WHERE is_active = 0 AND category NOT IN ('system', 'maintenance')"
+                )
+        else:
+            if chat_id:
+                cursor.execute(
+                    "DELETE FROM cron_tasks WHERE task_type = 'delay' AND (is_active = 0 OR run_count > 0 OR last_run_at > 0) AND (chat_id = ? OR chat_id = '' OR chat_id IS NULL)",
+                    (chat_id,),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM cron_tasks WHERE task_type = 'delay' AND (is_active = 0 OR run_count > 0 OR last_run_at > 0)"
+                )
+        deleted = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        conn.commit()
+        return deleted
+    except Exception as e:
+        log.error(f"[cron] cleanup_completed_delay_tasks failed: {e}")
+        return 0
     finally:
         conn.close()
 

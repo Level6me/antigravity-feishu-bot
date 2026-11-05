@@ -44,18 +44,36 @@ BADGE_MAP = {
 }
 
 
+MAX_DISPLAY_TASKS = 15
+
+
+def _is_completed_delay_task(task: dict) -> bool:
+    """判断是否为已执行完毕的历史一次性倒计时任务"""
+    return (
+        task.get('task_type') == 'delay'
+        and not bool(task.get('is_active', 1))
+        and (int(task.get('run_count', 0) or 0) > 0 or int(task.get('last_run_at', 0) or 0) > 0)
+    )
+
+
 def build_cron_panel_card(tasks, active_tab="user", session_data=None):
-    user_tasks = [t for t in tasks if t.get('category') in ['user', None, '', 'default']]
-    sys_tasks = [t for t in tasks if t.get('category') in ['system', 'maintenance']]
+    valid_tasks = [t for t in (tasks or []) if not _is_completed_delay_task(t)]
+    user_tasks = [t for t in valid_tasks if t.get('category') in ['user', None, '', 'default']]
+    sys_tasks = [t for t in valid_tasks if t.get('category') in ['system', 'maintenance']]
     
     displayed_tasks = user_tasks if active_tab == 'user' else sys_tasks
+    has_inactive_user = any(not bool(t.get('is_active', 1)) for t in user_tasks)
     
     elements = []
     
     # 顶部说明与快捷按钮栏
     elements.append({
         "tag": "markdown",
-        "content": f"**⏱️ 计划任务管理中心 (Cron Center)**\n包含用户创建的周期指令与系统级后台任务。选中的分类：**{'👤 用户主动任务' if active_tab == 'user' else '⚙️ 系统后台任务'}**"
+        "content": (
+            f"**⏱️ 计划任务管理中心 (Cron Center)**\n"
+            f"当前分类：**{'👤 用户主动任务' if active_tab == 'user' else '⚙️ 系统后台任务'}**（共 **{len(displayed_tasks)}** 项） · "
+            f"*一次性任务触发后自动移除*"
+        )
     })
     
     # 切换 Tab 按钮与新建任务按钮
@@ -79,9 +97,16 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None):
             "value": {"action": "open_cron_create"}
         }
     ]
+    if active_tab == 'user' and has_inactive_user:
+        header_actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "🧹 清理已暂停"},
+            "type": "danger",
+            "value": {"action": "clear_completed_cron"}
+        })
     elements.append({
         "tag": "action",
-        "layout": "bisect",
+        "layout": "flow" if len(header_actions) > 3 else "bisect",
         "actions": header_actions
     })
     elements.append({"tag": "hr"})
@@ -89,26 +114,30 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None):
     if not displayed_tasks:
         elements.append({
             "tag": "markdown",
-            "content": f"*(暂无{'用户主动' if active_tab == 'user' else '系统后台'}计划任务)*\n点击上方 **[ ➕ 新建任务 ]** 即可添加一个定时任务！"
+            "content": f"*(暂无{'用户主动' if active_tab == 'user' else '系统后台'}计划任务)*\n可以直接在聊天中发送：`一分钟后提醒我喝水` 或点击上方 **[ ➕ 新建任务 ]** 快速添加！"
         })
     else:
-        for t in displayed_tasks:
+        visible_tasks = displayed_tasks[:MAX_DISPLAY_TASKS]
+        for t in visible_tasks:
             t_id = t.get('id')
             is_active = bool(t.get('is_active', 1))
             status_icon = "🟢 启用中" if is_active else "🔴 已暂停"
             action_type = t.get('action_type', 'reminder')
             badge = BADGE_MAP.get(action_type, "💬【消息提醒】")
             t_name = t.get('name', '未命名任务')
+            t_type = t.get('task_type', 'cron')
+            cron_expr = t.get('cron_expr', '')
+            schedule_tag = f"⏳ 一次性 (`{cron_expr}`)" if t_type == 'delay' else f"🔁 周期 (`{cron_expr}`)"
             
             last_run = _format_timestamp(t.get('last_run_at'))
-            next_run_str = _format_relative_time(t.get('next_run_at'))
+            next_run_str = _format_relative_time(t.get('next_run_at')) if is_active else "已暂停"
             
             prompt_preview = t.get('prompt', '') or t.get('command', '')
             if len(prompt_preview) > 75:
                 prompt_preview = prompt_preview[:75] + "..."
                 
             task_md = f"**{badge} {t_name}**  {status_icon}\n" \
-                      f"⏰ **触发设定**：{next_run_str}\n" \
+                      f"⏰ **触发设定**：{schedule_tag} · {next_run_str}\n" \
                       f"💡 **执行内容**：{prompt_preview}\n" \
                       f"📊 **任务审计**：累计运行 **{t.get('run_count', 0)}** 次 · 上次：{last_run} (`#{t_id}`)"
 
@@ -144,6 +173,12 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None):
                 "actions": task_actions
             })
             elements.append({"tag": "hr"})
+
+        if len(displayed_tasks) > MAX_DISPLAY_TASKS:
+            elements.append({
+                "tag": "markdown",
+                "content": f"*(仅展示最近 {MAX_DISPLAY_TASKS} 条任务，当前分类共 {len(displayed_tasks)} 条)*"
+            })
 
     elements.append(create_footer())
     card = {
@@ -203,6 +238,21 @@ def build_cron_execution_card(task_data, result_text, is_error=False, duration_m
     header_color = "red" if is_error else "green"
     status_title = "❌ 计划任务执行异常" if is_error else "✅ 计划任务报告"
     
+    action_buttons = []
+    if task_data.get('task_type') != 'delay':
+        action_buttons.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "🔄 再次运行"},
+            "type": "primary",
+            "value": {"action": "run_cron_now", "task_id": t_id}
+        })
+    action_buttons.append({
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "⚙️ 管理任务中心"},
+        "type": "default",
+        "value": {"action": "open_cron_panel"}
+    })
+
     elements = [
         {
             "tag": "markdown",
@@ -219,20 +269,7 @@ def build_cron_execution_card(task_data, result_text, is_error=False, duration_m
         {
             "tag": "action",
             "layout": "flow",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "🔄 再次运行"},
-                    "type": "primary",
-                    "value": {"action": "run_cron_now", "task_id": t_id}
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "⚙️ 管理任务中心"},
-                    "type": "default",
-                    "value": {"action": "open_cron_panel"}
-                }
-            ]
+            "actions": action_buttons
         }
     ]
 
@@ -256,11 +293,17 @@ def build_cron_created_card(task_data):
     t_id = task_data.get('id', '')
     cat = "👤 用户主动任务" if task_data.get('category') == 'user' else "⚙️ 系统后台任务"
     expr = task_data.get('cron_expr', '')
-    task_type = "标准 Cron 表达式" if task_data.get('task_type') == 'cron' else "倒计时定时器"
+    is_delay = task_data.get('task_type') == 'delay'
+    task_type = "一次性倒计时" if is_delay else "标准 Cron 表达式"
     prompt = task_data.get('prompt', '')
     
     next_ts = task_data.get('next_run_at', 0)
-    next_str = datetime.fromtimestamp(next_ts).strftime('%Y-%m-%d %H:%M:%S') if next_ts > 0 else "算中..."
+    next_str = datetime.fromtimestamp(next_ts).strftime('%Y-%m-%d %H:%M:%S') if next_ts > 0 else "计算中..."
+    lifecycle_note = (
+        "🛡️ *该一次性任务已持久化，触发完成后将自动从任务列表移除（执行记录保留于审计日志）。*"
+        if is_delay else
+        "🛡️ *该周期任务已持久化存入数据库，中途发生重启亦可自动恢复调度。*"
+    )
 
     elements = [
         {
@@ -273,7 +316,7 @@ def build_cron_created_card(task_data):
         {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": f"**📝 预设执行 Prompt**\n`{prompt}`\n\n🛡️ *该任务已持久化存入数据库，中途发生重启亦可自动恢复倒计时与触发。*"
+            "content": f"**📝 预设执行 Prompt**\n`{prompt}`\n\n{lifecycle_note}"
         },
         {"tag": "hr"},
         {
@@ -291,6 +334,12 @@ def build_cron_created_card(task_data):
                     "text": {"tag": "plain_text", "content": "⚙️ 打开任务中心"},
                     "type": "default",
                     "value": {"action": "open_cron_panel"}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🗑️ 撤销任务"},
+                    "type": "danger",
+                    "value": {"action": "delete_cron_task", "task_id": t_id}
                 }
             ]
         },

@@ -97,6 +97,21 @@ def build_execution_report_card(task: dict, result_text: str, is_error: bool = F
     header_color = "red" if is_error else "green"
     status_title = "❌ 任务执行异常" if is_error else "✅ 任务执行成功"
 
+    action_buttons = []
+    if task.get("task_type") != "delay":
+        action_buttons.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "🔄 再次运行"},
+            "type": "primary",
+            "value": {"action": "run_cron_now", "task_id": task_id}
+        })
+    action_buttons.append({
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "⚙️ 任务中心"},
+        "type": "default",
+        "value": {"action": "open_cron_panel"}
+    })
+
     return {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -119,20 +134,7 @@ def build_execution_report_card(task: dict, result_text: str, is_error: bool = F
             {
                 "tag": "action",
                 "layout": "flow",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🔄 再次运行"},
-                        "type": "primary",
-                        "value": {"action": "run_cron_now", "task_id": task_id}
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "⚙️ 任务中心"},
-                        "type": "default",
-                        "value": {"action": "open_cron_panel"}
-                    }
-                ]
+                "actions": action_buttons
             }
         ]
     }
