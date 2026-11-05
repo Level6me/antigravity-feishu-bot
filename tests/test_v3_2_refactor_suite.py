@@ -160,6 +160,27 @@ class TestV32RefactorSuite(unittest.TestCase):
         self.assertNotIn("tok_98456", src)
         self.assertNotIn("bz_live_7546", src)
 
+    def test_07_session_pool_race_and_warm_reuse_and_proc_tree(self):
+        from session_pool import SessionPool, _extract_model_family
+        from executor import _get_process_tree_status
+
+        pool = SessionPool()
+        # 1. Prewarm creates session with process=None; immediate get_or_create MUST reuse it (no duplicate spawn)
+        s1 = pool.get_or_create("chat_race_test", "gemini-3.8-flash-medium", "/tmp", "conv-123", effort="medium")
+        s2 = pool.get_or_create("chat_race_test", "gemini-3.8-flash-medium", "/tmp", "conv-123", effort="medium")
+        self.assertIs(s1, s2)
+
+        # 2. Adaptive tier shift within same model family reuses warm session
+        self.assertEqual(_extract_model_family("gemini-3.8-flash-high"), "gemini-3.8-flash")
+        self.assertEqual(_extract_model_family("gemini-3.8-flash-low"), "gemini-3.8-flash")
+        s3 = pool.get_or_create("chat_race_test", "gemini-3.8-flash-low", "/tmp", "conv-123", effort="low")
+        self.assertIs(s1, s3)
+
+        # 3. Pure /proc process tree status check works accurately
+        tree_stat = _get_process_tree_status(os.getpid())
+        self.assertIn(os.getpid(), tree_stat["all_pids"])
+        self.assertGreaterEqual(tree_stat["total_cputime"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

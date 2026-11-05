@@ -714,16 +714,21 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         
     elif user_text.startswith("/clear"):
         session_data["conversation"] = ""
+        session_data.pop("_sys_prompt_injected_conv", None)
+        if session_data.get("base_model"):
+            session_data["model"] = session_data["base_model"]
         await save_session_async(chat_id, session_data)
         try:
             from session_pool import session_pool
+            from system_one_gate import infer_effort_from_model
             await session_pool.reset_session(chat_id)
-            model_to_warm = session_data.get("model", "Default")
+            model_to_warm = session_data.get("base_model") or session_data.get("model", "Default")
+            effort_to_warm = infer_effort_from_model(model_to_warm, session_data.get("reasoning_effort", "medium"))
             proj_val = session_data.get("project")
             cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
             asyncio.create_task(session_pool.prewarm(
                 chat_id, model_to_warm, cwd_dir, conversation_id="",
-                effort=session_data.get("reasoning_effort", "medium")
+                effort=effort_to_warm
             ))
         except Exception:
             pass

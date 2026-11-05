@@ -28,6 +28,16 @@ from logger import log
 import app_state
 
 _TERMINAL_TURN_EVENTS = {"result", "error", "turn_error", "cancelled", "fatal", "process_exit", "read_error"}
+_EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-xhigh", "-max")
+
+
+def _extract_model_family(model_name: str) -> str:
+    """Return base model family name with adaptive effort suffix stripped."""
+    m = (model_name or "").strip().lower()
+    for sfx in _EFFORT_SUFFIXES:
+        if m.endswith(sfx):
+            return m[:-len(sfx)]
+    return m
 
 class TurnEventStream:
     """A thread-safe, non-cancellable stream of parsed JSON events for a single dialogue turn.
@@ -110,16 +120,23 @@ class PersistentSession:
     def is_alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
 
+    def is_dead_or_closing(self) -> bool:
+        """True only when this session was explicitly closed or its spawned process has exited.
+        Returns False for a newly created session that is about to start or currently spawning,
+        preventing get_or_create() from overwriting a prewarming session and leaking an orphan process.
+        """
+        return self._closing or (self.process is not None and self.process.returncode is not None)
+
     async def start(self):
         # prewarm and request execution may race to start the same process.
         async with self._start_lock:
-            if self.is_alive():
+            if self._closing or self.is_alive():
                 return
             await self._start_process()
 
     async def _start_process(self):
         """Spawn the background agy process in stream-json mode."""
-        if self.is_alive():
+        if self._closing or self.is_alive():
             return
 
         bin_path = ANTIGRAVITY_BIN or find_antigravity_bin()
@@ -162,7 +179,7 @@ class PersistentSession:
         custom_env["STDOUT_LINE_BUFFERED"] = "1"
 
         log.info(f"[SessionPool] Spawning warm agy process for chat {self.chat_id} (model={self.model}, effort={self.effort}, sandbox={self.sandbox_enabled}, cwd={cwd_dir})")
-        self.process = await asyncio.create_subprocess_exec(
+        proc = await asyncio.create_subprocess_exec(
             *cmd_args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -171,6 +188,18 @@ class PersistentSession:
             cwd=cwd_dir,
             env=custom_env
         )
+        # If close() was invoked while create_subprocess_exec was awaiting, terminate immediately so no orphan leaks
+        if self._closing:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            return
+
+        self.process = proc
         self._decoder = codecs.getincrementaldecoder('utf-8')()
         self._line_buffer = ""
         self.last_active_time = time.time()
@@ -253,46 +282,47 @@ class PersistentSession:
     async def close(self):
         """Gracefully terminate the warm process."""
         self._closing = True
-        # Cancel stderr drain first
-        if self._stderr_drain_task and not self._stderr_drain_task.done():
-            self._stderr_drain_task.cancel()
-            try:
-                await self._stderr_drain_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._stderr_drain_task = None
-        proc = self.process
-        self.process = None
-        if app_state.running_processes.get(self.chat_id) is proc:
-            app_state.running_processes.pop(self.chat_id, None)
-        if proc:
-            try:
-                # Non-blocking pure /proc descendant PID discovery (never blocks asyncio event loop with subprocess.check_output)
-                descendant_pids = [p for p in snapshot_process_group_pids(proc.pid) if p != proc.pid]
+        async with self._start_lock:
+            # Cancel stderr drain first
+            if self._stderr_drain_task and not self._stderr_drain_task.done():
+                self._stderr_drain_task.cancel()
+                try:
+                    await self._stderr_drain_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._stderr_drain_task = None
+            proc = self.process
+            self.process = None
+            if app_state.running_processes.get(self.chat_id) is proc:
+                app_state.running_processes.pop(self.chat_id, None)
+            if proc:
+                try:
+                    # Non-blocking pure /proc descendant PID discovery (never blocks asyncio event loop with subprocess.check_output)
+                    descendant_pids = [p for p in snapshot_process_group_pids(proc.pid) if p != proc.pid]
 
-                if proc.returncode is None:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                    except Exception:
-                        pass
-                    for d_pid in descendant_pids:
+                    if proc.returncode is None:
                         try:
-                            os.kill(d_pid, signal.SIGTERM)
+                            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                         except Exception:
                             pass
-                    await asyncio.sleep(0.15)
-                if proc.returncode is None:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except Exception:
-                        pass
-                    for d_pid in descendant_pids:
+                        for d_pid in descendant_pids:
+                            try:
+                                os.kill(d_pid, signal.SIGTERM)
+                            except Exception:
+                                pass
+                        await asyncio.sleep(0.15)
+                    if proc.returncode is None:
                         try:
-                            os.kill(d_pid, signal.SIGKILL)
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                         except Exception:
                             pass
-            except Exception as e:
-                log.warning(f"[SessionPool] Error terminating process for {self.chat_id}: {e}")
+                        for d_pid in descendant_pids:
+                            try:
+                                os.kill(d_pid, signal.SIGKILL)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    log.warning(f"[SessionPool] Error terminating process for {self.chat_id}: {e}")
 
 class SessionPool:
     """Manages active persistent sessions across chats."""
@@ -310,19 +340,43 @@ class SessionPool:
         real_chat_id = str(chat_id).split("cron_")[-1] if str(chat_id).startswith("cron_") else str(chat_id)
         user_lacks_shell = not is_admin(real_chat_id) and not has_scope(real_chat_id, SCOPE_SHELL)
         sandbox_enabled = bool((config.TYPESAFE_ENABLED and config.TYPESAFE_TIER == "copilot") or user_lacks_shell)
-        # --model, --effort and sandbox policy are fixed when agy starts.
-        # Reuse only a process that exactly matches the current request.
-        model_mismatch = bool(sess and (
-            sess.model != model
-            or sess.effort != normalized_effort
-            or sess.sandbox_enabled != sandbox_enabled
-        ))
 
-        if sess is None or model_mismatch or sess.project_dir != project_dir or conv_mismatch or not sess.is_alive():
+        sess_dead = sess is None or sess.is_dead_or_closing()
+        auto_mode = bool(getattr(config, "TYPESAFE_AUTO_MODE", True))
+        if sess and not sess_dead and auto_mode:
+            # 自适应模式下，若常驻进程同属一个基础模型家族且沙箱策略一致，直接复用温池，
+            # 避免因单轮 -low/-medium/-high 档位微调频繁杀死温池进程导致 8~12s 冷启动与重载开销
+            model_mismatch = bool(
+                _extract_model_family(sess.model) != _extract_model_family(model)
+                or sess.sandbox_enabled != sandbox_enabled
+            )
+        else:
+            model_mismatch = bool(sess and (
+                sess.model != model
+                or sess.effort != normalized_effort
+                or sess.sandbox_enabled != sandbox_enabled
+            ))
+
+        if sess_dead or model_mismatch or sess.project_dir != project_dir or conv_mismatch:
             if sess:
                 asyncio.create_task(sess.close())
+            # Evict excess idle unlocked sessions to bound total memory footprint on low-RAM hosts
+            max_warm = int(getattr(config, "MAX_WARM_SESSIONS", 2) or 2)
+            idle_candidates = [
+                (cid, s) for cid, s in list(self._sessions.items())
+                if cid != chat_id and not s.lock.locked()
+            ]
+            if len(idle_candidates) >= max_warm:
+                idle_candidates.sort(key=lambda item: item[1].last_active_time)
+                for evict_cid, evict_sess in idle_candidates[:len(idle_candidates) - max_warm + 1]:
+                    self._sessions.pop(evict_cid, None)
+                    asyncio.create_task(evict_sess.close())
             sess = PersistentSession(chat_id, model, project_dir, conversation_id, normalized_effort, sandbox_enabled)
             self._sessions[chat_id] = sess
+        else:
+            sess.last_active_time = time.time()
+            if conversation_id and not sess.conversation_id:
+                sess.conversation_id = conversation_id
         return sess
 
     def update_conversation_id(self, chat_id: str, conversation_id: str):
@@ -341,6 +395,24 @@ class SessionPool:
                 await sess.start()
         except Exception as e:
             log.warning(f"[SessionPool] Prewarm failed for chat {chat_id}: {e}")
+
+    async def reap_idle_sessions(self, max_idle_seconds: float = 1800.0) -> int:
+        """Close and remove idle unlocked sessions that have been inactive longer than max_idle_seconds."""
+        now = time.time()
+        reaped = 0
+        for chat_id, sess in list(self._sessions.items()):
+            if sess.lock.locked() or sess._start_lock.locked():
+                continue
+            if sess.is_dead_or_closing() or (now - sess.last_active_time > max_idle_seconds):
+                self._sessions.pop(chat_id, None)
+                try:
+                    await sess.close()
+                    reaped += 1
+                except Exception as e:
+                    log.debug(f"[SessionPool] Error closing idle session {chat_id}: {e}")
+        if reaped > 0:
+            log.info(f"[SessionPool] Reaped {reaped} idle/expired warm session(s).")
+        return reaped
 
     async def reset_session(self, chat_id: str):
         """Close and purge a chat's session."""

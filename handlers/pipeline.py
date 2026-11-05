@@ -48,8 +48,12 @@ def get_recent_conversation_context(session_data: dict, max_chars: int = 600) ->
 
     try:
         import json
-        with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
+        file_size = os.path.getsize(transcript_path)
+        with open(transcript_path, "rb") as bf:
+            if file_size > 131072:
+                bf.seek(file_size - 131072)
+            tail_text = bf.read().decode("utf-8", errors="ignore")
+        lines = tail_text.splitlines()
         for line in reversed(lines[-200:]):
             line = line.strip()
             if not line:
@@ -558,80 +562,109 @@ async def _process_single_task(chat_id, task):
                 "用户正在通过飞书原生语音与你对话，请遵循口语化表达，语言自然亲切、凝练生动。\n\n"
             )
     else:
-        system_instruction = (
-            "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
-            "Any English text in the response must be limited to code syntax or technical names only. "
-            "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles. "
-            "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
+        active_conv_id = session_data.get("conversation", "")
+        already_injected_static = bool(
+            active_conv_id
+            and session_data.get("_sys_prompt_injected_conv") == active_conv_id
+            and session_data.get("_sys_prompt_injected_proj") == current_proj
+            and not is_resumed
         )
 
-        system_instruction += (
-            "[System Feishu Resource Delivery / 飞书文件传送规范]\n"
-            "1. 【统一使用飞书官方推送】：向用户提供文件时，请在最终回复中直接以标准 Markdown 链接输出该文件的本地绝对路径（例如 `[导出报告.xlsx](/path/to/file.xlsx)` 或 `📄 [文档.md](/path/to/doc.md)`），系统后台会自动拦截该路径并调用飞书官方 API 原生推送到当前会话供用户点击下载。严禁在脚本中私自 curl/webhook 传文件。\n"
-            "2. 【命令行主动发送】：在终端脚本中如需主动传送文件，可直接运行 `python3 send_to_feishu.py <文件路径>`。\n\n"
-        )
-
-        if task.get("message_type") == "audio" or task.get("is_voice_message"):
-            system_instruction += (
-                "[Voice Interaction Directive / 语音交互规范]\n"
-                "用户正在通过飞书原生语音与你对话，回复将合成为语音消息。请遵循口语化表达，语言自然生动、亲切凝练、避免长代码块或复杂大表格。\n\n"
+        if already_injected_static:
+            # 同会话后续轮次：完整静态规范已在首轮写入 transcript.jsonl，此处仅注入精简动态指令，防止多轮对话上下文滚雪球膨胀
+            system_instruction = (
+                "[System Rule: Reply ONLY in Simplified Chinese (简体中文). NEVER output internal chain-of-thought or English preambles.]\n"
+                f"[Active Project: {current_proj} | Guardrail: terminal commands MUST prefix `timeout <秒数>`; never restart main.py]\n"
             )
-
-        # 注入当前工作空间上下文与安全防线（全模式常驻保障）
-        system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
-        system_instruction += (
-            "[System Execution & Safety Guardrails]\n"
-            "1. 【全指令强制超时】：终端执行必须前缀 `timeout <秒数>`。\n"
-            "2. 【受限递归与安全避让】：严禁系统全盘无限制递归搜索；严禁重启当前飞书机器人自身进程。\n"
-            "3. 【计划任务调度能力】：用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
-        )
-        if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot" or getattr(decision, "security_level", "L0") == "L2":
-            system_instruction += (
-                "[System One Co-Pilot & HMDM L2 Safety Directive / 全链路高风险受控执行规则]\n"
-                "当前请求触发了 System One Level 3 或 HMDM L2 累积风险门禁（不受 Low/Medium 复杂度档位豁免）。\n"
-                "1. 【工具调用前审慎】：核验命令参数的安全性与受控性，严禁超出项目目录的不可逆破坏操作（如批量删除、强制重置、停止核心服务）。\n"
-                "2. 【报错自愈反思】：命令执行失败退出码非 0 时，深入分析根因自愈修正，严禁机械重复失败命令。\n\n"
-            )
-        project_prompts = session_data.get("project_prompts", {})
-        if current_proj in project_prompts and project_prompts[current_proj]:
-            proj_prompt_text = project_prompts[current_proj]
-            system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
-
-        if is_complex_agent:
-            # 复杂工程任务与操作指令模式
-            system_instruction += (
-                "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
-                "【必须执行】：只要你判断当前任务需要调用工具执行操作（读写代码、运行终端命令、多步排错、生成导出文件等），必须在回复的最开始输出一行结构化规划标签：\n"
-                "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | 步骤4名称 [/TASK_PLAN]\n"
-                "规则要求：规划精炼定制（3~4步为宜），输出标签后立即调用首个工具开始执行，不要输出任何多余过渡句；纯文本问答严禁输出此标签。\n\n"
-            )
-            system_instruction += (
-                "[System Autonomous Execution Directive / 自主执行决策规范]\n"
-                "用户核心准则：【严格区分提问与命令】。\n"
-                "1. 【命令必须自主执行并交付】：对于用户的操作、修改、运行、测试、排查等执行诉求（包括“改吧”、“执行”等简短授权），你必须作为全功能 Autonomous Agent 自主调用相应工具直接执行并交付最终结果！\n"
-                "2. 【绝对严禁推诿与二次确认】：严禁让用户在服务器或本地终端手动运行命令；严禁抛出多选方案让用户做选择题；严禁停下来等待用户确认；绝对严禁以“受安全策略限制”为借口拒绝执行命令！\n\n"
-            )
+            if task.get("message_type") == "audio" or task.get("is_voice_message"):
+                system_instruction += "[Voice Interaction: 请用自然亲切的口语化中文精炼回复，避免长代码块。]\n"
+            if is_complex_agent:
+                system_instruction += (
+                    "[TASK_PLAN Rule: 若需调用工具执行操作，回复首行必须先输出 `[TASK_PLAN] 步骤1 | 步骤2 | 步骤3 | 步骤4 [/TASK_PLAN]` 并立即自主调用工具执行到底，严禁推诿或等待确认；纯文本问答严禁输出此标签。]\n"
+                )
         else:
-            # 轻量问答与概念咨询模式：纯文本高效解答，但绝不推诿操作诉求
-            system_instruction += (
-                "[System Interaction Directive / 问答交互规范]\n"
-                "用户核心准则：【严格区分提问与命令】。\n"
-                "1. 【提问秒回纯文本】：当用户提出的是概念咨询、原理解释、方案探讨或日常闲聊时，无需调用工具，直接针对问题组织语言，用凝练、专业、清晰的语言进行解答。\n"
-                "2. 【操作绝不推诿拒执】：若用户意图中含有明确的操作诉求，你依然拥有完整的全套 Agent 工具调用能力，必须自主调用工具完成任务，绝对严禁以“处于轻量纯文本交互模式”为由拒绝执行，严禁推诿让用户手动操作！\n\n"
+            session_data["_sys_prompt_injected_proj"] = current_proj
+            session_data["_sys_prompt_pending_mark"] = True
+            system_instruction = (
+                "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
+                "Any English text in the response must be limited to code syntax or technical names only. "
+                "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles. "
+                "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
             )
 
-        # 注入长期记忆上下文（由 ai_memory 插件提取）
-        mem_ctx = session_data.get("memory_context")
-        if mem_ctx:
-            system_instruction += f"[User Long-Term Memory / 用户长期偏好与记忆]\n{mem_ctx}\n\n"
+            system_instruction += (
+                "[System Feishu Resource Delivery / 飞书文件传送规范]\n"
+                "1. 【统一使用飞书官方推送】：向用户提供文件时，请在最终回复中直接以标准 Markdown 链接输出该文件的本地绝对路径（例如 `[导出报告.xlsx](/path/to/file.xlsx)` 或 `📄 [文档.md](/path/to/doc.md)`），系统后台会自动拦截该路径并调用飞书官方 API 原生推送到当前会话供用户点击下载。严禁在脚本中私自 curl/webhook 传文件。\n"
+                "2. 【命令行主动发送】：在终端脚本中如需主动传送文件，可直接运行 `python3 send_to_feishu.py <文件路径>`。\n\n"
+            )
+
+            if task.get("message_type") == "audio" or task.get("is_voice_message"):
+                system_instruction += (
+                    "[Voice Interaction Directive / 语音交互规范]\n"
+                    "用户正在通过飞书原生语音与你对话，回复将合成为语音消息。请遵循口语化表达，语言自然生动、亲切凝练、避免长代码块或复杂大表格。\n\n"
+                )
+
+            # 注入当前工作空间上下文与安全防线（全模式常驻保障）
+            system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
+            system_instruction += (
+                "[System Execution & Safety Guardrails]\n"
+                "1. 【全指令强制超时】：终端执行必须前缀 `timeout <秒数>`。\n"
+                "2. 【受限递归与安全避让】：严禁系统全盘无限制递归搜索；严禁重启当前飞书机器人自身进程。\n"
+                "3. 【计划任务调度能力】：用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
+            )
+            if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot" or getattr(decision, "security_level", "L0") == "L2":
+                system_instruction += (
+                    "[System One Co-Pilot & HMDM L2 Safety Directive / 全链路高风险受控执行规则]\n"
+                    "当前请求触发了 System One Level 3 或 HMDM L2 累积风险门禁（不受 Low/Medium 复杂度档位豁免）。\n"
+                    "1. 【工具调用前审慎】：核验命令参数的安全性与受控性，严禁超出项目目录的不可逆破坏操作（如批量删除、强制重置、停止核心服务）。\n"
+                    "2. 【报错自愈反思】：命令执行失败退出码非 0 时，深入分析根因自愈修正，严禁机械重复失败命令。\n\n"
+                )
+            project_prompts = session_data.get("project_prompts", {})
+            if current_proj in project_prompts and project_prompts[current_proj]:
+                proj_prompt_text = project_prompts[current_proj]
+                system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
+
+            if is_complex_agent:
+                # 复杂工程任务与操作指令模式
+                system_instruction += (
+                    "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
+                    "【必须执行】：只要你判断当前任务需要调用工具执行操作（读写代码、运行终端命令、多步排错、生成导出文件等），必须在回复的最开始输出一行结构化规划标签：\n"
+                    "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | 步骤4名称 [/TASK_PLAN]\n"
+                    "规则要求：规划精炼定制（3~4步为宜），输出标签后立即调用首个工具开始执行，不要输出任何多余过渡句；纯文本问答严禁输出此标签。\n\n"
+                )
+                system_instruction += (
+                    "[System Autonomous Execution Directive / 自主执行决策规范]\n"
+                    "用户核心准则：【严格区分提问与命令】。\n"
+                    "1. 【命令必须自主执行并交付】：对于用户的操作、修改、运行、测试、排查等执行诉求（包括“改吧”、“执行”等简短授权），你必须作为全功能 Autonomous Agent 自主调用相应工具直接执行并交付最终结果！\n"
+                    "2. 【绝对严禁推诿与二次确认】：严禁让用户在服务器或本地终端手动运行命令；严禁抛出多选方案让用户做选择题；严禁停下来等待用户确认；绝对严禁以“受安全策略限制”为借口拒绝执行命令！\n\n"
+                )
+            else:
+                # 轻量问答与概念咨询模式：纯文本高效解答，但绝不推诿操作诉求
+                system_instruction += (
+                    "[System Interaction Directive / 问答交互规范]\n"
+                    "用户核心准则：【严格区分提问与命令】。\n"
+                    "1. 【提问秒回纯文本】：当用户提出的是概念咨询、原理解释、方案探讨或日常闲聊时，无需调用工具，直接针对问题组织语言，用凝练、专业、清晰的语言进行解答。\n"
+                    "2. 【操作绝不推诿拒执】：若用户意图中含有明确的操作诉求，你依然拥有完整的全套 Agent 工具调用能力，必须自主调用工具完成任务，绝对严禁以“处于轻量纯文本交互模式”为由拒绝执行，严禁推诿让用户手动操作！\n\n"
+                )
+
+            # 注入长期记忆上下文（由 ai_memory 插件提取）
+            mem_ctx = session_data.get("memory_context")
+            if mem_ctx:
+                system_instruction += f"[User Long-Term Memory / 用户长期偏好与记忆]\n{mem_ctx}\n\n"
 
         # 注入用户备忘录 Notes (JIT 按需挂载：常规本地代码开发杜绝敏感服务器凭证注入)
         raw_notes = session_data.get("notes", [])
         if raw_notes:
             relevant_notes = filter_relevant_notes(raw_notes, user_text, context=recent_context)
-            if relevant_notes:
+            if relevant_notes and not already_injected_static:
                 notes_block = "\n".join([f"- {note}" for note in relevant_notes])
                 system_instruction += f"[User's Permanent Notes / 备忘录]\n{notes_block}\n\n"
+            elif relevant_notes and already_injected_static:
+                # 后续轮次仅当命中敏感凭证按需挂载时才补充注入
+                sensitive_notes = [n for n in relevant_notes if CREDENTIAL_SENSITIVE_PATTERN.search(n)]
+                if sensitive_notes:
+                    notes_block = "\n".join([f"- {note}" for note in sensitive_notes])
+                    system_instruction += f"[User's Relevant Notes]\n{notes_block}\n"
 
         # 注入 System One 自适应思考模式指令 (Adaptive Reasoning Effort: Low / Medium / High)
         adaptive_effort = session_data.get("typesafe_adaptive_tier")

@@ -57,10 +57,10 @@ def backup_database_if_due():
         log.error(f"[GC] Backup cleanup failed: {e}")
 
 
-async def garbage_collector(interval_seconds=3600, max_age_seconds=86400):
+async def garbage_collector(interval_seconds=900, max_age_seconds=86400):
     """
-    Background task to periodically clean up old downloads and logs.
-    :param interval_seconds: How often to run the cleanup (default 1 hour).
+    Background task to periodically clean up idle warm sessions, old downloads, and logs.
+    :param interval_seconds: How often to run the cleanup (default 15 minutes).
     :param max_age_seconds: Files older than this will be deleted (default 24 hours).
     """
     directories_to_clean = [os.path.join(BASE_DIR, "downloads"), os.path.join(BASE_DIR, "logs")]
@@ -69,6 +69,13 @@ async def garbage_collector(interval_seconds=3600, max_age_seconds=86400):
         try:
             now = time.time()
             deleted_count = 0
+
+            # 回收空闲超过 30 分钟的常驻 agy 温池进程，释放物理内存与 Swap
+            try:
+                from session_pool import session_pool
+                await session_pool.reap_idle_sessions(max_idle_seconds=1800.0)
+            except Exception as e:
+                log.debug(f"[GC] Idle session reaper skipped: {e}")
 
             # 每日数据库备份与过期日志清理（放入后台线程池执行，避免 VACUUM 阻塞主 asyncio 事件循环）
             await asyncio.to_thread(backup_database_if_due)

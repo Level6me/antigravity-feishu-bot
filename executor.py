@@ -76,16 +76,8 @@ def _clean_process_command(cmd: str) -> str:
 
 def _get_process_tree_status(root_pid: int) -> dict:
     """获取以 root_pid 为根的完整进程树状态（不仅限于同 PGID，覆盖所有 fork/exec 逃逸出的子孙进程）。
-    结合 Linux /proc 与 ps，提取实际运行指令、系统调用与内核等待状态、IO及CPU消耗。
-    返回:
-        total_cputime: 递归所有子孙进程的 CPU 时间之和
-        has_active_workers: 进程树中是否存在编译器/构建器/云端网络客户端等工作子进程
-        worker_names: 发现的活跃工作进程名称列表
-        detail_cmd: 当前实际运行的最深层/最活跃的核心命令
-        all_pids: 属于该树的所有 PID 集合
-        running_count: 处于 R(运行) 状态的进程数
-        sleeping_count: 处于 S(可中断睡眠/等待IO/网络) 状态的进程数
-        deadlock_suspect: 是否疑似 D(不可中断死锁/磁盘挂起) 或 Z(僵尸) 状态
+    优先使用零子进程开销的纯 /proc 解析，仅对属于 root_pid 子树的少量进程读取 cmdline，
+    彻底消除每 2 秒 fork `ps -eo` 子进程导致的页表复制与 Swap 抖动开销。
     """
     if not root_pid:
         return {
@@ -94,32 +86,64 @@ def _get_process_tree_status(root_pid: int) -> dict:
             "sleeping_count": 0, "deadlock_suspect": False
         }
     try:
-        out = subprocess.check_output(
-            ["ps", "-eo", "pid,ppid,state,wchan:20,comm,cputime,args"],
-            text=True, timeout=3
-        ).strip()
-        
         children_map = {}
         proc_info_map = {}
-        
-        for line in out.splitlines()[1:]:
-            parts = line.split(None, 6)
-            if len(parts) >= 6:
+
+        if os.path.isdir("/proc"):
+            try:
+                clk_tck = float(os.sysconf("SC_CLK_TCK"))
+            except Exception:
+                clk_tck = 100.0
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                p = int(entry)
                 try:
-                    p = int(parts[0])
-                    pp = int(parts[1])
-                    state = parts[2]
-                    wchan = parts[3]
-                    c = parts[4]
-                    t = _parse_cputime(parts[5])
-                    raw_args = parts[6] if len(parts) > 6 else c
+                    with open(f"/proc/{p}/stat", "r", encoding="utf-8", errors="ignore") as sf:
+                        stat_line = sf.read()
+                    lpar = stat_line.find("(")
+                    rpar = stat_line.rfind(")")
+                    if lpar == -1 or rpar == -1:
+                        continue
+                    c = stat_line[lpar + 1:rpar]
+                    rest = stat_line[rpar + 2:].split()
+                    if len(rest) < 13:
+                        continue
+                    state = rest[0]
+                    pp = int(rest[1])
+                    utime = int(rest[11])
+                    stime = int(rest[12])
+                    t = (utime + stime) / clk_tck
                     children_map.setdefault(pp, []).append(p)
                     proc_info_map[p] = {
-                        "pid": p, "ppid": pp, "state": state, "wchan": wchan,
-                        "comm": c, "cputime": t, "args": raw_args
+                        "pid": p, "ppid": pp, "state": state, "wchan": "",
+                        "comm": c, "cputime": t, "args": ""
                     }
-                except (ValueError, TypeError):
+                except Exception:
                     continue
+        else:
+            out = subprocess.check_output(
+                ["ps", "-eo", "pid,ppid,state,wchan:20,comm,cputime,args"],
+                text=True, timeout=3
+            ).strip()
+            for line in out.splitlines()[1:]:
+                parts = line.split(None, 6)
+                if len(parts) >= 6:
+                    try:
+                        p = int(parts[0])
+                        pp = int(parts[1])
+                        state = parts[2]
+                        wchan = parts[3]
+                        c = parts[4]
+                        t = _parse_cputime(parts[5])
+                        raw_args = parts[6] if len(parts) > 6 else c
+                        children_map.setdefault(pp, []).append(p)
+                        proc_info_map[p] = {
+                            "pid": p, "ppid": pp, "state": state, "wchan": wchan,
+                            "comm": c, "cputime": t, "args": raw_args
+                        }
+                    except (ValueError, TypeError):
+                        continue
 
         # BFS 遍历 root_pid 的整个子孙树
         all_pids = set()
@@ -131,6 +155,18 @@ def _get_process_tree_status(root_pid: int) -> dict:
                 for child in children_map[curr]:
                     if child not in all_pids:
                         queue.append(child)
+
+        # 仅针对属于 root_pid 树的子进程按需读取 /proc/<pid>/cmdline
+        if os.path.isdir("/proc"):
+            for p in all_pids:
+                info = proc_info_map.get(p)
+                if info and not info["args"]:
+                    try:
+                        with open(f"/proc/{p}/cmdline", "rb") as cf:
+                            raw_bytes = cf.read(4096)
+                        info["args"] = raw_bytes.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip() or info["comm"]
+                    except Exception:
+                        info["args"] = info["comm"]
 
         total_cpu = 0.0
         active_workers = []
@@ -470,13 +506,16 @@ def parse_transcript_turn(transcript_path, initial_size=0):
     if not transcript_path or not os.path.exists(transcript_path):
         return ([], set(), False)
     try:
-        with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
-            if initial_size > 0:
+        file_size = os.path.getsize(transcript_path)
+        seek_pos = initial_size if initial_size > 0 else max(0, file_size - 262144)
+        with open(transcript_path, 'rb') as bf:
+            if seek_pos > 0:
                 try:
-                    f.seek(initial_size)
+                    bf.seek(seek_pos)
                 except Exception:
                     pass
-            lines = f.readlines()
+            raw_text = bf.read().decode('utf-8', errors='ignore')
+        lines = raw_text.splitlines()
         if not lines:
             return ([], set(), False)
 
@@ -578,66 +617,78 @@ def is_transcript_turn_completed(transcript_path, initial_size=0):
     _, _, is_done = parse_transcript_turn(transcript_path, initial_size)
     return is_done
 
+_RE_TASK_PLAN_PAIR = re.compile(r'\[TASK_PLAN\].*?\[/TASK_PLAN\]\s*', re.DOTALL | re.IGNORECASE)
+_RE_TASK_PLAN_OPEN = re.compile(r'^\s*\[TASK_PLAN\][^\n]*(?:\n|$)', re.IGNORECASE)
+_RE_TASK_PLAN_CLOSE = re.compile(r'\[/TASK_PLAN\]', re.IGNORECASE)
+_RE_THOUGHT_PAIR = re.compile(r'<(?:thought|thinking|think)>.*?</(?:thought|thinking|think)>', re.DOTALL | re.IGNORECASE)
+_RE_THOUGHT_DANGLING_CLOSE = re.compile(r'^.*?</(?:thought|thinking|think)>\s*', re.DOTALL | re.IGNORECASE)
+_RE_THOUGHT_DANGLING_OPEN = re.compile(r'^<(?:thought|thinking|think)>.*', re.DOTALL | re.IGNORECASE)
+_RE_THOUGHT_FENCE = re.compile(r'```(?:thinking|thought)\b.*?```', re.DOTALL | re.IGNORECASE)
+_RE_TASK_DONE_LOG = re.compile(r'Task\s+"[^"]*"\s+(?:completed|finished)\s+with\s+exit\s+code\s+\d+.*?(?:Output:\s*.*?)?(?=\n\n|\Z)', re.DOTALL | re.IGNORECASE)
+_RE_TASK_UPDATE_TAG = re.compile(r'<task_update\b.*?</task_update>', re.DOTALL | re.IGNORECASE)
+_RE_SYS_MSG_TAG = re.compile(r'<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>', re.DOTALL | re.IGNORECASE)
+_RE_CMD_EXIT_LOG = re.compile(r'The command exited with code \d+\.?\s*(?:Output:\s*.*?)?(?=\n\n|\Z)', re.DOTALL | re.IGNORECASE)
+_RE_SSH_WARN = re.compile(r'Warning: Permanently added [^\n]+\n*', re.IGNORECASE)
+_RE_GIT_FROM = re.compile(r'From https://github\.com/[^\n]+\n*', re.IGNORECASE)
+_RE_ENG_PREAMBLE = re.compile(r'^(?:I\s+will|Sure,?\s+I\s+will|Let\s+me|Here\s+is|I\s+need\s+to|Based\s+on)\s+.*?\n\n', re.IGNORECASE | re.DOTALL)
+_RE_ENG_DECL = re.compile(r'^(?:I\s+will|Sure,?\s+I\s+will|Let\s+me)\s+(?:report|summarize|explain|respond|write|reply|communicate|answer|check|analyze)\b.+?(?:in\s+(?:Simplified\s+)?Chinese|below)\.?\s*', re.IGNORECASE | re.DOTALL)
+_RE_THINKING_MULTI_PARA = re.compile(r'^(?:\*\*|\#\#?\s*)?(?:Thinking Process|Internal Reasoning|Thought|Thinking)(?:\*\*|:)?\s*.*?(?=\n(?:\#|\*\*|[\u4e00-\u9fa5])|\Z)', re.DOTALL | re.IGNORECASE)
+_RE_THINKING_SINGLE_PARA = re.compile(r'(?:\*\*|\#\#?\s*)?(?:Thinking Process|Thought|Thinking|\bPlan\b|Reasoning|思考过程|内部推理)(?:\*\*|:|：)?\s*.*?(?=\n\n|\Z)', re.DOTALL | re.IGNORECASE)
+_RE_INTERNAL_MSG = re.compile(r'\[Message\]\s+timestamp=.*?content=.*?(?=\n\n|\Z)', re.DOTALL)
+_RE_PLACEHOLDER_STATUS = re.compile(r'\*\(\s*(?:🧠|🔍|⚙️|💡|🚀)?\s*正在.*?\)\*')
+_RE_CHOICE_CARD_STRIP = re.compile(r'\[CHOICE_CARD\]\s*Q:.*?(?:\[/CHOICE_CARD\]|\Z)', re.DOTALL | re.IGNORECASE)
+_STREAM_GUARD_RISK_RE = re.compile(
+    r'(?:-----BEGIN\s+[A-Z ]*PRIVATE\s+KEY-----|'
+    r'\b(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|sk-(?:proj-)?[A-Za-z0-9_-]{24,}|ey[A-Za-z0-9_-]{30,}\.ey[A-Za-z0-9_-]{30,})\b|'
+    r'\brm\s+-rf\s+/|\bmkfs\b|:\(\)\{.*\}|\bdd\s+if=/dev/)'
+)
+
+
 def extract_final_chinese_response(text):
     if not text:
         return ""
     
     # 0. 优先彻底移除成对闭合的任务规划标签块，开头未闭合流式行仅移除首行（避免正文中包含 `[TASK_PLAN]` 文本时截断后续全文）
-    text = re.sub(r'\[TASK_PLAN\].*?\[/TASK_PLAN\]\s*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    text = re.sub(r'^\s*\[TASK_PLAN\][^\n]*(?:\n|$)', '', text, flags=re.IGNORECASE).strip()
-    text = re.sub(r'\[/TASK_PLAN\]', '', text, flags=re.IGNORECASE).strip()
+    text = _RE_TASK_PLAN_PAIR.sub('', text).strip()
+    text = _RE_TASK_PLAN_OPEN.sub('', text).strip()
+    text = _RE_TASK_PLAN_CLOSE.sub('', text).strip()
 
     # 1. 移除被 XML 标签包裹的思考过程与思维链，如 <thought>...</thought>, <thinking>...</thinking>, <think>...</think>
     # 以及流式分片导致缺少开标签但残留闭合标签 </thought> 之前的所有思考内容
-    text = re.sub(r'<(?:thought|thinking|think)>.*?</(?:thought|thinking|think)>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    text = re.sub(r'^.*?</(?:thought|thinking|think)>\s*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    text = re.sub(r'^<(?:thought|thinking|think)>.*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    text = re.sub(r'```(?:thinking|thought)\b.*?```', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = _RE_THOUGHT_PAIR.sub('', text).strip()
+    text = _RE_THOUGHT_DANGLING_CLOSE.sub('', text).strip()
+    text = _RE_THOUGHT_DANGLING_OPEN.sub('', text).strip()
+    text = _RE_THOUGHT_FENCE.sub('', text).strip()
     
     # 2. 移除 Task 执行日志 (例如 Task "timeout 15s bash ..." completed with exit code 0. Output: ...)
-    text = re.sub(r'Task\s+"[^"]*"\s+(?:completed|finished)\s+with\s+exit\s+code\s+\d+.*?(?:Output:\s*.*?)?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    text = re.sub(r'<task_update\b.*?</task_update>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    text = re.sub(r'<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = _RE_TASK_DONE_LOG.sub('', text).strip()
+    text = _RE_TASK_UPDATE_TAG.sub('', text).strip()
+    text = _RE_SYS_MSG_TAG.sub('', text).strip()
 
     # 3. 移除终端原始退出状态及控制台片段 (例如 The command exited with code 0. Output: ...)
-    text = re.sub(r'The command exited with code \d+\.?\s*(?:Output:\s*.*?)?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    text = re.sub(r'Warning: Permanently added [^\n]+\n*', '', text, flags=re.IGNORECASE).strip()
-    text = re.sub(r'From https://github\.com/[^\n]+\n*', '', text, flags=re.IGNORECASE).strip()
+    text = _RE_CMD_EXIT_LOG.sub('', text).strip()
+    text = _RE_SSH_WARN.sub('', text).strip()
+    text = _RE_GIT_FROM.sub('', text).strip()
 
     # 4. 移除开头的常见英文规划与描述前缀 (例如 "I will...", "Sure, I will...", "Let me...", "Here is...", "I need to...")
-    text = re.sub(
-        r'^(?:I\s+will|Sure,?\s+I\s+will|Let\s+me|Here\s+is|I\s+need\s+to|Based\s+on)\s+.*?\n\n',
-        '',
-        text,
-        flags=re.IGNORECASE | re.DOTALL
-    ).strip()
+    text = _RE_ENG_PREAMBLE.sub('', text).strip()
 
     # 5. 移除单行英文申明 (例如 "I will respond in Simplified Chinese.", "Sure, I will analyze the codebase in Chinese.")
-    text = re.sub(
-        r'^(?:I\s+will|Sure,?\s+I\s+will|Let\s+me)\s+(?:report|summarize|explain|respond|write|reply|communicate|answer|check|analyze)\b.+?(?:in\s+(?:Simplified\s+)?Chinese|below)\.?\s*',
-        '',
-        text,
-        flags=re.IGNORECASE | re.DOTALL
-    ).strip()
+    text = _RE_ENG_DECL.sub('', text).strip()
 
     # 6. 移除包含 Thinking Process, Thought:, Plan:, Thinking:, 思考过程 等小标题的内部推理段落（支持跨多段英文思考清除）
-    text = re.sub(
-        r'^(?:\*\*|\#\#?\s*)?(?:Thinking Process|Internal Reasoning|Thought|Thinking)(?:\*\*|:)?\s*.*?(?=\n(?:\#|\*\*|[\u4e00-\u9fa5])|\Z)',
-        '',
-        text,
-        flags=re.DOTALL | re.IGNORECASE
-    ).strip()
-    text = re.sub(r'(?:\*\*|\#\#?\s*)?(?:Thinking Process|Thought|Thinking|\bPlan\b|Reasoning|思考过程|内部推理)(?:\*\*|:|：)?\s*.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = _RE_THINKING_MULTI_PARA.sub('', text).strip()
+    text = _RE_THINKING_SINGLE_PARA.sub('', text).strip()
 
     # 7. 移除内部消息包装 (例如 [Message] timestamp=... content=...)
-    text = re.sub(r'\[Message\]\s+timestamp=.*?content=.*?(?=\n\n|\Z)', '', text, flags=re.DOTALL).strip()
+    text = _RE_INTERNAL_MSG.sub('', text).strip()
 
     # 8. 清理残留的动态思考占位符
-    text = re.sub(r'\*\(\s*(?:🧠|🔍|⚙️|💡|🚀)?\s*正在.*?\)\*', '', text).strip()
+    text = _RE_PLACEHOLDER_STATUS.sub('', text).strip()
 
     # 9. 再次清理成对任务规划标签防泄漏
-    text = re.sub(r'\[TASK_PLAN\].*?\[/TASK_PLAN\]\s*', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
-    text = re.sub(r'^\s*\[TASK_PLAN\][^\n]*(?:\n|$)', '', text, flags=re.IGNORECASE).strip()
+    text = _RE_TASK_PLAN_PAIR.sub('', text).strip()
+    text = _RE_TASK_PLAN_OPEN.sub('', text).strip()
 
     return text
 
@@ -1011,6 +1062,8 @@ async def execute_antigravity(
             typesafe_blocked_info = None
             evaluated_tool_calls = set()
             last_patched_card_sig = ""
+            cached_raw_stream_buf = ""
+            cached_clean_partial = ""
             
             # 从配置中读取超时配置，支持自定义配置并设置合理防御值
             BASE_STALL_TIMEOUT = getattr(config, "STALL_TIMEOUT", 600)
@@ -1214,8 +1267,8 @@ async def execute_antigravity(
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
 
-                # 进程树状态与心跳检测（每 2 秒采集一次，基于 HMDM I/O + CPU + 非基线子进程活性）
-                if now - last_cpu_check_time >= 2.0:
+                # 进程树状态与心跳检测（仅在无事件静默 >= 2s 或存在在途工具时按需每 3 秒采集一次）
+                if now - last_cpu_check_time >= 3.0 and (stall_seconds >= 2 or current_tool_action or stream_action):
                     last_cpu_check_time = now
                     worker_status = await loop.run_in_executor(
                         None, lambda: _is_process_group_active(process.pid, vitality_state=vitality_state)
@@ -1288,12 +1341,17 @@ async def execute_antigravity(
                 clean_partial = ""
                 active_stream_buf = current_turn_text if current_turn_text.strip() else (accumulated_text if not completed_tool_steps else "")
                 if active_stream_buf and active_stream_buf.strip():
-                    raw_extracted = extract_final_chinese_response(active_stream_buf.strip())
-                    if raw_extracted:
-                        cp = re.sub(r'\[CHOICE_CARD\]\s*Q:.*?(?:\[/CHOICE_CARD\]|\Z)', '', raw_extracted, flags=re.DOTALL | re.IGNORECASE).strip()
-                        cp = re.sub(r'\[TASK_PLAN\].*?\[/TASK_PLAN\]\s*', '', cp, flags=re.DOTALL | re.IGNORECASE).strip()
-                        cp = re.sub(r'^\s*\[TASK_PLAN\][^\n]*(?:\n|$)', '', cp, flags=re.IGNORECASE).strip()
-                        clean_partial = cp.strip()
+                    if active_stream_buf == cached_raw_stream_buf:
+                        clean_partial = cached_clean_partial
+                    else:
+                        raw_extracted = extract_final_chinese_response(active_stream_buf.strip())
+                        if raw_extracted:
+                            cp = _RE_CHOICE_CARD_STRIP.sub('', raw_extracted).strip()
+                            cp = _RE_TASK_PLAN_PAIR.sub('', cp).strip()
+                            cp = _RE_TASK_PLAN_OPEN.sub('', cp).strip()
+                            clean_partial = cp.strip()
+                        cached_raw_stream_buf = active_stream_buf
+                        cached_clean_partial = clean_partial
 
                 has_tool_in_flight = bool(current_tool_action or stream_action)
                 is_complex = bool(planned_steps or completed_tool_steps)
@@ -1311,8 +1369,8 @@ async def execute_antigravity(
                     if is_voice_message:
                         # 语音对话模式：流式生成期间不提前打字剧透，优先保证语音消息首先送达
                         is_streaming_text = False
-                    elif guard_before_delivery:
-                        # Do not expose unreviewed text; final output is checked before delivery.
+                    elif guard_before_delivery and _STREAM_GUARD_RISK_RE.search(clean_partial):
+                        # 仅当流式分片命中疑似私钥/凭证或高危破坏指令时才暂缓流式，普通回复实时流式输出并在收尾通过 evaluate_output_guard 二次校验
                         is_streaming_text = False
                     elif not is_complex:
                         is_streaming_text = True
@@ -1653,6 +1711,8 @@ async def execute_antigravity(
                 clean_reply = re.sub(r'[\r\n]+', ' ', clean_reply).strip()
                 session_data["last_ai_summary"] = clean_reply[:500]
                 session_data["last_user_query"] = user_text[:200].strip()
+                if session_data.pop("_sys_prompt_pending_mark", None) and session_data.get("conversation"):
+                    session_data["_sys_prompt_injected_conv"] = session_data["conversation"]
                 try:
                     await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
                 except Exception as e:

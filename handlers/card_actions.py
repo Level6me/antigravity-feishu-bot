@@ -87,6 +87,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 log.info(f"Switched model to {new_model} (effort={effort_to_set}) in chat {chat_id}")
                 try:
                     from session_pool import session_pool
+                    await session_pool.reset_session(chat_id)
                     proj_val = session_data.get("project")
                     cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
                     conv_id = session_data.get("conversation", "")
@@ -274,12 +275,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 await save_session_async(chat_id, session_data)
                 try:
                     from session_pool import session_pool
-                    model_to_warm = session_data.get("model", "Default")
+                    from system_one_gate import infer_effort_from_model
+                    model_to_warm = session_data.get("base_model") or session_data.get("model", "Default")
+                    effort_to_warm = infer_effort_from_model(model_to_warm, session_data.get("reasoning_effort", "medium"))
                     cwd_dir = target_path if (target_path and os.path.isdir(target_path) and target_path not in ["默认", "Default"]) else None
                     conv_id = session_data.get("conversation", "")
                     asyncio.create_task(session_pool.prewarm(
                         chat_id, model_to_warm, cwd_dir, conversation_id=conv_id,
-                        effort=session_data.get("reasoning_effort", "medium")
+                        effort=effort_to_warm
                     ))
                 except Exception:
                     pass
