@@ -899,7 +899,12 @@ async def execute_antigravity(
         log_file_path = os.path.join(logs_dir, f"agy_log_{uuid.uuid4().hex}.txt")
         from system_one_gate import infer_effort_from_model
         safe_model = session_data["model"]
-        safe_effort = infer_effort_from_model(safe_model, session_data.get("reasoning_effort", "medium"))
+        adaptive_tier_now = session_data.get("typesafe_adaptive_tier")
+        safe_effort = (
+            adaptive_tier_now.lower()
+            if adaptive_tier_now in ("Low", "Medium", "High")
+            else infer_effort_from_model(safe_model, session_data.get("reasoning_effort", "medium"))
+        )
         cmd_args = [
             ANTIGRAVITY_BIN, 
             "-p", system_instruction + final_prompt, 

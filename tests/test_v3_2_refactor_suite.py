@@ -183,8 +183,19 @@ class TestV32RefactorSuite(unittest.TestCase):
 
     def test_08_system_one_l3_tool_and_output_guard(self):
         import asyncio
+        from unittest.mock import patch, MagicMock, AsyncMock
         import config
-        from system_one_gate import evaluate_tool_execution, evaluate_output_guard
+        from system_one_gate import (
+            evaluate_tool_execution,
+            evaluate_output_guard,
+            resolve_adaptive_model,
+        )
+
+        # 0. Adaptive model resolution supports gemini-4-argon-* and claude-* families
+        self.assertEqual(resolve_adaptive_model("gemini-4-argon-high", "Medium"), "gemini-4-argon-medium")
+        self.assertEqual(resolve_adaptive_model("gemini-4-argon-high", "Low"), "gemini-4-argon-low")
+        self.assertEqual(resolve_adaptive_model("claude-sonnet-5-5-high", "Low"), "claude-sonnet-5-5-low")
+        self.assertEqual(resolve_adaptive_model("gpt-oss-120b-medium", "High"), "gpt-oss-120b-medium")
 
         old_tier = getattr(config, "TYPESAFE_TIER", "gateway")
         old_enabled = getattr(config, "TYPESAFE_ENABLED", True)
@@ -198,6 +209,23 @@ class TestV32RefactorSuite(unittest.TestCase):
             self.assertEqual(res_read.decision_source, "local")
             self.assertFalse(res_read.is_fallback)
 
+            # 1b. Benign project file edit fast-pathed locally without 220ms HTTP blocking
+            res_edit = asyncio.run(evaluate_tool_execution("edit_file target=/home/ubuntu/antigravity-feishu-bot/cards/cron.py"))
+            self.assertTrue(res_edit.is_allowed)
+            self.assertEqual(res_edit.decision_source, "local")
+            self.assertEqual(res_edit.risk_level, "medium_risk")
+
+            # 1c. Command with risk marker ('kill') but Jev says medium_risk & crit_prob=0.07 -> allowed (no false positive session kill)
+            mock_client = MagicMock()
+            mock_ans_risk = MagicMock(choice="medium_risk", confidence=0.50)
+            mock_ans_crit = MagicMock(noul=0.07)
+            mock_resp = MagicMock(answers={"risk_assessment": mock_ans_risk, "is_critical": mock_ans_crit})
+            mock_client.system_one = AsyncMock(return_value=mock_resp)
+            with patch("system_one_gate.get_typesafe_client", return_value=mock_client):
+                res_kill = asyncio.run(evaluate_tool_execution("timeout 10 kill -TERM 12345"))
+                self.assertTrue(res_kill.is_allowed)
+                self.assertEqual(res_kill.decision_source, "jev")
+
             # 2. Catastrophic command blocked locally immediately
             res_crit = asyncio.run(evaluate_tool_execution("timeout 10 rm -rf /"))
             self.assertFalse(res_crit.is_allowed)
@@ -207,6 +235,13 @@ class TestV32RefactorSuite(unittest.TestCase):
             fake_tok = "ghp_" + "A" * 36
             out_secret = asyncio.run(evaluate_output_guard(f"Leak: {fake_tok}"))
             self.assertFalse(out_secret.is_safe)
+
+            # 4. Normal long prose (>120 chars) without secret/danger markers fast-paths locally
+            normal_prose = "这是一段完全正常的架构分析说明文本，不涉及任何私钥、密码、令牌或破坏性系统指令。" * 5
+            with patch("system_one_gate.get_typesafe_client") as mock_get_client:
+                out_ok = asyncio.run(evaluate_output_guard(normal_prose))
+                self.assertTrue(out_ok.is_safe)
+                mock_get_client.assert_not_called()
         finally:
             config.TYPESAFE_TIER = old_tier
             config.TYPESAFE_ENABLED = old_enabled

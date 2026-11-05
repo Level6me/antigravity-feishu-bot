@@ -400,8 +400,11 @@ async def evaluate_message_gate(
         might_be_plugin = any(
             kw in lower_u
             for kw in (
-                "备忘", "笔记", "待办", "提醒", "定时", "闹钟", "系统负载", "服务器状态",
-                "内存占用", "磁盘", "typesafe", "system one", "智能家居", "开灯", "关灯", "空调",
+                "备忘", "笔记", "待办", "记一下", "记下",
+                "提醒", "定时", "闹钟", "计划任务", "分钟后", "小时后", "秒后", "半小时", "叫我", "每隔",
+                "系统负载", "服务器状态", "内存占用", "磁盘", "cpu", "健康状态",
+                "typesafe", "system one", "决策网关",
+                "智能家居", "开灯", "关灯", "灯光", "空调", "温度", "窗帘", "插座",
             )
         )
         if not might_be_plugin and not math_decision_engine.should_call_remote_jev(fv, local_post, norm_entropy):
@@ -675,8 +678,8 @@ async def test_typesafe_connectivity() -> Dict[str, Any]:
 
 
 _OUTPUT_NEEDS_JEV_AUDIT_RE = re.compile(
-    r"(?i)(?:```|"
-    r"\b(?:sudo|rm|rmdir|kill|pkill|chmod|chown|dd|mkfs|curl|wget|ssh|scp|systemctl|iptables|ufw|docker|pm2|git|pip|npm|python3?)\b|"
+    r"(?i)(?:"
+    r"\b(?:sudo|rm|rmdir|kill|pkill|chmod|chown|dd|mkfs|scp|systemctl|iptables|ufw)\b|"
     r"\b(?:token|secret|password|passwd|api[_-]?key|private[_-]?key|bearer|authorization|credential|cookie|\.env|id_rsa)\b|"
     r"(?:密码|密钥|令牌|凭证|私钥)|"
     r"\b(?:\d{1,3}\.){3}\d{1,3}\b)"
@@ -706,16 +709,15 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5
     if has_secret:
         return TypeSafeOutputDecision(is_safe=False, secret_leak_prob=0.99, latency_ms=0.05, reason="检测到潜在敏感凭证暴露 (API Token/私钥)")
 
-    # 2. 本地破坏性代码关键词检测与技术内容触发判定
+    # 2. 本地破坏性代码关键词检测与敏感凭证/高危命令特征触发判定
     dangerous_output_patterns = [r"\brm\s+-rf\s+/", r"\bmkfs\b", r":\(\)\{.*\}", r"\bdd\s+if=/dev/"]
     has_dangerous_cmd = any(re.search(pat, response_text) for pat in dangerous_output_patterns)
     needs_jev_output_audit = (
         has_dangerous_cmd
         or bool(_OUTPUT_NEEDS_JEV_AUDIT_RE.search(response_text))
-        or len(response_text.strip()) >= 120
     )
     if not needs_jev_output_audit:
-        # 仅对无代码块、无命令、无敏感词的极短日常寒暄走本地秒级放行
+        # 对不含敏感凭证词、IP、特权或破坏性命令的常规回复走本地零延迟安全放行，消除收尾 ~220ms 阻塞与误杀吞字
         return TypeSafeOutputDecision(is_safe=True, latency_ms=0.05)
 
     client = get_typesafe_client()
@@ -832,15 +834,23 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
             decision_source="local",
         )
 
-    # 3. L3 Co-Pilot 深度参与：所有非纯只读的操作命令、复合管道命令、代码写入/编辑工具均进入 Jev 语义风险评估
+    # 3. L3 Co-Pilot 风险分级：命中高危特征词或访问敏感系统路径的调用进入远程 Jev 语义评估；常规工程内文件编辑/测试走本地毫秒级审计
     risk_markers = re.compile(
         r"(?i)(?:\brm\b|\brmdir\b|\bshred\b|\bunlink\b|\bdd\b|\bmkfs\b|\bformat\b|"
         r"\bchmod\b|\bchown\b|\bsudo\b|\bkill\b|\bpkill\b|\breboot\b|\bshutdown\b|"
         r"\bpoweroff\b|\bsystemctl\s+(?:stop|restart|disable)\b|\blaunchctl\s+(?:unload|stop)\b|"
         r"\biptables\b|\bufw\s+(?:disable|reset)\b|/dev/(?:sd|nvme|vd|disk)|"
-        r"(?:curl|wget)[^\n|]*\|\s*(?:sh|bash)|\b(?:\.env|id_rsa|private[_ -]?key|secret|token|password)\b)"
+        r"(?:curl|wget)[^\n|]*\|\s*(?:sh|bash)|\b(?:\.env|id_rsa|private[_ -]?key|secret|token|password)\b|"
+        r"(?:^|[\s=])/(?:etc|root|boot|proc|sys)(?:/|$))"
     )
     has_high_risk_marker = bool(risk_markers.search(command))
+    if not has_high_risk_marker:
+        return TypeSafeToolDecision(
+            is_allowed=True,
+            risk_level="medium_risk",
+            latency_ms=0.03,
+            decision_source="local",
+        )
 
     client = get_typesafe_client()
     if not client:
@@ -907,7 +917,8 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
         crit_prob = float(res.answers["is_critical"].noul)
 
         if has_high_risk_marker:
-            is_allowed = risk_choice in ("low_risk", "medium_risk") and crit_prob < 0.80 and risk_conf >= 0.55
+            # 仅当 Jev 判定为 critical_risk 或破坏概率 >= 0.65 时才强行中断会话，避免 medium_risk 且破坏概率极低(如 0.07)的合法运维命令被误杀
+            is_allowed = (risk_choice != "critical_risk") and (crit_prob < 0.65)
         else:
             # 对未命中高危物理特征的常规研发操作，仅当 Jev 明确判定为高置信度灾难性操作时才拦截
             is_allowed = not (risk_choice == "critical_risk" and crit_prob >= 0.85 and risk_conf >= 0.65)
@@ -1111,15 +1122,31 @@ def resolve_adaptive_model(base_model: str, adaptive_tier: str) -> str:
         
     m = base_model.lower().strip()
     tier = adaptive_tier.lower().strip()
-    
-    for prefix in ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]:
-        if prefix in m:
-            return f"{prefix}-{tier}"
-            
+    if tier not in ("low", "medium", "high"):
+        return base_model
+
+    if "gpt-oss-120b" in m:
+        return "gpt-oss-120b-medium"
+
     if "gemini-3.1-pro" in m:
         target_tier = "low" if tier == "low" else "high"
         return f"gemini-3.1-pro-{target_tier}"
-        
+
+    for prefix in [
+        "gemini-4-argon",
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+    ]:
+        if prefix in m:
+            return f"{prefix}-{tier}"
+
+    # Generic fallback for any model ID that already carries a -(low|medium|high) tier suffix
+    if re.search(r"-(?:low|medium|high)$", m):
+        return re.sub(r"-(?:low|medium|high)$", f"-{tier}", m)
+
     return base_model
 
 

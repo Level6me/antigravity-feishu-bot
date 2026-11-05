@@ -371,7 +371,11 @@ async def _process_single_task(chat_id, task):
         session_data["reasoning_effort"] = infer_effort_from_model(cur_m, session_data.get("reasoning_effort", "medium"))
 
     selected_model = session_data.get("model", "Default")
-    selected_effort = infer_effort_from_model(selected_model, session_data.get("reasoning_effort", "medium"))
+    selected_effort = (
+        adaptive_tier.lower()
+        if adaptive_tier in ("Low", "Medium", "High")
+        else infer_effort_from_model(selected_model, session_data.get("reasoning_effort", "medium"))
+    )
     session_data["reasoning_effort"] = selected_effort
     needs_selected_prewarm = (
         selected_model != prewarmed_model or selected_effort != prewarmed_effort
