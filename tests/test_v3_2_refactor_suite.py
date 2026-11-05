@@ -181,6 +181,36 @@ class TestV32RefactorSuite(unittest.TestCase):
         self.assertIn(os.getpid(), tree_stat["all_pids"])
         self.assertGreaterEqual(tree_stat["total_cputime"], 0.0)
 
+    def test_08_system_one_l3_tool_and_output_guard(self):
+        import asyncio
+        import config
+        from system_one_gate import evaluate_tool_execution, evaluate_output_guard
+
+        old_tier = getattr(config, "TYPESAFE_TIER", "gateway")
+        old_enabled = getattr(config, "TYPESAFE_ENABLED", True)
+        try:
+            config.TYPESAFE_TIER = "copilot"
+            config.TYPESAFE_ENABLED = True
+
+            # 1. Read-only tool fast-pathed locally with is_fallback=False
+            res_read = asyncio.run(evaluate_tool_execution("tool:read_file"))
+            self.assertTrue(res_read.is_allowed)
+            self.assertEqual(res_read.decision_source, "local")
+            self.assertFalse(res_read.is_fallback)
+
+            # 2. Catastrophic command blocked locally immediately
+            res_crit = asyncio.run(evaluate_tool_execution("timeout 10 rm -rf /"))
+            self.assertFalse(res_crit.is_allowed)
+            self.assertEqual(res_crit.risk_level, "critical_risk")
+
+            # 3. Output guard blocks hard secret pattern immediately
+            fake_tok = "ghp_" + "A" * 36
+            out_secret = asyncio.run(evaluate_output_guard(f"Leak: {fake_tok}"))
+            self.assertFalse(out_secret.is_safe)
+        finally:
+            config.TYPESAFE_TIER = old_tier
+            config.TYPESAFE_ENABLED = old_enabled
+
 
 if __name__ == "__main__":
     unittest.main()

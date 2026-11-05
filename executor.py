@@ -1175,58 +1175,58 @@ async def execute_antigravity(
                                         current_plan_idx = CardBuilder.match_step_index(
                                             planned_steps, current_plan_idx, act, len(completed_tool_steps)
                                         )
-                                # Co-Pilot 对高风险工具事件进行语义复核；普通工具由本地规则和 CLI 沙箱保护。
-                                ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
-                                if ts_tier == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
-                                    cmd_target = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
-                                    if not cmd_target:
-                                        if t_name in ["write_to_file", "replace_file_content"]:
-                                            cmd_target = f"{t_name} target={t_params.get('TargetFile', '')}"
-                                        elif t_name:
-                                            cmd_target = f"tool:{t_name}"
-                                    call_key = step_up.get("call_id") or step_up.get("tool_call_id") or f"{t_name}:{cmd_target[:100]}"
-                                    if call_key and call_key not in evaluated_tool_calls and cmd_target:
-                                        evaluated_tool_calls.add(call_key)
-                                        try:
-                                            from system_one_gate import evaluate_tool_execution
-                                            tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
-                                            if tool_dec.decision_source == "jev":
-                                                session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
-                                            if not tool_dec.is_allowed:
-                                                log.critical(f"[TypeSafe Co-Pilot] High-risk tool event intercepted: {cmd_target} -> {tool_dec.reason}")
-                                                typesafe_blocked_info = {
-                                                    "tool": t_name,
-                                                    "target": cmd_target,
-                                                    "reason": tool_dec.reason or "安全策略拒绝了该高风险操作",
-                                                    "risk_level": tool_dec.risk_level,
-                                                    "call_id": call_key,
-                                                    "cwd": session_data.get("project") or ""
-                                                }
-                                                await sess.close()
-                                                should_break = True
-                                                break
-                                            else:
-                                                typesafe_tool_audits.append({
-                                                    "tool": t_name,
-                                                    "risk": tool_dec.risk_level,
-                                                    "latency_ms": tool_dec.latency_ms
-                                                })
-                                        except Exception as e:
-                                            log.warning(f"[TypeSafe Co-Pilot] Tool execution evaluation error: {e}")
+                                if act:
+                                    from plugin_manager import plugin_manager
+                                    await plugin_manager.dispatch_tool_call(act, {})
+
+                            # Co-Pilot 全流程工具决策审计：在 ACTIVE（参数已就绪时）或 DONE（兜底补齐时）对工具调用执行风险评估
+                            ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+                            if ts_tier == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
+                                cmd_target = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
+                                if not cmd_target:
+                                    if t_name in ("write_to_file", "replace_file_content", "edit_file", "write_file"):
+                                        target_file = (t_params.get("TargetFile") or t_params.get("Path") or t_params.get("path") or "").strip()
+                                        if target_file:
+                                            cmd_target = f"{t_name} target={target_file}"
+                                        elif t_state == "DONE":
+                                            cmd_target = f"{t_name} {act}".strip()
+                                    elif t_name == "run_command":
+                                        if t_state == "DONE" and act:
+                                            cmd_target = f"run_command {act}".strip()
+                                    elif t_name:
+                                        cmd_target = f"tool:{t_name}"
+                                    elif t_state == "DONE" and act:
+                                        cmd_target = f"tool_action:{act}"
+                                raw_call_id = step_up.get("call_id") or step_up.get("tool_call_id") or step_up.get("step_index") or ""
+                                call_key = f"{raw_call_id}:{t_name}" if raw_call_id else f"{t_name}:{cmd_target[:100]}:{len(completed_tool_steps)}"
+                                if call_key and call_key not in evaluated_tool_calls and cmd_target:
+                                    evaluated_tool_calls.add(call_key)
+                                    try:
+                                        from system_one_gate import evaluate_tool_execution
+                                        tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
+                                        if tool_dec.decision_source in ("jev", "local") and not tool_dec.is_fallback:
+                                            session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
+                                        if not tool_dec.is_allowed:
+                                            log.critical(f"[TypeSafe Co-Pilot] High-risk tool event intercepted: {cmd_target} -> {tool_dec.reason}")
                                             typesafe_blocked_info = {
                                                 "tool": t_name,
                                                 "target": cmd_target,
-                                                "reason": "高风险工具检查异常，已停止后续执行",
-                                                "risk_level": "critical_risk",
+                                                "reason": tool_dec.reason or "安全策略拒绝了该高风险操作",
+                                                "risk_level": tool_dec.risk_level,
                                                 "call_id": call_key,
                                                 "cwd": session_data.get("project") or ""
                                             }
                                             await sess.close()
                                             should_break = True
                                             break
-                                if act:
-                                    from plugin_manager import plugin_manager
-                                    await plugin_manager.dispatch_tool_call(act, {})
+                                        else:
+                                            typesafe_tool_audits.append({
+                                                "tool": t_name,
+                                                "risk": tool_dec.risk_level,
+                                                "latency_ms": tool_dec.latency_ms
+                                            })
+                                    except Exception as e:
+                                        log.warning(f"[TypeSafe Co-Pilot] Tool execution evaluation error: {e}")
                     elif event_type == "result":
                         if current_tool_action:
                             if current_tool_action not in completed_tool_steps:
@@ -1539,21 +1539,58 @@ async def execute_antigravity(
             
             if not is_quota_exhausted and transcript_path and os.path.exists(transcript_path):
                 try:
-                    with open(transcript_path, 'r', encoding='utf-8') as f:
+                    with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
                         f.seek(initial_transcript_size)
-                        for line in f.readlines():
-                            try:
-                                data = json.loads(line)
-                                if data.get("type") == "GENERATE_IMAGE" or "generate_image" in line:
-                                    match = re.search(r'Generated image is saved at (.*?\.(?:jpg|png|jpeg))', data.get("content", ""))
-                                    if match:
-                                        img_path = match.group(1)
-                                        if img_path not in reply_text:
-                                            reply_text += f"\n\n![Generated Image]({img_path})"
-                            except Exception:
-                                pass
+                        new_tx_lines = f.readlines()
+                    ts_tier_now = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
+                    ts_copilot_active = (ts_tier_now == "copilot" and getattr(config, "TYPESAFE_ENABLED", True) and not typesafe_blocked_info)
+                    tx_tool_Idx = 0
+                    pending_tx_audits = []
+                    for line in new_tx_lines:
+                        try:
+                            data = json.loads(line)
+                            if data.get("type") == "GENERATE_IMAGE" or "generate_image" in line:
+                                match = re.search(r'Generated image is saved at (.*?\.(?:jpg|png|jpeg))', data.get("content", ""))
+                                if match:
+                                    img_path = match.group(1)
+                                    if img_path not in reply_text:
+                                        reply_text += f"\n\n![Generated Image]({img_path})"
+                            if ts_copilot_active and data.get("type") == "PLANNER_RESPONSE":
+                                t_calls = data.get("tool_calls") or []
+                                for tc in t_calls:
+                                    if not isinstance(tc, dict):
+                                        continue
+                                    tx_tool_Idx += 1
+                                    if tx_tool_Idx <= len(evaluated_tool_calls):
+                                        continue
+                                    tc_name = tc.get("name") or tc.get("tool_name") or ""
+                                    tc_args = tc.get("args") or tc.get("parameters") or {}
+                                    if not isinstance(tc_args, dict):
+                                        tc_args = {}
+                                    tc_cmd = (tc_args.get("CommandLine") or tc_args.get("command") or "").strip()
+                                    if not tc_cmd:
+                                        if tc_name in ("write_to_file", "replace_file_content", "edit_file", "write_file"):
+                                            tf = (tc_args.get("TargetFile") or tc_args.get("Path") or tc_args.get("path") or "").strip()
+                                            tc_cmd = f"{tc_name} target={tf}" if tf else f"tool:{tc_name}"
+                                        else:
+                                            tc_cmd = f"tool:{tc_name}"
+                                    tc_key = f"tx:{tx_tool_Idx}:{tc_name}:{tc_cmd[:80]}"
+                                    if tc_key not in evaluated_tool_calls and tc_cmd:
+                                        evaluated_tool_calls.add(tc_key)
+                                        pending_tx_audits.append((tc_name, tc_cmd))
+                        except Exception:
+                            pass
+                    if pending_tx_audits:
+                        from system_one_gate import evaluate_tool_execution
+                        audit_results = await asyncio.gather(
+                            *(evaluate_tool_execution(command=cmd, context=f"transcript_tool={name}") for name, cmd in pending_tx_audits),
+                            return_exceptions=True
+                        )
+                        for t_dec in audit_results:
+                            if not isinstance(t_dec, Exception) and getattr(t_dec, "decision_source", "") in ("jev", "local") and not getattr(t_dec, "is_fallback", False):
+                                session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
                 except Exception as e:
-                    log.error(f"Failed to extract generated images from transcript: {e}")
+                    log.error(f"Failed to process turn transcript post-actions: {e}")
             
             if not is_quota_exhausted and reply_text:
                 active_project = session_data.get("project")
@@ -1636,7 +1673,7 @@ async def execute_antigravity(
                     try:
                         from system_one_gate import evaluate_output_guard
                         guard_res = await evaluate_output_guard(reply_text)
-                        if not guard_res.is_fallback and guard_res.latency_ms > 0.1:
+                        if not guard_res.is_fallback:
                             session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
                         if not guard_res.is_safe:
                             log.warning(f"[TypeSafe Sentry] Output blocked before delivery: {guard_res.reason}")

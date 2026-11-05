@@ -347,7 +347,7 @@ async def _process_single_task(chat_id, task):
 
     decision = await evaluate_message_gate(user_text, context=recent_context, chat_id=chat_id)
     was_local_fast_path = bool(decision.raw_answers.get("fast_path"))
-    if not decision.is_fallback and not was_local_fast_path:
+    if not decision.is_fallback:
         session_data["typesafe_decision_count"] = 1
     else:
         session_data["typesafe_decision_count"] = 0

@@ -674,6 +674,15 @@ async def test_typesafe_connectivity() -> Dict[str, Any]:
         }
 
 
+_OUTPUT_NEEDS_JEV_AUDIT_RE = re.compile(
+    r"(?i)(?:```|"
+    r"\b(?:sudo|rm|rmdir|kill|pkill|chmod|chown|dd|mkfs|curl|wget|ssh|scp|systemctl|iptables|ufw|docker|pm2|git|pip|npm|python3?)\b|"
+    r"\b(?:token|secret|password|passwd|api[_-]?key|private[_-]?key|bearer|authorization|credential|cookie|\.env|id_rsa)\b|"
+    r"(?:密码|密钥|令牌|凭证|私钥)|"
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b)"
+)
+
+
 async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5) -> TypeSafeOutputDecision:
     """Level 2 & 3 (Sentry / Co-Pilot): Evaluate bot-generated response before delivery.
     
@@ -695,23 +704,30 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5
     )
     has_secret = any(re.search(pattern, response_text) for pattern in secret_patterns)
     if has_secret:
-        return TypeSafeOutputDecision(is_safe=False, secret_leak_prob=0.99, reason="检测到潜在敏感凭证暴露 (API Token/私钥)")
+        return TypeSafeOutputDecision(is_safe=False, secret_leak_prob=0.99, latency_ms=0.05, reason="检测到潜在敏感凭证暴露 (API Token/私钥)")
 
-    # 2. 本地破坏性代码关键词检测：无高危破坏关键词的普通输出，本地 0ms 秒级放行
+    # 2. 本地破坏性代码关键词检测与技术内容触发判定
     dangerous_output_patterns = [r"\brm\s+-rf\s+/", r"\bmkfs\b", r":\(\)\{.*\}", r"\bdd\s+if=/dev/"]
     has_dangerous_cmd = any(re.search(pat, response_text) for pat in dangerous_output_patterns)
-    if not has_dangerous_cmd:
-        # 绝大多数常规代码解答与文本回复均无需阻塞等待远程 Jev，直接秒级放行！
-        return TypeSafeOutputDecision(is_safe=True, latency_ms=0.01)
+    needs_jev_output_audit = (
+        has_dangerous_cmd
+        or bool(_OUTPUT_NEEDS_JEV_AUDIT_RE.search(response_text))
+        or len(response_text.strip()) >= 120
+    )
+    if not needs_jev_output_audit:
+        # 仅对无代码块、无命令、无敏感词的极短日常寒暄走本地秒级放行
+        return TypeSafeOutputDecision(is_safe=True, latency_ms=0.05)
 
     client = get_typesafe_client()
     if not client:
-        return TypeSafeOutputDecision(
-            is_safe=False,
-            is_fallback=True,
-            fallback_reason="Jev 不可用，无法检查高风险输出",
-            reason="检测到高风险内容，但 Jev 检查不可用，已阻止发送",
-        )
+        if has_dangerous_cmd:
+            return TypeSafeOutputDecision(
+                is_safe=False,
+                is_fallback=True,
+                fallback_reason="Jev 不可用，无法检查高风险输出",
+                reason="检测到高风险内容，但 Jev 检查不可用，已阻止发送",
+            )
+        return TypeSafeOutputDecision(is_safe=True, latency_ms=0.05, is_fallback=True)
 
     start_t = time.perf_counter()
     try:
@@ -734,13 +750,15 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5
         )
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         if "secret_leak" not in res.answers or "harmful_payload" not in res.answers:
-            return TypeSafeOutputDecision(
-                is_safe=False,
-                latency_ms=elapsed_ms,
-                is_fallback=True,
-                fallback_reason="Jev 未返回完整输出检查结果",
-                reason="输出安全检查结果不完整，已阻止发送",
-            )
+            if has_dangerous_cmd:
+                return TypeSafeOutputDecision(
+                    is_safe=False,
+                    latency_ms=elapsed_ms,
+                    is_fallback=True,
+                    fallback_reason="Jev 未返回完整输出检查结果",
+                    reason="输出安全检查结果不完整，已阻止发送",
+                )
+            return TypeSafeOutputDecision(is_safe=True, latency_ms=elapsed_ms, is_fallback=True)
         secret_p = float(res.answers["secret_leak"].noul) if "secret_leak" in res.answers else 0.0
         harmful_p = float(res.answers["harmful_payload"].noul) if "harmful_payload" in res.answers else 0.0
 
@@ -765,44 +783,42 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5
     except Exception as e:
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         log.warning(f"[TypeSafe Sentry] evaluate_output_guard error: {e}")
-        return TypeSafeOutputDecision(
-            is_safe=False,
-            latency_ms=elapsed_ms,
-            is_fallback=True,
-            fallback_reason=str(e),
-            reason="高风险输出检查失败，已阻止发送",
-        )
+        if has_dangerous_cmd:
+            return TypeSafeOutputDecision(
+                is_safe=False,
+                latency_ms=elapsed_ms,
+                is_fallback=True,
+                fallback_reason=str(e),
+                reason="高风险输出检查失败，已阻止发送",
+            )
+        return TypeSafeOutputDecision(is_safe=True, latency_ms=elapsed_ms, is_fallback=True)
 
 
 async def evaluate_tool_execution(command: str, context: str = "", timeout_seconds: float = 3.0) -> TypeSafeToolDecision:
-    """Level 3 (Co-Pilot): Evaluate a shell command before execution."""
+    """Level 3 (Co-Pilot): Evaluate a tool action or shell command before execution."""
     import config
     tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
     if tier != "copilot" or not getattr(config, "TYPESAFE_ENABLED", True):
         return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", decision_source="disabled")
 
-    # 1. 极致提速：只读工具与无害命令的本地零延迟白名单放行（<0.01ms），杜绝无谓的远程 Jev 网络 RTT (每次省2秒)
+    # 1. 纯只读文件/检索工具走本地零延迟白名单放行（仍计入 L3 本地审计次数）
     cmd_strip = command.strip()
-    # 纯读文件 / 目录浏览 / 代码搜索工具直接放行
     if any(cmd_strip == p or cmd_strip.startswith(p + " ") for p in [
-        "tool:view_file", "tool:list_dir", "tool:grep_search", "tool:find_by_name",
-        "tool:search_web", "tool:read_url_content", "tool:ask_question"
+        "tool:view_file", "tool:read_file", "tool:list_dir", "tool:grep_search",
+        "tool:find_by_name", "tool:search_web", "tool:read_url_content", "tool:ask_question"
     ]):
-        return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.01, decision_source="local")
+        return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.02, decision_source="local")
 
-    # 常见只读与查看类安全 shell 命令直接放行；拒绝复合 shell 语法，
-    # 避免 `cat ... | rm ...` 之类命令因只读前缀而绕过检查。
+    # 单条无管道的纯只读查看类 shell 命令走本地白名单放行
     safe_readonly_prefixes = [
         "git status", "git log", "git diff", "git show", "git branch",
         "ls", "dir", "pwd", "cat", "head", "tail", "wc", "grep", "rg", "find",
         "echo", "uname", "uptime", "whoami", "id", "hostname", "which", "whereis", "date"
     ]
-    # 清理 timeout 前缀再检测
     clean_cmd = re.sub(r'^timeout\s+\d+\s+', '', cmd_strip).strip()
     if any(clean_cmd == p or clean_cmd.startswith(p + " ") for p in safe_readonly_prefixes):
-        # 拒绝复合 shell 语法（含换行拆分的第二段命令），避免 `cat ...\nrm -rf /` 绕过检查
         if not re.search(r"[|;&><`\r\n]|\$\(", clean_cmd):
-            return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.01, decision_source="local")
+            return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.02, decision_source="local")
 
     # 2. 本地高危物理特征速断拦截（无需等待远程 Jev 决策）
     is_crit = bool(re.search(r'(?i)(?:\brm\s+-[a-z]*r[a-z]*f\s+(?:/|\*)|\bmkfs(?:\.[a-z0-9]+)?\b|:\(\)\s*\{|\bdd\s+if=/dev/)', command))
@@ -812,13 +828,11 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
             risk_level="critical_risk",
             critical_prob=0.99,
             reason="本地规则直接拦截高危破坏性系统命令",
-            latency_ms=0.01,
+            latency_ms=0.02,
             decision_source="local",
         )
 
-    # Routine tools rely on the host sandbox and permission scopes. Spend a
-    # Jev round trip only on commands with meaningful destructive, privilege,
-    # service, network, or path-escape indicators.
+    # 3. L3 Co-Pilot 深度参与：所有非纯只读的操作命令、复合管道命令、代码写入/编辑工具均进入 Jev 语义风险评估
     risk_markers = re.compile(
         r"(?i)(?:\brm\b|\brmdir\b|\bshred\b|\bunlink\b|\bdd\b|\bmkfs\b|\bformat\b|"
         r"\bchmod\b|\bchown\b|\bsudo\b|\bkill\b|\bpkill\b|\breboot\b|\bshutdown\b|"
@@ -826,22 +840,24 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
         r"\biptables\b|\bufw\s+(?:disable|reset)\b|/dev/(?:sd|nvme|vd|disk)|"
         r"(?:curl|wget)[^\n|]*\|\s*(?:sh|bash)|\b(?:\.env|id_rsa|private[_ -]?key|secret|token|password)\b)"
     )
-    if not risk_markers.search(command):
-        return TypeSafeToolDecision(
-            is_allowed=True,
-            risk_level="medium_risk",
-            latency_ms=0.01,
-            decision_source="local",
-        )
+    has_high_risk_marker = bool(risk_markers.search(command))
 
     client = get_typesafe_client()
     if not client:
+        if has_high_risk_marker:
+            return TypeSafeToolDecision(
+                is_allowed=False,
+                risk_level="critical_risk",
+                reason="高风险工具检查不可用，已暂停执行",
+                is_fallback=True,
+                decision_source="fallback",
+            )
         return TypeSafeToolDecision(
-            is_allowed=False,
-            risk_level="critical_risk",
-            reason="高风险工具检查不可用，已暂停执行",
+            is_allowed=True,
+            risk_level="medium_risk",
+            latency_ms=0.02,
             is_fallback=True,
-            decision_source="fallback",
+            decision_source="local",
         )
 
     start_t = time.perf_counter()
@@ -849,11 +865,11 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
         eval_state = f"Command: {command}\nContext: {context[:400]}"
         questions = {
             "risk_assessment": Choice(
-                instructions="Assess the operational risk of executing this terminal command in the current environment",
+                instructions="Assess the operational risk of executing this terminal command or file operation in the current project environment",
                 criteria={
-                    "low_risk": "Standard read-only query, status inspection, build, testing, or harmless file creation/viewing",
-                    "medium_risk": "Modifying application code, installing standard packages, restarting non-critical service, git checkout/commit",
-                    "critical_risk": "Irreversible data deletion, disk formatting, killing essential host daemon processes, network disconnection, or security sandbox escape"
+                    "low_risk": "Standard read-only query, status inspection, unit test execution, syntax check, or harmless file viewing",
+                    "medium_risk": "Modifying project application code, git add/commit/push, installing standard packages, or running normal project scripts",
+                    "critical_risk": "Irreversible system-wide data deletion, disk formatting, killing essential host daemon processes, network disconnection, or security sandbox escape"
                 }
             ),
             "is_critical": Noul(
@@ -870,19 +886,31 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
         )
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         if "risk_assessment" not in res.answers or "is_critical" not in res.answers:
+            if has_high_risk_marker:
+                return TypeSafeToolDecision(
+                    is_allowed=False,
+                    risk_level="critical_risk",
+                    latency_ms=elapsed_ms,
+                    reason="Jev 未返回完整风险判断，已暂停执行",
+                    is_fallback=True,
+                    decision_source="fallback",
+                )
             return TypeSafeToolDecision(
-                is_allowed=False,
-                risk_level="critical_risk",
+                is_allowed=True,
+                risk_level="medium_risk",
                 latency_ms=elapsed_ms,
-                reason="Jev 未返回完整风险判断，已暂停执行",
                 is_fallback=True,
-                decision_source="fallback",
+                decision_source="jev",
             )
         risk_choice = str(res.answers["risk_assessment"].choice)
         risk_conf = float(res.answers["risk_assessment"].confidence) if res.answers["risk_assessment"].confidence is not None else 0.0
         crit_prob = float(res.answers["is_critical"].noul)
 
-        is_allowed = risk_choice in ("low_risk", "medium_risk") and crit_prob < 0.80 and risk_conf >= 0.55
+        if has_high_risk_marker:
+            is_allowed = risk_choice in ("low_risk", "medium_risk") and crit_prob < 0.80 and risk_conf >= 0.55
+        else:
+            # 对未命中高危物理特征的常规研发操作，仅当 Jev 明确判定为高置信度灾难性操作时才拦截
+            is_allowed = not (risk_choice == "critical_risk" and crit_prob >= 0.85 and risk_conf >= 0.65)
         reason = None if is_allowed else f"Jev 判定为高危或不确定操作 ({risk_choice}, 置信度: {risk_conf:.2f}, 破坏概率: {crit_prob:.2f})"
 
         return TypeSafeToolDecision(
@@ -897,13 +925,21 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
     except Exception as e:
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
         log.warning(f"[TypeSafe Co-Pilot] evaluate_tool_execution error: {e}")
+        if has_high_risk_marker:
+            return TypeSafeToolDecision(
+                is_allowed=False,
+                risk_level="critical_risk",
+                latency_ms=elapsed_ms,
+                reason="Jev 高风险检查失败，已暂停执行",
+                is_fallback=True,
+                decision_source="fallback",
+            )
         return TypeSafeToolDecision(
-            is_allowed=False,
-            risk_level="critical_risk",
+            is_allowed=True,
+            risk_level="medium_risk",
             latency_ms=elapsed_ms,
-            reason="Jev 高风险检查失败，已暂停执行",
             is_fallback=True,
-            decision_source="fallback",
+            decision_source="local",
         )
 
 
