@@ -409,10 +409,23 @@ async def _process_single_task(chat_id, task):
         return
 
     # 2. 插件极速直达通道 (Fast-Path / 零模型冷启动延迟)
+    # 保护机制：若用户请求包含代码审查、方案探讨、排错分析或系统改造诉求，绝不走静态插件早退，交由主 Agent 深度处理
+    _is_eng_or_analysis = bool(
+        re.search(
+            r"(?:代码|逻辑|方案|优化|修复|排查|审查|分析|为什么|怎么会|有什么好|系统|架构|重构|bug|报错|异常|\.py\b)",
+            user_text,
+            re.IGNORECASE,
+        )
+    )
     typesafe_keywords = ["typesafe", "type_safe", "s1", "system1", "system 1", "system one", "决策网关", "直觉决策"]
     user_text_lower = user_text.lower()
     is_explicit_typesafe = any(kw in user_text_lower for kw in typesafe_keywords)
-    if decision.intent == "typesafe_status" and decision.intent_confidence >= 0.65 and is_explicit_typesafe:
+    if (
+        decision.intent == "typesafe_status"
+        and decision.intent_confidence >= 0.65
+        and is_explicit_typesafe
+        and not _is_eng_or_analysis
+    ):
         log.info(f"[TypeSafe FastPath] Direct dispatch typesafe config inquiry for chat {chat_id}")
         from system_one_gate import get_typesafe_config_state, test_typesafe_connectivity
         cfg = get_typesafe_config_state()
@@ -432,7 +445,12 @@ async def _process_single_task(chat_id, task):
         await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text="已展示决策网关配置看板。")
         return
 
-    elif decision.intent == "server_health" and decision.intent_confidence >= 0.70:
+    elif (
+        decision.intent == "server_health"
+        and decision.intent_confidence >= 0.70
+        and not _is_eng_or_analysis
+        and decision.complexity_score < 1.15
+    ):
         health_plugin = plugin_manager.plugins.get("server_health")
         if health_plugin and health_plugin.enabled:
             log.info(f"[TypeSafe FastPath] Direct dispatch to server_health plugin for chat {chat_id}")
@@ -441,20 +459,23 @@ async def _process_single_task(chat_id, task):
                 await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text="已查询服务器健康状态。")
                 return
 
-    elif decision.intent == "notes" and decision.intent_confidence >= 0.75:
+    elif decision.intent == "notes" and decision.intent_confidence >= 0.75 and not _is_eng_or_analysis:
         notes_plugin = plugin_manager.plugins.get("notes_manager")
         if notes_plugin and notes_plugin.enabled:
-            # 判断是查看备忘还是新增备忘
+            # 判断是查看备忘还是显式新增备忘
             is_view_notes = any(kw in user_text for kw in ["查看", "列出", "显示", "所有备忘", "所有笔记", "查备忘", "查笔记"])
+            is_explicit_add_note = bool(
+                re.match(r"^(?:请帮我|帮我|请)?(?:记录|记一下|记下|添加|新增|写下|存一下)(?:一条)?(?:备忘|笔记|待办)", user_text.strip())
+            )
             if is_view_notes:
                 log.info(f"[TypeSafe FastPath] Direct dispatch note listing to notes_manager for chat {chat_id}")
                 handled = await notes_plugin.on_command("/notes", "", chat_id, message_id, session_data)
                 if handled:
                     await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text="已为您列出备忘录。")
                     return
-            else:
+            elif is_explicit_add_note:
                 # 提取笔记文本
-                cleaned_note = re.sub(r'^(请帮我|帮我|请)?(记录|记一下|记下|添加|新增|写下)?(一条)?(备忘|笔记|待办)?[:：\s]*', '', user_text).strip()
+                cleaned_note = re.sub(r'^(请帮我|帮我|请)?(记录|记一下|记下|添加|新增|写下|存一下)?(一条)?(备忘|笔记|待办)?[:：\s]*', '', user_text).strip()
                 if cleaned_note:
                     log.info(f"[TypeSafe FastPath] Direct dispatch add note to notes_manager for chat {chat_id}")
                     handled = await notes_plugin.on_command("/note", f"add {cleaned_note}", chat_id, message_id, session_data)
@@ -462,7 +483,7 @@ async def _process_single_task(chat_id, task):
                         await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text=f"已成功记录备忘：{cleaned_note}")
                         return
 
-    elif decision.intent == "cron" and decision.intent_confidence >= 0.75:
+    elif decision.intent == "cron" and decision.intent_confidence >= 0.75 and not _is_eng_or_analysis:
         cron_plugin = plugin_manager.plugins.get("cron_scheduler")
         if cron_plugin and cron_plugin.enabled:
             try:
@@ -580,6 +601,10 @@ async def _process_single_task(chat_id, task):
                 "[System Rule: Reply ONLY in Simplified Chinese (简体中文). NEVER output internal chain-of-thought or English preambles.]\n"
                 f"[Active Project: {current_proj} | Guardrail: terminal commands MUST prefix `timeout <秒数>`; never restart main.py]\n"
             )
+            if getattr(config, "TYPESAFE_TIER", "gateway") in ("sentry", "copilot") or getattr(decision, "security_level", "L0") in ("L1", "L2", "L3"):
+                system_instruction += (
+                    "[Security & Egress Guard: 严禁在最终回复中明文回显任何 API Token、私钥或服务器密码；严禁对生产环境执行未授权破坏性操作。]\n"
+                )
             if task.get("message_type") == "audio" or task.get("is_voice_message"):
                 system_instruction += "[Voice Interaction: 请用自然亲切的口语化中文精炼回复，避免长代码块。]\n"
             if is_complex_agent:
@@ -616,12 +641,13 @@ async def _process_single_task(chat_id, task):
                 "2. 【受限递归与安全避让】：严禁系统全盘无限制递归搜索；严禁重启当前飞书机器人自身进程。\n"
                 "3. 【计划任务调度能力】：用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
             )
-            if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot" or getattr(decision, "security_level", "L0") == "L2":
+            if getattr(config, "TYPESAFE_TIER", "gateway") in ("sentry", "copilot") or getattr(decision, "security_level", "L0") in ("L1", "L2", "L3"):
                 system_instruction += (
-                    "[System One Co-Pilot & HMDM L2 Safety Directive / 全链路高风险受控执行规则]\n"
-                    "当前请求触发了 System One Level 3 或 HMDM L2 累积风险门禁（不受 Low/Medium 复杂度档位豁免）。\n"
+                    "[System One Sentry/Co-Pilot & HMDM L1/L2 Safety Directive / 全链路风险受控与防泄密规则]\n"
+                    "当前请求受 System One 安全守卫或 HMDM 累积风险门禁保护：\n"
                     "1. 【工具调用前审慎】：核验命令参数的安全性与受控性，严禁超出项目目录的不可逆破坏操作（如批量删除、强制重置、停止核心服务）。\n"
-                    "2. 【报错自愈反思】：命令执行失败退出码非 0 时，深入分析根因自愈修正，严禁机械重复失败命令。\n\n"
+                    "2. 【敏感凭证零外泄】：严禁在回复正文中明文打印用户的 API Token、SSH 密码或私钥。\n"
+                    "3. 【报错自愈反思】：命令执行失败退出码非 0 时，深入分析根因自愈修正，严禁机械重复失败命令。\n\n"
                 )
             project_prompts = session_data.get("project_prompts", {})
             if current_proj in project_prompts and project_prompts[current_proj]:

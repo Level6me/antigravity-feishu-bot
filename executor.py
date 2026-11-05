@@ -1083,6 +1083,15 @@ async def execute_antigravity(
                 baseline_pids=snapshot_process_group_pids(process.pid) if process and process.pid else set()
             )
 
+            # 提取当前会话备忘录中的已知敏感密码/令牌片段，供 L2/L3 流式与收尾原位脱敏使用
+            known_note_secrets = []
+            for _n in (session_data.get("notes") or []):
+                if isinstance(_n, str):
+                    for _m in re.finditer(r"(?:密码|令牌|token|secret|key)\s*[:：=]?\s*([^\s,，。;；]{6,})", _n, re.IGNORECASE):
+                        _val = _m.group(1).strip()
+                        if _val and _val not in ("最高权限",):
+                            known_note_secrets.append(_val)
+
             turn_stream = await sess.send_prompt_and_stream(system_instruction + final_prompt)
 
             while True:
@@ -1184,9 +1193,17 @@ async def execute_antigravity(
                                     from plugin_manager import plugin_manager
                                     await plugin_manager.dispatch_tool_call(act, {})
 
-                            # Co-Pilot 全流程工具决策审计：在 ACTIVE（参数已就绪时）或 DONE（兜底补齐时）对工具调用执行风险评估
+                            # Co-Pilot (L3) 全流程工具决策审计 & Sentry (L2) 敏感操作旁路审计
                             ts_tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
-                            if ts_tier == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
+                            if ts_tier == "sentry" and getattr(config, "TYPESAFE_ENABLED", True):
+                                cmd_target = (t_params.get("CommandLine") or t_params.get("command") or t_params.get("TargetFile") or t_params.get("Path") or "").strip()
+                                raw_call_id = step_up.get("call_id") or step_up.get("tool_call_id") or step_up.get("step_index") or ""
+                                call_key = f"l2:{raw_call_id}:{t_name}" if raw_call_id else f"l2:{t_name}:{cmd_target[:80]}:{len(completed_tool_steps)}"
+                                if call_key not in evaluated_tool_calls and (cmd_target or t_name):
+                                    evaluated_tool_calls.add(call_key)
+                                    if re.search(r"(?i)(?:\.env|id_rsa|secret|token|password|curl|wget|ssh|scp|git\s+push)", cmd_target):
+                                        session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
+                            elif ts_tier == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
                                 cmd_target = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
                                 if not cmd_target:
                                     if t_name in ("write_to_file", "replace_file_content", "edit_file", "write_file"):
@@ -1374,9 +1391,20 @@ async def execute_antigravity(
                     if is_voice_message:
                         # 语音对话模式：流式生成期间不提前打字剧透，优先保证语音消息首先送达
                         is_streaming_text = False
-                    elif guard_before_delivery and _STREAM_GUARD_RISK_RE.search(clean_partial):
-                        # 仅当流式分片命中疑似私钥/凭证或高危破坏指令时才暂缓流式，普通回复实时流式输出并在收尾通过 evaluate_output_guard 二次校验
-                        is_streaming_text = False
+                    elif guard_before_delivery:
+                        from system_one_gate import mask_sensitive_credentials
+                        clean_partial, _ = mask_sensitive_credentials(clean_partial, extra_secrets=known_note_secrets)
+                        if _STREAM_GUARD_RISK_RE.search(clean_partial):
+                            # 仅当脱敏后仍命中高危破坏指令时才暂缓流式
+                            is_streaming_text = False
+                        elif not is_complex:
+                            is_streaming_text = True
+                        else:
+                            min_chars = 15 if (planned_steps and current_plan_idx >= len(planned_steps) - 1) else 25
+                            if len(clean_partial) >= min_chars:
+                                if planned_steps:
+                                    current_plan_idx = len(planned_steps) - 1
+                                is_streaming_text = True
                     elif not is_complex:
                         is_streaming_text = True
                     else:
@@ -1676,16 +1704,36 @@ async def execute_antigravity(
             if reply_text and not typesafe_blocked_info:
                 if config.TYPESAFE_ENABLED and config.TYPESAFE_TIER in ("sentry", "copilot"):
                     try:
-                        from system_one_gate import evaluate_output_guard
-                        guard_res = await evaluate_output_guard(reply_text)
+                        from system_one_gate import evaluate_output_guard, mask_sensitive_credentials
+                        guard_res = await evaluate_output_guard(reply_text, extra_secrets=known_note_secrets)
                         if not guard_res.is_fallback:
                             session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
                         if not guard_res.is_safe:
-                            log.warning(f"[TypeSafe Sentry] Output blocked before delivery: {guard_res.reason}")
-                            reply_text = (
-                                "🛡️ **[System One 内容安全拦截]**\n\n"
-                                f"系统检测到回复存在风险或检查服务不可用：{guard_res.reason}。"
-                            )
+                            if guard_res.was_redacted and guard_res.sanitized_text and guard_res.harmful_prob < 0.85:
+                                log.info(f"[TypeSafe Sentry] Redacted sensitive credentials in output while preserving response.")
+                                reply_text = (
+                                    f"{guard_res.sanitized_text}\n\n"
+                                    "> 🛡️ *System One (L2 双向守卫) 已自动对回复中的敏感凭证进行脱敏保护。*"
+                                )
+                            elif guard_res.secret_leak_prob >= 0.85 and guard_res.harmful_prob < 0.85:
+                                masked_txt, did_mask = mask_sensitive_credentials(reply_text, extra_secrets=known_note_secrets)
+                                if did_mask:
+                                    reply_text = (
+                                        f"{masked_txt}\n\n"
+                                        "> 🛡️ *System One (L2 双向守卫) 已自动对回复中的敏感凭证进行脱敏保护。*"
+                                    )
+                                else:
+                                    log.warning(f"[TypeSafe Sentry] Output blocked before delivery: {guard_res.reason}")
+                                    reply_text = (
+                                        "🛡️ **[System One 内容安全拦截]**\n\n"
+                                        f"系统检测到回复存在风险或检查服务不可用：{guard_res.reason}。"
+                                    )
+                            else:
+                                log.warning(f"[TypeSafe Sentry] Output blocked before delivery: {guard_res.reason}")
+                                reply_text = (
+                                    "🛡️ **[System One 内容安全拦截]**\n\n"
+                                    f"系统检测到回复存在风险或检查服务不可用：{guard_res.reason}。"
+                                )
                     except Exception as e:
                         log.warning(f"[TypeSafe Sentry] Egress guard failed before delivery: {e}")
                         reply_text = "🛡️ 回复安全检查未能完成，本次内容已暂缓发送。"

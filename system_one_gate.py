@@ -74,6 +74,8 @@ class TypeSafeOutputDecision:
     is_fallback: bool = False
     fallback_reason: Optional[str] = None
     reason: Optional[str] = None
+    sanitized_text: Optional[str] = None
+    was_redacted: bool = False
 
 
 @dataclass
@@ -407,7 +409,9 @@ async def evaluate_message_gate(
                 "智能家居", "开灯", "关灯", "灯光", "空调", "温度", "窗帘", "插座",
             )
         )
-        if not might_be_plugin and not math_decision_engine.should_call_remote_jev(fv, local_post, norm_entropy):
+        if not might_be_plugin and not math_decision_engine.should_call_remote_jev(
+            fv, local_post, norm_entropy, has_context=bool(context and context.strip())
+        ):
             orth = math_decision_engine.evaluate_decision(chat_id, user_text, remote_jev_data=None)
             elapsed_hmdm = (time.perf_counter() - start_hmdm_t) * 1000.0
             is_op = not orth.is_pure_qa and (orth.needs_task_plan or orth.effort_tier in ("Medium", "High"))
@@ -686,7 +690,40 @@ _OUTPUT_NEEDS_JEV_AUDIT_RE = re.compile(
 )
 
 
-async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5) -> TypeSafeOutputDecision:
+_SECRET_REDACT_PATTERNS = (
+    (re.compile(r"-----BEGIN (?:RSA|OPENSSH|EC|DSA) PRIVATE KEY-----[\s\S]*?-----END (?:RSA|OPENSSH|EC|DSA) PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY]"),
+    (re.compile(r"\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{25,})\b"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"\b(?:cfat_[A-Za-z0-9_-]{20,}|cfut_[A-Za-z0-9_-]{20,})\b"), "[REDACTED_CF_TOKEN]"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"), "[REDACTED_SLACK_TOKEN]"),
+    (re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{24,}\b"), "[REDACTED_API_KEY]"),
+    (re.compile(r"\bey[A-Za-z0-9_-]{30,}\.ey[A-Za-z0-9_-]{30,}\b"), "[REDACTED_JWT]"),
+)
+
+
+def mask_sensitive_credentials(text: str, extra_secrets: Optional[list] = None) -> tuple[str, bool]:
+    """Redact raw tokens, private keys, and known note passwords in-place without destroying the response."""
+    if not text:
+        return text, False
+    masked = text
+    redacted = False
+    for pat, repl in _SECRET_REDACT_PATTERNS:
+        if pat.search(masked):
+            masked = pat.sub(repl, masked)
+            redacted = True
+    if extra_secrets:
+        for sec in extra_secrets:
+            if sec and len(sec) >= 6 and sec in masked:
+                masked = masked.replace(sec, f"{sec[:2]}***[REDACTED]***")
+                redacted = True
+    return masked, redacted
+
+
+async def evaluate_output_guard(
+    response_text: str,
+    timeout_seconds: float = 3.5,
+    extra_secrets: Optional[list] = None,
+) -> TypeSafeOutputDecision:
     """Level 2 & 3 (Sentry / Co-Pilot): Evaluate bot-generated response before delivery.
     
     Checks for sensitive credential leaks (tokens, private keys) and destructive advice.
@@ -696,18 +733,18 @@ async def evaluate_output_guard(response_text: str, timeout_seconds: float = 3.5
     if tier not in ("sentry", "copilot") or not getattr(config, "TYPESAFE_ENABLED", True):
         return TypeSafeOutputDecision(is_safe=True)
 
-    # 1. 快速本地静态扫描：高危密钥立即拦截，无需等待远程网络
-    secret_patterns = (
-        r"-----BEGIN (?:RSA|OPENSSH|EC|DSA) PRIVATE KEY-----",
-        r"\b(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,})\b",
-        r"\bAKIA[0-9A-Z]{16}\b",
-        r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
-        r"\bsk-(?:proj-)?[A-Za-z0-9_-]{24,}\b",
-        r"\bey[A-Za-z0-9_-]{30,}\.ey[A-Za-z0-9_-]{30,}\b",
-    )
-    has_secret = any(re.search(pattern, response_text) for pattern in secret_patterns)
-    if has_secret:
-        return TypeSafeOutputDecision(is_safe=False, secret_leak_prob=0.99, latency_ms=0.05, reason="检测到潜在敏感凭证暴露 (API Token/私钥)")
+    # 1. 快速本地静态扫描与原位脱敏：高危密钥立即定位并支持精准脱敏保留正文
+    sanitized_text, was_redacted = mask_sensitive_credentials(response_text, extra_secrets=extra_secrets)
+    if was_redacted:
+        return TypeSafeOutputDecision(
+            is_safe=False,
+            secret_leak_prob=0.99,
+            harmful_prob=0.0,
+            latency_ms=0.05,
+            reason="检测到潜在敏感凭证暴露 (API Token/私钥)",
+            sanitized_text=sanitized_text,
+            was_redacted=True,
+        )
 
     # 2. 本地破坏性代码关键词检测与敏感凭证/高危命令特征触发判定
     dangerous_output_patterns = [r"\brm\s+-rf\s+/", r"\bmkfs\b", r":\(\)\{.*\}", r"\bdd\s+if=/dev/"]

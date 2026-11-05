@@ -367,7 +367,7 @@ class HybridMathDecisionEngine:
         return posteriors, round(norm_entropy, 4)
 
     def should_call_remote_jev(
-        self, fv: FeatureVector, posteriors: Dict[IntentClass, float], norm_entropy: float
+        self, fv: FeatureVector, posteriors: Dict[IntentClass, float], norm_entropy: float, has_context: bool = False
     ) -> bool:
         """
         Entropy-Gated Remote Invocation Criterion:
@@ -376,10 +376,13 @@ class HybridMathDecisionEngine:
         """
         if fv.phi_confirm >= 0.8:
             return False
+        # Context-dependent short follow-ups (e.g. "还有l1跟l2的", "那第二个呢", "再看看那个") must use context-aware JEV
+        if has_context and len(fv.raw_text) <= 25 and fv.phi_tech_entity < 0.35 and fv.phi_imperative < 0.45:
+            return True
         if norm_entropy <= self.entropy_threshold and fv.phi_hazard < 0.5:
             return False
         # Pure short greetings or obvious single-step commands don't need 2s HTTP latency
-        if posteriors["chat"] >= 0.80 and fv.phi_tech_entity == 0.0 and fv.phi_imperative == 0.0:
+        if not has_context and posteriors["chat"] >= 0.80 and fv.phi_tech_entity == 0.0 and fv.phi_imperative == 0.0:
             return False
         if posteriors["deep_arch"] >= 0.78 and fv.phi_imperative >= 0.5:
             return False

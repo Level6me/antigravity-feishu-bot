@@ -231,10 +231,20 @@ class TestV32RefactorSuite(unittest.TestCase):
             self.assertFalse(res_crit.is_allowed)
             self.assertEqual(res_crit.risk_level, "critical_risk")
 
-            # 3. Output guard blocks hard secret pattern immediately
+            # 3. Output guard detects hard secret pattern & provides non-destructive sanitized_text
             fake_tok = "ghp_" + "A" * 36
-            out_secret = asyncio.run(evaluate_output_guard(f"Leak: {fake_tok}"))
+            out_secret = asyncio.run(
+                evaluate_output_guard(
+                    f"技术报告：Token 为 {fake_tok}，服务器密码为 SRpMhe7A8jA7。",
+                    extra_secrets=["SRpMhe7A8jA7"],
+                )
+            )
             self.assertFalse(out_secret.is_safe)
+            self.assertTrue(out_secret.was_redacted)
+            self.assertIn("[REDACTED_GITHUB_TOKEN]", out_secret.sanitized_text)
+            self.assertNotIn(fake_tok, out_secret.sanitized_text)
+            self.assertNotIn("SRpMhe7A8jA7", out_secret.sanitized_text)
+            self.assertIn("技术报告", out_secret.sanitized_text)
 
             # 4. Normal long prose (>120 chars) without secret/danger markers fast-paths locally
             normal_prose = "这是一段完全正常的架构分析说明文本，包含模块分层设计、异步任务调度以及数据库索引优化方案。" * 5
@@ -242,6 +252,13 @@ class TestV32RefactorSuite(unittest.TestCase):
                 out_ok = asyncio.run(evaluate_output_guard(normal_prose))
                 self.assertTrue(out_ok.is_safe)
                 mock_get_client.assert_not_called()
+
+            # 5. L1 HMDM context-dependent short follow-up triggers remote Jev when has_context=True
+            engine = HybridMathDecisionEngine()
+            fv_short = engine.extract_features("还有l1跟l2的")
+            st_short = engine.get_session_state("test_l1_ctx")
+            post_short, ent_short = engine.compute_local_posterior(fv_short, st_short)
+            self.assertTrue(engine.should_call_remote_jev(fv_short, post_short, ent_short, has_context=True))
         finally:
             config.TYPESAFE_TIER = old_tier
             config.TYPESAFE_ENABLED = old_enabled
