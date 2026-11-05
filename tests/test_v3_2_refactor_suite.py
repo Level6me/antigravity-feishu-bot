@@ -170,11 +170,19 @@ class TestV32RefactorSuite(unittest.TestCase):
         s2 = pool.get_or_create("chat_race_test", "gemini-3.8-flash-medium", "/tmp", "conv-123", effort="medium")
         self.assertIs(s1, s2)
 
-        # 2. Adaptive tier shift within same model family reuses warm session
+        # 2. Adaptive tier shift within same model family:
+        #    - Downward/equal shift (medium -> low) reuses warm session
+        #    - Escalation to High tier (medium -> high) upgrades session to prevent High tasks starving on medium/low
         self.assertEqual(_extract_model_family("gemini-3.8-flash-high"), "gemini-3.8-flash")
         self.assertEqual(_extract_model_family("gemini-3.8-flash-low"), "gemini-3.8-flash")
         s3 = pool.get_or_create("chat_race_test", "gemini-3.8-flash-low", "/tmp", "conv-123", effort="low")
         self.assertIs(s1, s3)
+        s4 = pool.get_or_create("chat_race_test", "gemini-3.8-flash-high", "/tmp", "conv-123", effort="high")
+        self.assertIsNot(s1, s4)
+        self.assertEqual(s4.model, "gemini-3.8-flash-high")
+        self.assertEqual(s4.effort, "high")
+        s5 = pool.get_or_create("chat_race_test", "gemini-3.8-flash-medium", "/tmp", "conv-123", effort="medium")
+        self.assertIs(s4, s5)
 
         # 3. Pure /proc process tree status check works accurately
         tree_stat = _get_process_tree_status(os.getpid())

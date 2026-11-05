@@ -39,6 +39,23 @@ def _extract_model_family(model_name: str) -> str:
             return m[:-len(sfx)]
     return m
 
+
+def _extract_model_tier_rank(model_name: str, effort: str = "medium") -> int:
+    """Return numeric reasoning tier rank (1=low, 2=medium, 3=high) from model suffix or effort."""
+    m = (model_name or "").strip().lower()
+    if m.endswith(("-high", "-xhigh", "-max")):
+        return 3
+    if m.endswith("-low"):
+        return 1
+    if m.endswith("-medium"):
+        return 2
+    eff = (effort or "medium").strip().lower()
+    if eff in ("high", "xhigh", "max"):
+        return 3
+    if eff == "low":
+        return 1
+    return 2
+
 class TurnEventStream:
     """A thread-safe, non-cancellable stream of parsed JSON events for a single dialogue turn.
     
@@ -344,11 +361,21 @@ class SessionPool:
         sess_dead = sess is None or sess.is_dead_or_closing()
         auto_mode = bool(getattr(config, "TYPESAFE_AUTO_MODE", True))
         if sess and not sess_dead and auto_mode:
-            # 自适应模式下，若常驻进程同属一个基础模型家族且沙箱策略一致，直接复用温池，
-            # 避免因单轮 -low/-medium/-high 档位微调频繁杀死温池进程导致 8~12s 冷启动与重载开销
+            # 自适应模式下，同家族且当前温池档位 >= 目标档位（或同为低中档）时复用温池；
+            # 但当新任务被判定为 High 档高复杂度工程任务，而驻留进程仅处于 Low/Medium 档时，
+            # 触发升档重建，避免复杂任务被锁死在低档位模型中陷入工具死循环。
+            sess_rank = _extract_model_tier_rank(sess.model, sess.effort)
+            target_rank = _extract_model_tier_rank(model, normalized_effort)
+            needs_high_upgrade = bool(target_rank >= 3 and sess_rank < 3)
+            if needs_high_upgrade:
+                log.info(
+                    f"[SessionPool] Upgrading warm session for {chat_id} from "
+                    f"{sess.model} (effort={sess.effort}) to High-tier {model} (effort={normalized_effort})"
+                )
             model_mismatch = bool(
                 _extract_model_family(sess.model) != _extract_model_family(model)
                 or sess.sandbox_enabled != sandbox_enabled
+                or needs_high_upgrade
             )
         else:
             model_mismatch = bool(sess and (
@@ -359,7 +386,10 @@ class SessionPool:
 
         if sess_dead or model_mismatch or sess.project_dir != project_dir or conv_mismatch:
             if sess:
-                asyncio.create_task(sess.close())
+                try:
+                    asyncio.get_running_loop().create_task(sess.close())
+                except RuntimeError:
+                    pass
             # Evict excess idle unlocked sessions to bound total memory footprint on low-RAM hosts
             max_warm = int(getattr(config, "MAX_WARM_SESSIONS", 2) or 2)
             idle_candidates = [
@@ -370,7 +400,10 @@ class SessionPool:
                 idle_candidates.sort(key=lambda item: item[1].last_active_time)
                 for evict_cid, evict_sess in idle_candidates[:len(idle_candidates) - max_warm + 1]:
                     self._sessions.pop(evict_cid, None)
-                    asyncio.create_task(evict_sess.close())
+                    try:
+                        asyncio.get_running_loop().create_task(evict_sess.close())
+                    except RuntimeError:
+                        pass
             sess = PersistentSession(chat_id, model, project_dir, conversation_id, normalized_effort, sandbox_enabled)
             self._sessions[chat_id] = sess
         else:
