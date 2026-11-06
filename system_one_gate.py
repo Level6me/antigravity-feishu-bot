@@ -87,6 +87,7 @@ class TypeSafeToolDecision:
     critical_prob: float = 0.0
     latency_ms: float = 0.0
     reason: Optional[str] = None
+    fallback_reason: Optional[str] = None
     is_fallback: bool = False
     decision_source: str = "jev"  # jev | local | fallback | disabled
 
@@ -833,7 +834,7 @@ async def evaluate_output_guard(
         return TypeSafeOutputDecision(is_safe=True, latency_ms=elapsed_ms, is_fallback=True)
 
 
-async def evaluate_tool_execution(command: str, context: str = "", timeout_seconds: float = 3.0) -> TypeSafeToolDecision:
+async def evaluate_tool_execution(command: str, context: str = "", timeout_seconds: float = 5.0) -> TypeSafeToolDecision:
     """Level 3 (Co-Pilot): Evaluate a tool action or shell command before execution."""
     import config
     tier = getattr(config, "TYPESAFE_TIER", "gateway") or "gateway"
@@ -860,7 +861,11 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
             return TypeSafeToolDecision(is_allowed=True, risk_level="low_risk", latency_ms=0.02, decision_source="local")
 
     # 2. 本地高危物理特征速断拦截（无需等待远程 Jev 决策）
-    is_crit = bool(re.search(r'(?i)(?:\brm\s+-[a-z]*r[a-z]*f\s+(?:/|\*)|\bmkfs(?:\.[a-z0-9]+)?\b|:\(\)\s*\{|\bdd\s+if=/dev/)', command))
+    is_crit = bool(re.search(
+        r'(?i)(?:\brm\s+-[a-z]*r[a-z]*f\s+(?:/|\*)|\bmkfs(?:\.[a-z0-9]+)?\b|:\(\)\s*\{|'
+        r'\bdd\s+if=/dev/|^(?:timeout\s+\d+\s+)?(?:sudo\s+)?(?:shutdown|reboot|poweroff|init\s+[06])\b)',
+        cmd_strip
+    ))
     if is_crit:
         return TypeSafeToolDecision(
             is_allowed=False,
@@ -870,6 +875,24 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
             latency_ms=0.02,
             decision_source="local",
         )
+
+    # 2b. 嵌入式硬件调试与固件编译/烧录工具白名单（如 openocd -c "...; shutdown" 或 sudo openocd）
+    # OpenOCD 内嵌 TCL 命令 shutdown 仅关闭调试会话而非宿主机关机，单条无外部管道命令直接走本地工程审计放行
+    hw_cmd = re.sub(r'^(?:timeout\s+\d+\s+)?(?:sudo\s+(?:-[a-zA-Z]+\s+)*)?', '', cmd_strip).strip()
+    safe_hw_prefixes = (
+        "openocd", "nrfjprog", "pyocd", "st-flash", "st-info", "esptool", "esptool.py",
+        "dfu-util", "avrdude", "nrfutil", "pio", "arduino-cli", "objdump",
+        "arm-none-eabi-objdump", "arm-none-eabi-gcc", "arm-none-eabi-g++", "arm-none-eabi-gdb",
+    )
+    if any(hw_cmd == p or hw_cmd.startswith(p + " ") for p in safe_hw_prefixes):
+        unquoted_hw = re.sub(r'"[^"]*"|\'[^\']*\'', '', hw_cmd)
+        if not re.search(r"[|;&><`\r\n]|\$\(", unquoted_hw):
+            return TypeSafeToolDecision(
+                is_allowed=True,
+                risk_level="medium_risk",
+                latency_ms=0.02,
+                decision_source="local",
+            )
 
     # 3. L3 Co-Pilot 风险分级：命中高危特征词或访问敏感系统路径的调用进入远程 Jev 语义评估；常规工程内文件编辑/测试走本地毫秒级审计
     risk_markers = re.compile(
@@ -972,13 +995,21 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
         )
     except Exception as e:
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
-        log.warning(f"[TypeSafe Co-Pilot] evaluate_tool_execution error: {e}")
-        if has_high_risk_marker:
+        err_desc = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        log.warning(f"[TypeSafe Co-Pilot] evaluate_tool_execution error ({elapsed_ms:.1f}ms): {err_desc}")
+        is_timeout_err = (
+            isinstance(e, (asyncio.TimeoutError, TimeoutError))
+            or "timed out" in str(e).lower()
+            or "timeout" in str(e).lower()
+        )
+        # 灾难性系统命令已在 Step 2 (is_crit) 本地毫秒级拦截；
+        # 若远程 Jev 仅因跨境网络抖动超时，降级放行以避免误杀正在运行的长耗时研发任务。
+        if has_high_risk_marker and not is_timeout_err:
             return TypeSafeToolDecision(
                 is_allowed=False,
                 risk_level="critical_risk",
                 latency_ms=elapsed_ms,
-                reason="Jev 高风险检查失败，已暂停执行",
+                reason=f"Jev 高风险检查失败 ({err_desc})，已暂停执行",
                 is_fallback=True,
                 decision_source="fallback",
             )
@@ -986,8 +1017,9 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
             is_allowed=True,
             risk_level="medium_risk",
             latency_ms=elapsed_ms,
+            fallback_reason=err_desc,
             is_fallback=True,
-            decision_source="local",
+            decision_source="fallback",
         )
 
 

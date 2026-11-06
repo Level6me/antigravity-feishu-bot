@@ -234,10 +234,39 @@ class TestV32RefactorSuite(unittest.TestCase):
                 self.assertTrue(res_kill.is_allowed)
                 self.assertEqual(res_kill.decision_source, "jev")
 
+            # 1d. Embedded hardware debug/flash commands (OpenOCD with sudo or internal TCL 'shutdown') fast-path locally
+            res_openocd_sudo = asyncio.run(
+                evaluate_tool_execution(
+                    'timeout 15 sudo openocd -f interface/raspberrypi-swd.cfg -c "transport select swd" -f target/nordic/nrf52.cfg -c "init; mdw 0x50000504 4; exit"'
+                )
+            )
+            self.assertTrue(res_openocd_sudo.is_allowed)
+            self.assertEqual(res_openocd_sudo.decision_source, "local")
+
+            res_openocd_shutdown = asyncio.run(
+                evaluate_tool_execution(
+                    'timeout 15 openocd -f interface/raspberrypi-swd.cfg -c "transport select swd" -f target/nordic/nrf52.cfg -c "init; halt; resume; shutdown"'
+                )
+            )
+            self.assertTrue(res_openocd_shutdown.is_allowed)
+            self.assertEqual(res_openocd_shutdown.decision_source, "local")
+
+            # 1e. Jev network TimeoutError on non-catastrophic command degrades gracefully instead of killing running task
+            mock_timeout_client = MagicMock()
+            mock_timeout_client.system_one = AsyncMock(side_effect=asyncio.TimeoutError())
+            with patch("system_one_gate.get_typesafe_client", return_value=mock_timeout_client):
+                res_timeout = asyncio.run(evaluate_tool_execution("timeout 10 kill -TERM 12345"))
+                self.assertTrue(res_timeout.is_allowed)
+                self.assertTrue(res_timeout.is_fallback)
+
             # 2. Catastrophic command blocked locally immediately
             res_crit = asyncio.run(evaluate_tool_execution("timeout 10 rm -rf /"))
             self.assertFalse(res_crit.is_allowed)
             self.assertEqual(res_crit.risk_level, "critical_risk")
+
+            res_host_shutdown = asyncio.run(evaluate_tool_execution("sudo shutdown -h now"))
+            self.assertFalse(res_host_shutdown.is_allowed)
+            self.assertEqual(res_host_shutdown.risk_level, "critical_risk")
 
             # 3. Output guard detects hard secret pattern & provides non-destructive sanitized_text
             fake_tok = "ghp_" + "A" * 36

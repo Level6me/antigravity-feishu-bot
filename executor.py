@@ -1498,8 +1498,13 @@ async def execute_antigravity(
                         lambda: send_interactive_card_sdk(message_id, confirm_card),
                         label="send l3 confirm card"
                     )
-                final_reply = None
-                accumulated_text = ""
+                return {
+                    "has_reply": True,
+                    "returncode": 0,
+                    "is_error": False,
+                    "is_quota_error": False,
+                    "typesafe_blocked": True,
+                }
 
 
             transcript_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
