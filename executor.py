@@ -1467,7 +1467,7 @@ async def execute_antigravity(
                 if recent_err:
                     stderr_text = f"{stderr_text}\n{recent_err}".strip() if stderr_text else recent_err
 
-            is_error = (process.returncode != 0 and process.returncode is not None)
+            is_error = (process.returncode != 0 and process.returncode is not None) or bool(stream_error_msg)
             session_data["last_execution_error"] = is_error
 
             if typesafe_blocked_info:
@@ -1539,11 +1539,22 @@ async def execute_antigravity(
                         final_reply = system_err_reply
                         is_error = True
 
-            # 若提取最终回答失败且进程非正常退出（如 API 抖动 EOF、卡死强死、进程崩溃），且非配额用尽，且在允许重试范围内：
-            # 暂不向飞书推送报错卡片，直接返回 has_reply=False 触发自动重试机制！
-            if not is_quota_exhausted and not final_reply and (process.returncode != 0 and process.returncode is not None) and attempt < 2:
-                log.warning(f"[Executor] Attempt {attempt} failed without final response (returncode {process.returncode}). Bypassing error card send for auto-retry.")
-                return {"has_reply": False, "returncode": process.returncode, "is_error": True, "is_quota_error": False}
+            # 若提取最终回答失败且出现流式异常/进程非正常退出（如 OAuth 401 瞬时过期、API 抖动连接断开、进程崩溃），
+            # 且非配额用尽、非 60m 硬超时，且在允许重试范围内：
+            # 立即关闭可能持有过期凭证的温池进程，暂不向飞书推送报错卡片，直接返回 has_reply=False 触发 Attempt 2 自动重建重试！
+            is_print_timeout = "print timeout" in combined_err_text.lower()
+            has_abnormal_termination = (process.returncode != 0 and process.returncode is not None) or bool(stream_error_msg)
+            if not is_quota_exhausted and not final_reply and not is_print_timeout and has_abnormal_termination and attempt < 2:
+                log.warning(
+                    f"[Executor] Attempt {attempt} failed without final response "
+                    f"(returncode={process.returncode}, stream_error={stream_error_msg[:120]!r}). "
+                    f"Closing stale warm session and bypassing error card send for auto-retry."
+                )
+                try:
+                    await sess.close()
+                except Exception:
+                    pass
+                return {"has_reply": False, "returncode": process.returncode or -1, "is_error": True, "is_quota_error": False}
             
             reply_text = final_reply or accumulated_text.strip() or ""
             reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()

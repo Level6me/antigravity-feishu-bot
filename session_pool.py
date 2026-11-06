@@ -121,6 +121,7 @@ class PersistentSession:
         self.conversation_id: str = conversation_id
         self.lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
+        self.spawn_time = time.time()
         self.last_active_time = time.time()
         self._closing = False
         self._decoder = codecs.getincrementaldecoder('utf-8')()
@@ -384,7 +385,18 @@ class SessionPool:
                 or sess.sandbox_enabled != sandbox_enabled
             ))
 
-        if sess_dead or model_mismatch or sess.project_dir != project_dir or conv_mismatch:
+        # Prevent warm sessions older than 40 minutes from hitting Google OAuth2 60m token expiry mid-turn
+        now_ts = time.time()
+        token_ttl_expired = bool(
+            sess
+            and not sess.lock.locked()
+            and not sess._start_lock.locked()
+            and (now_ts - getattr(sess, "spawn_time", sess.last_active_time) > 2400.0)
+        )
+        if token_ttl_expired:
+            log.info(f"[SessionPool] Recycling warm session for {chat_id} (>40m age) to refresh OAuth token window.")
+
+        if sess_dead or model_mismatch or sess.project_dir != project_dir or conv_mismatch or token_ttl_expired:
             if sess:
                 try:
                     asyncio.get_running_loop().create_task(sess.close())
