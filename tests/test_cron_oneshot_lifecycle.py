@@ -58,10 +58,13 @@ class TestCronOneshotLifecycle(unittest.IsolatedAsyncioTestCase):
 
         # 一次性任务执行后应从 cron_tasks 主表自动移除
         self.assertIsNone(database.get_cron_task("task_delay_1"))
-        # 但审计日志表 cron_logs 中应完整保留本次执行记录
+        # 但审计日志表 cron_logs 中应完整保留本次执行记录与任务名称/内容元数据
         logs = database.get_cron_logs("task_delay_1")
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["status"], "success")
+        self.assertEqual(logs[0]["task_name"], "喝水提醒")
+        self.assertEqual(logs[0]["prompt"], "提醒喝水")
+        self.assertEqual(logs[0]["task_type"], "delay")
 
     async def test_cron_engine_keeps_recurring_cron_task(self):
         import database
@@ -165,8 +168,13 @@ class TestCronOneshotLifecycle(unittest.IsolatedAsyncioTestCase):
         ids = [t["id"] for t in tasks]
         self.assertNotIn("legacy_done_delay", ids)
         self.assertIn("pending_delay", ids)
+        # 自动清理历史残留一次性任务前，应自动将其归档至 cron_logs 历史记录中
+        archived_logs = database.get_cron_logs("legacy_done_delay")
+        self.assertEqual(len(archived_logs), 1)
+        self.assertEqual(archived_logs[0]["task_name"], "历史一次性提醒")
 
     def test_panel_card_and_cleanup_paused_tasks(self):
+        import json
         import database
         from cards.cron import build_cron_panel_card
 
@@ -189,11 +197,23 @@ class TestCronOneshotLifecycle(unittest.IsolatedAsyncioTestCase):
         card = build_cron_panel_card(tasks, active_tab="user")
         action_blocks = [el for el in card["elements"] if el.get("tag") == "action"]
         top_buttons = [btn["value"].get("action") for btn in action_blocks[0]["actions"]]
+        top_tabs = [btn["value"].get("tab") for btn in action_blocks[0]["actions"] if btn["value"].get("action") == "switch_cron_tab"]
         self.assertIn("clear_completed_cron", top_buttons)
+        self.assertIn("history", top_tabs)
 
         removed = database.cleanup_completed_delay_tasks("oc_test_chat", include_paused=True)
         self.assertEqual(removed, 1)
         self.assertEqual(len(database.get_all_cron_tasks("oc_test_chat")), 0)
+
+        # 切换到 history 标签页应能看到刚归档的历史任务记录
+        logs = database.get_cron_logs(chat_id="oc_test_chat")
+        self.assertEqual(len(logs), 1)
+        hist_card = build_cron_panel_card([], active_tab="history", logs=logs)
+        hist_json = json.dumps(hist_card, ensure_ascii=False)
+        self.assertIn("已暂停周期任务", hist_json)
+        self.assertIn("clear_cron_logs", hist_json)
+        self.assertEqual(database.clear_cron_logs("oc_test_chat"), 1)
+        self.assertEqual(len(database.get_cron_logs(chat_id="oc_test_chat")), 0)
 
 
 if __name__ == "__main__":

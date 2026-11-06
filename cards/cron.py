@@ -56,23 +56,41 @@ def _is_completed_delay_task(task: dict) -> bool:
     )
 
 
-def build_cron_panel_card(tasks, active_tab="user", session_data=None):
+def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None):
     valid_tasks = [t for t in (tasks or []) if not _is_completed_delay_task(t)]
     user_tasks = [t for t in valid_tasks if t.get('category') in ['user', None, '', 'default']]
     sys_tasks = [t for t in valid_tasks if t.get('category') in ['system', 'maintenance']]
-    
+
+    if active_tab == 'history' and logs is None:
+        try:
+            from database import get_cron_logs
+            logs = get_cron_logs(limit=MAX_DISPLAY_TASKS)
+        except Exception:
+            logs = []
+    history_logs = list(logs or [])
+
     displayed_tasks = user_tasks if active_tab == 'user' else sys_tasks
     has_inactive_user = any(not bool(t.get('is_active', 1)) for t in user_tasks)
     
     elements = []
     
     # 顶部说明与快捷按钮栏
+    if active_tab == 'history':
+        subtitle = (
+            f"当前分类：**📜 历史执行记录**（共 **{len(history_logs)}** 条） · "
+            f"*含已自动销毁的一次性任务与周期任务审计流水*"
+        )
+    else:
+        subtitle = (
+            f"当前分类：**{'👤 用户主动任务' if active_tab == 'user' else '⚙️ 系统后台任务'}**（共 **{len(displayed_tasks)}** 项） · "
+            f"*一次性任务触发后自动归档至历史记录*"
+        )
+
     elements.append({
         "tag": "markdown",
         "content": (
             f"**⏱️ 计划任务管理中心 (Cron Center)**\n"
-            f"当前分类：**{'👤 用户主动任务' if active_tab == 'user' else '⚙️ 系统后台任务'}**（共 **{len(displayed_tasks)}** 项） · "
-            f"*一次性任务触发后自动移除*"
+            f"{subtitle}"
         )
     })
     
@@ -92,6 +110,12 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None):
         },
         {
             "tag": "button",
+            "text": {"tag": "plain_text", "content": "📜 历史记录" if active_tab != 'history' else "🔵 📜 历史记录"},
+            "type": "primary" if active_tab == 'history' else "default",
+            "value": {"action": "switch_cron_tab", "tab": "history"}
+        },
+        {
+            "tag": "button",
             "text": {"tag": "plain_text", "content": "➕ 新建任务"},
             "type": "primary",
             "value": {"action": "open_cron_create"}
@@ -104,14 +128,70 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None):
             "type": "danger",
             "value": {"action": "clear_completed_cron"}
         })
+    elif active_tab == 'history' and history_logs:
+        header_actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "🧹 清空记录"},
+            "type": "danger",
+            "value": {"action": "clear_cron_logs"}
+        })
     elements.append({
         "tag": "action",
-        "layout": "flow" if len(header_actions) > 3 else "bisect",
+        "layout": "flow",
         "actions": header_actions
     })
     elements.append({"tag": "hr"})
 
-    if not displayed_tasks:
+    if active_tab == 'history':
+        if not history_logs:
+            elements.append({
+                "tag": "markdown",
+                "content": (
+                    "*(暂无历史计划任务执行记录)*\n"
+                    "当一次性倒计时任务或周期计划任务触发执行后，其执行时间、耗时与结果摘要会自动归档在此处供随时查阅。"
+                )
+            })
+        else:
+            for lg in history_logs[:MAX_DISPLAY_TASKS]:
+                status = lg.get('status', 'success')
+                status_badge = "✅ 执行成功" if status == 'success' else "❌ 执行失败"
+                t_id = lg.get('task_id', '')
+                t_name = lg.get('task_name') or lg.get('name') or t_id or '未命名任务'
+                t_type = lg.get('task_type') or ('delay' if 'delay' in str(t_id) else 'cron')
+                action_type = lg.get('action_type', 'reminder')
+                badge = BADGE_MAP.get(action_type, "💬【消息提醒】")
+                cron_expr = lg.get('cron_expr', '')
+                if t_type == 'delay':
+                    type_tag = f"⏳ 一次性 (`{cron_expr}`)" if cron_expr else "⏳ 一次性"
+                else:
+                    type_tag = f"🔁 周期 (`{cron_expr}`)" if cron_expr else "🔁 周期"
+
+                exec_time = _format_timestamp(lg.get('executed_at'))
+                dur_ms = int(lg.get('duration_ms', 0) or 0)
+                dur_str = f"{dur_ms / 1000.0:.1f}s" if dur_ms >= 100 else (f"{dur_ms}ms" if dur_ms > 0 else "<0.1s")
+
+                prompt_str = (lg.get('prompt') or '').strip()
+                if len(prompt_str) > 70:
+                    prompt_str = prompt_str[:70] + "..."
+                out_str = (lg.get('output') or lg.get('error_msg') or '').strip().replace('\n', ' ')
+                if len(out_str) > 90:
+                    out_str = out_str[:90] + "..."
+
+                lines_md = [
+                    f"**{badge} {t_name}**  {status_badge}",
+                    f"🕒 **执行时间**：{exec_time} · **耗时**：{dur_str} · **类型**：{type_tag} (`#{t_id}`)"
+                ]
+                if prompt_str:
+                    lines_md.append(f"💡 **任务内容**：{prompt_str}")
+                if out_str:
+                    lines_md.append(f"📝 **结果摘要**：{out_str}")
+
+                elements.append({
+                    "tag": "markdown",
+                    "content": "\n".join(lines_md)
+                })
+                elements.append({"tag": "hr"})
+    elif not displayed_tasks:
         elements.append({
             "tag": "markdown",
             "content": f"*(暂无{'用户主动' if active_tab == 'user' else '系统后台'}计划任务)*\n可以直接在聊天中发送：`一分钟后提醒我喝水` 或点击上方 **[ ➕ 新建任务 ]** 快速添加！"

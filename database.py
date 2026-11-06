@@ -102,6 +102,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS cron_logs (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id      TEXT NOT NULL,
+            chat_id      TEXT NOT NULL DEFAULT '',
+            task_name    TEXT NOT NULL DEFAULT '',
+            task_type    TEXT NOT NULL DEFAULT 'cron',
+            action_type  TEXT NOT NULL DEFAULT 'reminder',
+            cron_expr    TEXT NOT NULL DEFAULT '',
+            prompt       TEXT NOT NULL DEFAULT '',
             status       TEXT NOT NULL,
             output       TEXT NOT NULL DEFAULT '',
             error_msg    TEXT NOT NULL DEFAULT '',
@@ -109,6 +115,18 @@ def init_db():
             executed_at  INTEGER NOT NULL DEFAULT 0
         )
     ''')
+    for log_col_def in (
+        "chat_id TEXT NOT NULL DEFAULT ''",
+        "task_name TEXT NOT NULL DEFAULT ''",
+        "task_type TEXT NOT NULL DEFAULT 'cron'",
+        "action_type TEXT NOT NULL DEFAULT 'reminder'",
+        "cron_expr TEXT NOT NULL DEFAULT ''",
+        "prompt TEXT NOT NULL DEFAULT ''",
+    ):
+        try:
+            cursor.execute(f"ALTER TABLE cron_logs ADD COLUMN {log_col_def}")
+        except sqlite3.OperationalError:
+            pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS recent_messages (
             message_id  TEXT PRIMARY KEY,
@@ -472,14 +490,85 @@ def load_pending_tasks():
 # Cron Task & Log Helper Functions
 # ---------------------------------------------------------------------------
 
+def _ensure_cron_logs_schema(cursor):
+    for log_col_def in (
+        "chat_id TEXT NOT NULL DEFAULT ''",
+        "task_name TEXT NOT NULL DEFAULT ''",
+        "task_type TEXT NOT NULL DEFAULT 'cron'",
+        "action_type TEXT NOT NULL DEFAULT 'reminder'",
+        "cron_expr TEXT NOT NULL DEFAULT ''",
+        "prompt TEXT NOT NULL DEFAULT ''",
+    ):
+        try:
+            cursor.execute(f"ALTER TABLE cron_logs ADD COLUMN {log_col_def}")
+        except Exception:
+            pass
+
+
+def _archive_tasks_before_delete(cursor, where_clause: str, params: tuple = ()):
+    """在自动清理或删除已完成任务前，将任务元数据同步/归档至 cron_logs，防止历史执行记录丢失名称与内容。"""
+    _ensure_cron_logs_schema(cursor)
+    cursor.execute(f"SELECT * FROM cron_tasks WHERE {where_clause}", params)
+    tasks = [dict(r) for r in cursor.fetchall()]
+    now = int(time.time())
+    for t in tasks:
+        t_id = t.get("id", "")
+        if not t_id:
+            continue
+        cursor.execute(
+            """
+            UPDATE cron_logs
+            SET chat_id = CASE WHEN chat_id = '' OR chat_id IS NULL THEN ? ELSE chat_id END,
+                task_name = CASE WHEN task_name = '' OR task_name IS NULL THEN ? ELSE task_name END,
+                task_type = CASE WHEN task_type = '' OR task_type IS NULL THEN ? ELSE task_type END,
+                action_type = CASE WHEN action_type = '' OR action_type IS NULL THEN ? ELSE action_type END,
+                cron_expr = CASE WHEN cron_expr = '' OR cron_expr IS NULL THEN ? ELSE cron_expr END,
+                prompt = CASE WHEN prompt = '' OR prompt IS NULL THEN ? ELSE prompt END
+            WHERE task_id = ?
+            """,
+            (
+                t.get("chat_id", "") or "",
+                t.get("name", "未命名任务") or "未命名任务",
+                t.get("task_type", "cron") or "cron",
+                t.get("action_type", "reminder") or "reminder",
+                t.get("cron_expr", "") or "",
+                (t.get("prompt", "") or t.get("command", "") or "")[:500],
+                t_id,
+            ),
+        )
+        if int(t.get("run_count", 0) or 0) > 0 or int(t.get("last_run_at", 0) or 0) > 0:
+            cursor.execute("SELECT 1 FROM cron_logs WHERE task_id = ? LIMIT 1", (t_id,))
+            if not cursor.fetchone():
+                exec_ts = int(t.get("last_run_at", 0) or t.get("updated_at", 0) or now)
+                cursor.execute(
+                    """
+                    INSERT INTO cron_logs (
+                        task_id, chat_id, task_name, task_type, action_type, cron_expr, prompt,
+                        status, output, error_msg, duration_ms, executed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'success', ?, '', 0, ?)
+                    """,
+                    (
+                        t_id,
+                        t.get("chat_id", "") or "",
+                        t.get("name", "未命名任务") or "未命名任务",
+                        t.get("task_type", "cron") or "cron",
+                        t.get("action_type", "reminder") or "reminder",
+                        t.get("cron_expr", "") or "",
+                        (t.get("prompt", "") or t.get("command", "") or "")[:500],
+                        f"已完成执行（累计运行 {t.get('run_count', 1) or 1} 次）",
+                        exec_ts,
+                    ),
+                )
+
+
 def get_all_cron_tasks(chat_id=None):
     conn = get_db()
     try:
         cursor = conn.cursor()
-        # 自动清理已触发完毕的历史一次性倒计时任务（仅保留 cron_logs 审计日志）
-        cursor.execute(
-            "DELETE FROM cron_tasks WHERE task_type = 'delay' AND is_active = 0 AND (run_count > 0 OR last_run_at > 0)"
-        )
+        # 自动清理已触发完毕的历史一次性倒计时任务（先归档元数据至 cron_logs 再移除主表）
+        cond = "task_type = 'delay' AND is_active = 0 AND (run_count > 0 OR last_run_at > 0)"
+        _archive_tasks_before_delete(cursor, cond)
+        cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}")
         if cursor.rowcount > 0:
             conn.commit()
         if chat_id:
@@ -633,6 +722,8 @@ def delete_cron_task(task_id: str, keep_logs: bool = False):
     conn = get_db()
     try:
         cursor = conn.cursor()
+        if keep_logs:
+            _archive_tasks_before_delete(cursor, "id = ?", (task_id,))
         cursor.execute('DELETE FROM cron_tasks WHERE id = ?', (task_id,))
         if not keep_logs:
             cursor.execute('DELETE FROM cron_logs WHERE task_id = ?', (task_id,))
@@ -652,24 +743,22 @@ def cleanup_completed_delay_tasks(chat_id: str = None, include_paused: bool = Fa
         cursor = conn.cursor()
         if include_paused:
             if chat_id:
-                cursor.execute(
-                    "DELETE FROM cron_tasks WHERE is_active = 0 AND (chat_id = ? OR chat_id = '' OR chat_id IS NULL) AND category NOT IN ('system', 'maintenance')",
-                    (chat_id,),
-                )
+                cond = "is_active = 0 AND (chat_id = ? OR chat_id = '' OR chat_id IS NULL) AND category NOT IN ('system', 'maintenance')"
+                _archive_tasks_before_delete(cursor, cond, (chat_id,))
+                cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}", (chat_id,))
             else:
-                cursor.execute(
-                    "DELETE FROM cron_tasks WHERE is_active = 0 AND category NOT IN ('system', 'maintenance')"
-                )
+                cond = "is_active = 0 AND category NOT IN ('system', 'maintenance')"
+                _archive_tasks_before_delete(cursor, cond)
+                cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}")
         else:
             if chat_id:
-                cursor.execute(
-                    "DELETE FROM cron_tasks WHERE task_type = 'delay' AND (is_active = 0 OR run_count > 0 OR last_run_at > 0) AND (chat_id = ? OR chat_id = '' OR chat_id IS NULL)",
-                    (chat_id,),
-                )
+                cond = "task_type = 'delay' AND (is_active = 0 OR run_count > 0 OR last_run_at > 0) AND (chat_id = ? OR chat_id = '' OR chat_id IS NULL)"
+                _archive_tasks_before_delete(cursor, cond, (chat_id,))
+                cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}", (chat_id,))
             else:
-                cursor.execute(
-                    "DELETE FROM cron_tasks WHERE task_type = 'delay' AND (is_active = 0 OR run_count > 0 OR last_run_at > 0)"
-                )
+                cond = "task_type = 'delay' AND (is_active = 0 OR run_count > 0 OR last_run_at > 0)"
+                _archive_tasks_before_delete(cursor, cond)
+                cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}")
         deleted = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
         conn.commit()
         return deleted
@@ -680,15 +769,44 @@ def cleanup_completed_delay_tasks(chat_id: str = None, include_paused: bool = Fa
         conn.close()
 
 
-def record_cron_log(task_id: str, status: str, output: str = '', error_msg: str = '', duration_ms: int = 0):
+def record_cron_log(task_id: str, status: str, output: str = '', error_msg: str = '', duration_ms: int = 0, task_meta: dict = None):
     conn = get_db()
     now = int(time.time())
     try:
         cursor = conn.cursor()
+        _ensure_cron_logs_schema(cursor)
+        meta = dict(task_meta or {})
+        if not meta.get("name") and not meta.get("task_name"):
+            cursor.execute("SELECT * FROM cron_tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if row:
+                meta = dict(row)
+        chat_id_val = meta.get("chat_id", "") or ""
+        task_name_val = meta.get("task_name") or meta.get("name") or ""
+        task_type_val = meta.get("task_type") or ("delay" if "delay" in str(task_id) else "cron")
+        action_type_val = meta.get("action_type") or "reminder"
+        cron_expr_val = meta.get("cron_expr") or ""
+        prompt_val = (meta.get("prompt") or meta.get("command") or "")[:500]
         cursor.execute('''
-            INSERT INTO cron_logs (task_id, status, output, error_msg, duration_ms, executed_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (task_id, status, output[:2000] if output else '', error_msg[:1000] if error_msg else '', duration_ms, now))
+            INSERT INTO cron_logs (
+                task_id, chat_id, task_name, task_type, action_type, cron_expr, prompt,
+                status, output, error_msg, duration_ms, executed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            task_id,
+            chat_id_val,
+            task_name_val,
+            task_type_val,
+            action_type_val,
+            cron_expr_val,
+            prompt_val,
+            status,
+            output[:2000] if output else '',
+            error_msg[:1000] if error_msg else '',
+            duration_ms,
+            now,
+        ))
         conn.commit()
         return True
     except Exception as e:
@@ -698,19 +816,63 @@ def record_cron_log(task_id: str, status: str, output: str = '', error_msg: str 
         conn.close()
 
 
-def get_cron_logs(task_id=None, limit=10):
+def get_cron_logs(task_id=None, limit=15, chat_id=None):
     conn = get_db()
     try:
         cursor = conn.cursor()
+        _ensure_cron_logs_schema(cursor)
+        base_select = """
+            SELECT
+                l.id,
+                l.task_id,
+                COALESCE(NULLIF(l.chat_id, ''), t.chat_id, '') AS chat_id,
+                COALESCE(NULLIF(l.task_name, ''), t.name, l.task_id) AS task_name,
+                COALESCE(NULLIF(l.task_type, ''), t.task_type, 'cron') AS task_type,
+                COALESCE(NULLIF(l.action_type, ''), t.action_type, 'reminder') AS action_type,
+                COALESCE(NULLIF(l.cron_expr, ''), t.cron_expr, '') AS cron_expr,
+                COALESCE(NULLIF(l.prompt, ''), t.prompt, t.command, '') AS prompt,
+                l.status,
+                l.output,
+                l.error_msg,
+                l.duration_ms,
+                l.executed_at
+            FROM cron_logs l
+            LEFT JOIN cron_tasks t ON l.task_id = t.id
+        """
         if task_id:
-            cursor.execute('SELECT * FROM cron_logs WHERE task_id = ? ORDER BY executed_at DESC LIMIT ?', (task_id, limit))
+            cursor.execute(f"{base_select} WHERE l.task_id = ? ORDER BY l.executed_at DESC, l.id DESC LIMIT ?", (task_id, limit))
+        elif chat_id:
+            cursor.execute(
+                f"{base_select} WHERE l.chat_id = ? OR l.chat_id = '' OR l.chat_id IS NULL OR t.chat_id = ? ORDER BY l.executed_at DESC, l.id DESC LIMIT ?",
+                (chat_id, chat_id, limit),
+            )
         else:
-            cursor.execute('SELECT * FROM cron_logs ORDER BY executed_at DESC LIMIT ?', (limit,))
+            cursor.execute(f"{base_select} ORDER BY l.executed_at DESC, l.id DESC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
     except Exception as e:
         log.error(f"[cron] get_cron_logs failed: {e}")
         return []
+    finally:
+        conn.close()
+
+
+def clear_cron_logs(chat_id: str = None) -> int:
+    """清空历史执行审计记录。"""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        _ensure_cron_logs_schema(cursor)
+        if chat_id:
+            cursor.execute("DELETE FROM cron_logs WHERE chat_id = ? OR chat_id = '' OR chat_id IS NULL", (chat_id,))
+        else:
+            cursor.execute("DELETE FROM cron_logs")
+        deleted = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        conn.commit()
+        return deleted
+    except Exception as e:
+        log.error(f"[cron] clear_cron_logs failed: {e}")
+        return 0
     finally:
         conn.close()
 

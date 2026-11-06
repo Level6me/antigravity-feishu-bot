@@ -30,7 +30,8 @@ from scheduler_db import (
     delete_task,
     cleanup_completed_delay_tasks,
     update_task_status,
-    get_recent_logs
+    get_recent_logs,
+    clear_logs,
 )
 from scheduler import compute_next_run, parse_schedule_intent, is_valid_schedule_expr
 from executors import execute_task
@@ -75,11 +76,13 @@ BADGE_MAP = {
 }
 
 
-def build_cron_panel_card(tasks: List[Dict[str, Any]], active_tab: str = "user", session_data: dict = None) -> dict:
+def build_cron_panel_card(tasks: List[Dict[str, Any]], active_tab: str = "user", session_data: dict = None, logs: Optional[List[Dict[str, Any]]] = None) -> dict:
     """构建计划任务总控中心交互卡片（统一委托给 cards.cron，消除双份视图逻辑分叉）"""
     try:
         import cards.cron as _c_cron
-        return _c_cron.build_cron_panel_card(tasks, active_tab=active_tab, session_data=session_data)
+        if active_tab == "history" and logs is None:
+            logs = get_recent_logs(limit=15)
+        return _c_cron.build_cron_panel_card(tasks, active_tab=active_tab, session_data=session_data, logs=logs)
     except Exception:
         pass
     valid_tasks = [
@@ -316,11 +319,20 @@ class CronSchedulerPlugin(BasePlugin):
                 tasks = get_all_cron_tasks(chat_id)
             except Exception:
                 tasks = get_all_tasks(chat_id)
+            card = build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
+            self.send_reply_card(message_id, card)
+            return True
+
+        # 1.2 查看历史执行记录: /cron history | /cron logs
+        if args_clean in ["history", "logs", "log"]:
             try:
-                import cards.cron as _c_cron
-                card = _c_cron.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
+                from database import get_all_cron_tasks, get_cron_logs
+                tasks = get_all_cron_tasks(chat_id)
+                logs = get_cron_logs(chat_id=chat_id, limit=15)
             except Exception:
-                card = build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
+                tasks = get_all_tasks(chat_id)
+                logs = get_recent_logs(chat_id=chat_id, limit=15)
+            card = build_cron_panel_card(tasks, active_tab="history", session_data=session_data, logs=logs)
             self.send_reply_card(message_id, card)
             return True
 
@@ -436,7 +448,15 @@ class CronSchedulerPlugin(BasePlugin):
         if action == "switch_cron_tab":
             tab = value.get("tab", "user")
             tasks = await loop.run_in_executor(None, lambda: get_all_tasks(chat_id))
-            new_card = build_cron_panel_card(tasks, active_tab=tab, session_data={})
+            logs = await loop.run_in_executor(None, lambda: get_recent_logs(chat_id=chat_id, limit=15)) if tab == "history" else None
+            new_card = build_cron_panel_card(tasks, active_tab=tab, session_data={}, logs=logs)
+            await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            return True
+
+        elif action == "clear_cron_logs":
+            await loop.run_in_executor(None, lambda: clear_logs(chat_id))
+            tasks = await loop.run_in_executor(None, lambda: get_all_tasks(chat_id))
+            new_card = build_cron_panel_card(tasks, active_tab="history", session_data={}, logs=[])
             await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             return True
 

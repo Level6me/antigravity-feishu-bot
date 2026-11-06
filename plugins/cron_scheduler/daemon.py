@@ -111,7 +111,8 @@ class CronDaemon:
             task_name=task_name,
             status="success" if is_success else "failed",
             result=result_text,
-            duration_ms=duration_ms
+            duration_ms=duration_ms,
+            task_meta=task
         )
 
         # 2. 一次性任务完成后自动移除（仅保留审计日志），周期性任务计算下次触发时间

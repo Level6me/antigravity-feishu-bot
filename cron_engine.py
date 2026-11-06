@@ -215,7 +215,7 @@ class CronEngine:
                 duration_ms = int((time.time() - start_time) * 1000)
                 now_ts = int(time.time())
                 await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: record_cron_log(task_id, "failed" if is_error else "success", result_text, "", duration_ms)
+                    None, lambda: record_cron_log(task_id, "failed" if is_error else "success", result_text, "", duration_ms, task_meta=task)
                 )
 
                 # 一次性倒计时任务触发完毕后立即从任务主表移除（仅保留 cron_logs 审计日志）

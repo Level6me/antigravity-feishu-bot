@@ -550,13 +550,16 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         tab = action_value.get("tab", "user")
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_switch_cron():
-                from database import get_all_cron_tasks
-                tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
+                from database import get_all_cron_tasks, get_cron_logs
+                loop = asyncio.get_running_loop()
+                tasks = await loop.run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
+                logs = await loop.run_in_executor(None, lambda: get_cron_logs(chat_id=chat_id, limit=15)) if tab == "history" else None
                 session_data = await get_session_async(chat_id)
-                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab=tab, session_data=session_data)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab=tab, session_data=session_data, logs=logs)
+                await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             asyncio.run_coroutine_threadsafe(do_switch_cron(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"已切换至 {'用户' if tab=='user' else '系统'} 任务面板"}})
+        tab_label = "历史记录" if tab == "history" else ("用户" if tab == "user" else "系统")
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"已切换至 {tab_label} 面板"}})
 
     elif action_value.get("action") == "open_cron_panel":
         if app_state.main_loop and app_state.main_loop.is_running():
@@ -628,6 +631,19 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             asyncio.run_coroutine_threadsafe(do_clear_completed_cron(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已清理所有已完成/已暂停任务！"}})
+
+    elif action_value.get("action") == "clear_cron_logs":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_clear_cron_logs():
+                from database import clear_cron_logs, get_all_cron_tasks
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, lambda: clear_cron_logs(chat_id))
+                tasks = await loop.run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
+                session_data = await get_session_async(chat_id)
+                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="history", session_data=session_data, logs=[])
+                await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
+            asyncio.run_coroutine_threadsafe(do_clear_cron_logs(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已清空历史执行记录！"}})
 
     elif action_value.get("action") == "run_cron_now":
         task_id = action_value.get("task_id")
