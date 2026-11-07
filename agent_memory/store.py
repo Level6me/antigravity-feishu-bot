@@ -9,7 +9,20 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import config
+try:
+    import config
+except Exception:
+    class _FallbackConfig:
+        BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        @staticmethod
+        def get_transcript_path(conv_id: str) -> str:
+            agy_home = os.environ.get("ANTIGRAVITY_HOME") or os.path.expanduser("~/.gemini/antigravity-cli")
+            return os.path.join(
+                agy_home, "brain", conv_id, ".system_generated", "logs", "transcript.jsonl"
+            )
+
+    config = _FallbackConfig()  # type: ignore
 
 try:
     from logger import log
