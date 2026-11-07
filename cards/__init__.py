@@ -23,6 +23,8 @@ class CardBuilder:
     generate_task_plan = staticmethod(indicators.generate_task_plan)
     parse_task_plan = staticmethod(indicators.parse_task_plan)
     match_step_index = staticmethod(indicators.match_step_index)
+    _compute_monotonic_progress_pct = staticmethod(indicators._compute_monotonic_progress_pct)
+    _collapse_consecutive_steps = staticmethod(indicators._collapse_consecutive_steps)
     build_planned_steps_indicator = staticmethod(indicators.build_planned_steps_indicator)
     build_stall_warning_card = staticmethod(indicators.build_stall_warning_card)
     build_stall_error_card = staticmethod(indicators.build_stall_error_card)

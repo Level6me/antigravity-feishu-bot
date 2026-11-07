@@ -333,11 +333,11 @@ def generate_task_plan(user_text: str) -> list[str]:
 def _classify_action_phase(action: str) -> str:
     """Classify a tool action into one of 4 execution phases: explore | implement | verify | deliver."""
     act = (action or "").lower()
-    if any(k in act for k in ["推送代码", "git push", "提交 git", "git commit", "远程连接", "重载", "部署", "发送", "上传", "导出"]):
+    if any(k in act for k in ["推送代码", "git push", "提交 git", "git commit", "重载后台服务", "部署", "发送", "上传", "导出"]):
         return "deliver"
     if any(k in act for k in ["测试", "unittest", "pytest", "语法", "py_compile", "编译", "构建", "校验", "验证"]):
         return "verify"
-    if any(k in act for k in ["编辑文件", "写入文件", "修改文件", "生成", "创建", "重构", "执行脚本"]):
+    if any(k in act for k in ["编辑文件", "写入文件", "修改文件", "生成", "创建", "重构", "执行脚本", "python 分析", "python 处理", "python 脚本", "远程连接"]):
         return "implement"
     return "explore"
 
@@ -348,8 +348,8 @@ _STEP_STOP_KEYWORDS = {"正在", "执行", "进行", "处理", "操作", "任务
 def match_step_index(planned_steps: list[str], current_idx: int, action: str, completed_count: int) -> int:
     """Advance current_idx forward using Phase-Aware Bounded Lookahead + Budget-Proportional Pacing.
 
-    Eliminates the old bug where `min(total - 2, completed_count)` jumped to Step 3 after just 2 file reads
-    and then stayed frozen at Step 3 forever.
+    Strictly monotonic (never returns < current_idx) and guards the final stage (`total - 1`)
+    against premature jumps during early exploration/implementation tool calls.
     """
     if not planned_steps:
         return 0
@@ -360,8 +360,12 @@ def match_step_index(planned_steps: list[str], current_idx: int, action: str, co
     action_lower = (action or "").lower()
     phase = _classify_action_phase(action_lower)
 
-    # 1. 局部前瞻语义匹配（仅向后探测 1~2 步，防止首步远程探查直接跳到末步“部署到树莓派”）
-    lookahead_limit = min(total, current_idx + 3)
+    # Guard: do not allow jumping into the very last step (total - 1) during early tool calls
+    # unless the action is an explicit final delivery action (e.g. git push / service reload / file upload).
+    max_reachable_idx = (total - 1) if (phase == "deliver" or completed_count >= max(4, total * 2)) else max(0, total - 2)
+
+    # 1. 局部前瞻语义匹配（仅向后探测 1~2 步，防止首步探查直接跳到末步）
+    lookahead_limit = min(max_reachable_idx + 1, current_idx + 3)
     for j in range(current_idx + 1, lookahead_limit):
         step_text = planned_steps[j].lower()
         keywords = [
@@ -369,14 +373,14 @@ def match_step_index(planned_steps: list[str], current_idx: int, action: str, co
             if w not in _STEP_STOP_KEYWORDS
         ]
         if any(kw in action_lower for kw in keywords):
-            return j
+            return max(current_idx, min(j, max_reachable_idx))
         # Phase-transition matching for the immediate next step (j == current_idx + 1)
         if j == current_idx + 1:
             step_phase = _classify_action_phase(step_text)
             if phase == step_phase and phase in ("implement", "verify", "deliver"):
-                return j
+                return max(current_idx, min(j, max_reachable_idx))
 
-    # 2. 针对收尾交付动作（如 git push / 远程部署 / 发送报表），允许直接推进至对应后段或末步
+    # 2. 针对收尾交付动作（如 git push / 重载服务 / 上传产物），允许推进至对应交付阶段
     if phase == "deliver":
         for j in range(total - 1, current_idx, -1):
             if _classify_action_phase(planned_steps[j]) == "deliver":
@@ -384,7 +388,7 @@ def match_step_index(planned_steps: list[str], current_idx: int, action: str, co
         return max(current_idx, total - 1)
 
     if phase == "verify":
-        for j in range(current_idx + 1, total):
+        for j in range(current_idx + 1, max_reachable_idx + 1):
             if _classify_action_phase(planned_steps[j]) == "verify":
                 return j
 
@@ -395,7 +399,7 @@ def match_step_index(planned_steps: list[str], current_idx: int, action: str, co
         "verify": 0.88,
         "deliver": 1.0,
     }.get(phase, 0.65)
-    max_allowed_by_phase = min(total - 2 if phase != "deliver" else total - 1, int(total * phase_ceiling_ratio))
+    max_allowed_by_phase = min(max_reachable_idx, int(total * phase_ceiling_ratio))
     max_allowed_by_phase = max(0, max_allowed_by_phase)
 
     paced_idx = completed_count // 3
@@ -416,21 +420,52 @@ def _collapse_consecutive_steps(steps: list[str]) -> list[tuple[str, int]]:
     return collapsed
 
 
-def _build_visual_progress_bar(current_idx: int, total: int, is_all_completed: bool, tool_count: int, think_seconds: int, bar_width: int = 10) -> str:
+def _compute_monotonic_progress_pct(
+    current_idx: int,
+    total: int,
+    is_all_completed: bool,
+    tool_count: int,
+    min_pct: int = 0,
+) -> int:
+    """Compute a strictly monotonic (non-decreasing) progress percentage in [10, 100].
+
+    Replaces the old `(tool_count % 3)` modulo formula (which caused 91% -> 80% -> 83% -> 91% oscillations
+    whenever a stage spanned more than 3 tool calls) with a smooth hyperbolic saturation curve
+    plus an explicit `min_pct` high-water mark floor.
+    """
+    if is_all_completed:
+        return 100
+    total = max(1, total)
+    done_stages = max(0, min(current_idx, total - 1))
+    # Map stages 0 .. (total - 1) across [8%, 92%], reserving 93%~95% for late multi-tool convergence
+    stage_span = 84.0 / total
+    base_pct = 8.0 + done_stages * stage_span
+    tools_in_stage = max(0, tool_count - done_stages * 2)
+    # Strictly increasing saturation curve in [0.12, 0.88) as tools_in_stage grows: never oscillates or resets!
+    intra_ratio = 0.12 + 0.76 * (1.0 - 1.0 / (1.0 + 0.35 * tools_in_stage))
+    raw_pct = int(round(base_pct + stage_span * intra_ratio))
+    clamped_pct = max(10, min(95, raw_pct))
+    return max(min(95, int(min_pct or 0)), clamped_pct)
+
+
+def _build_visual_progress_bar(
+    current_idx: int,
+    total: int,
+    is_all_completed: bool,
+    tool_count: int,
+    think_seconds: int,
+    bar_width: int = 10,
+    min_pct: int = 0,
+) -> str:
     """Build a 10-cell block progress bar (■■■■■□□□□□) and telemetry line for the card top."""
     if total <= 0:
         total = 1
+    pct = _compute_monotonic_progress_pct(current_idx, total, is_all_completed, tool_count, min_pct=min_pct)
     if is_all_completed:
-        pct = 100
         bar = "■" * bar_width
         stage_str = f"全部 {total}/{total} 阶段已完成"
     else:
         done_stages = max(0, min(current_idx, total - 1))
-        # Calculate smooth percentage combining stage index and sub-tool progress within current stage
-        base_pct = int((done_stages / total) * 100)
-        stage_span = int(100 / total)
-        intra_bonus = min(stage_span - 2, (tool_count % 3) * max(3, stage_span // 3))
-        pct = max(10, min(95, base_pct + max(5, intra_bonus)))
         filled = max(1, min(bar_width - 1, int(round((pct / 100.0) * bar_width))))
         bar = ("■" * filled) + ("□" * (bar_width - filled))
         stage_str = f"阶段 {done_stages + 1}/{total}"
@@ -454,6 +489,7 @@ def build_planned_steps_indicator(
     is_all_completed: bool = False,
     process_status: dict = None,
     completed_steps: list[str] = None,
+    min_pct: int = 0,
 ) -> dict:
     """Build a Dual-Layer Adaptive Progress Card:
     - Top: Visual progress bar + stage/tool/time telemetry.
@@ -467,7 +503,7 @@ def build_planned_steps_indicator(
     total_tools_run = len(completed_steps) + (1 if (tool_action and not is_all_completed) else 0)
 
     progress_bar_line = _build_visual_progress_bar(
-        current_step_idx, total, is_all_completed, total_tools_run, think_seconds
+        current_step_idx, total, is_all_completed, total_tools_run, think_seconds, min_pct=min_pct
     )
 
     lines = []
@@ -586,6 +622,7 @@ def build_tool_indicator(
     current_step_idx=0,
     is_all_completed=False,
     process_status=None,
+    min_pct=0,
 ):
     completed_steps = completed_steps or []
     # Fallback: If model did not emit [TASK_PLAN], automatically synthesize a dynamic 3~7 step macro plan
@@ -608,6 +645,7 @@ def build_tool_indicator(
             is_all_completed=is_all_completed,
             process_status=process_status,
             completed_steps=completed_steps,
+            min_pct=min_pct,
         )
     action_disp = clean_action_text(tool_action) if tool_action else ""
     

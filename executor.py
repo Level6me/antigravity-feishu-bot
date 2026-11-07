@@ -975,8 +975,14 @@ async def execute_antigravity(
         except Exception as e:
             log.error(f"Failed to sync conversation id from log: {e}")
 
+    task_max_progress_pct = 0
+    task_planned_steps = []
+    task_plan_idx = 0
+    task_completed_tool_steps = []
+    task_explicit_plan_locked = False
+
     async def _run_single_attempt(attempt):
-        nonlocal bot_reply_msg_id, target_transcript_path
+        nonlocal bot_reply_msg_id, target_transcript_path, task_max_progress_pct, task_planned_steps, task_plan_idx, task_completed_tool_steps, task_explicit_plan_locked
         logs_dir = os.path.abspath(os.path.join(BASE_DIR, "logs"))
         os.makedirs(logs_dir, exist_ok=True)
         log_file_path = os.path.join(logs_dir, f"agy_log_{uuid.uuid4().hex}.txt")
@@ -1052,8 +1058,8 @@ async def execute_antigravity(
             process = sess.process
             running_processes[pool_key] = process
             
-            planned_steps = []
-            current_plan_idx = 0
+            planned_steps = list(task_planned_steps)
+            current_plan_idx = task_plan_idx
             is_voice_message = bool(
                 task_meta and (
                     task_meta.get("message_type") == "audio" or 
@@ -1149,7 +1155,7 @@ async def execute_antigravity(
             process_status_info = {"active": False, "status_desc": "", "workers": [], "detail_cmd": ""}
             tool_in_flight_start_time = None
             last_tool_action = ""
-            completed_tool_steps = []
+            completed_tool_steps = list(task_completed_tool_steps)
             current_tool_action = ""
             current_tool_name = ""
             typesafe_tool_audits = []
@@ -1250,9 +1256,17 @@ async def execute_antigravity(
                                 accumulated_text += delta
                                 current_turn_text += delta
                                 parsed_steps = CardBuilder.parse_task_plan(accumulated_text)
-                                if parsed_steps and parsed_steps != planned_steps:
+                                if parsed_steps and parsed_steps != planned_steps and not task_explicit_plan_locked:
+                                    old_len = len(planned_steps)
+                                    if old_len > 0 and current_plan_idx > 0:
+                                        scaled_idx = int(round((current_plan_idx / float(old_len)) * len(parsed_steps)))
+                                        current_plan_idx = max(0, min(len(parsed_steps) - 1, scaled_idx))
                                     planned_steps = parsed_steps
                                     current_plan_idx = min(current_plan_idx, len(planned_steps) - 1)
+                                    if "[/TASK_PLAN]" in accumulated_text.upper():
+                                        task_explicit_plan_locked = True
+                                    task_planned_steps = list(planned_steps)
+                                    task_plan_idx = current_plan_idx
                                 if "[TASK_PLAN]" in delta and len(re.findall(r"\[TASK_PLAN\]", accumulated_text, re.IGNORECASE)) >= 3:
                                     budget_intercepted = True
                                     budget_exceeded_reason = "单轮内连续重复输出 [TASK_PLAN] 规划 >= 3 次（疑似上下文压缩后重规划循环）"
@@ -1262,6 +1276,7 @@ async def execute_antigravity(
                                     break
                             if current_tool_action:
                                 completed_tool_steps.append(current_tool_action)
+                                task_completed_tool_steps = list(completed_tool_steps)
                                 current_tool_action = ""
                                 stream_action = ""
                                 current_tool_name = ""
@@ -1281,14 +1296,25 @@ async def execute_antigravity(
                             # so clear current_turn_text so only post-tool final conclusion text is delivered as final_reply!
                             if current_turn_text:
                                 parsed_steps = CardBuilder.parse_task_plan(accumulated_text)
-                                if parsed_steps and parsed_steps != planned_steps:
+                                if parsed_steps and parsed_steps != planned_steps and not task_explicit_plan_locked:
+                                    old_len = len(planned_steps)
+                                    if old_len > 0 and current_plan_idx > 0:
+                                        scaled_idx = int(round((current_plan_idx / float(old_len)) * len(parsed_steps)))
+                                        current_plan_idx = max(0, min(len(parsed_steps) - 1, scaled_idx))
                                     planned_steps = parsed_steps
+                                    current_plan_idx = min(current_plan_idx, len(planned_steps) - 1)
+                                    if "[/TASK_PLAN]" in accumulated_text.upper():
+                                        task_explicit_plan_locked = True
+                                    task_planned_steps = list(planned_steps)
+                                    task_plan_idx = current_plan_idx
                                 current_turn_text = ""
 
                             # Guarantee adaptive 3~8 step planned roadmap even if model omitted [TASK_PLAN]
                             if not planned_steps:
                                 planned_steps = CardBuilder.generate_task_plan(user_text)
                                 current_plan_idx = 0
+                                task_planned_steps = list(planned_steps)
+                                task_plan_idx = 0
 
                             raw_cmd_param = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
                             raw_path_param = (t_params.get("Path") or t_params.get("TargetFile") or t_params.get("AbsolutePath") or t_params.get("path") or "").strip()
@@ -1317,10 +1343,12 @@ async def execute_antigravity(
                                 done_act = act or current_tool_action
                                 if done_act:
                                     completed_tool_steps.append(done_act)
+                                    task_completed_tool_steps = list(completed_tool_steps)
                                     if planned_steps:
                                         current_plan_idx = CardBuilder.match_step_index(
                                             planned_steps, current_plan_idx, done_act, len(completed_tool_steps)
                                         )
+                                        task_plan_idx = max(task_plan_idx, current_plan_idx)
                                 current_tool_action = ""
                                 current_tool_raw_sig = ""
                                 stream_action = ""
@@ -1354,6 +1382,7 @@ async def execute_antigravity(
                                 if act:
                                     if current_tool_action and act != current_tool_action:
                                         completed_tool_steps.append(current_tool_action)
+                                        task_completed_tool_steps = list(completed_tool_steps)
                                     current_tool_action = act
                                     stream_action = act
                                     last_tool_action = act
@@ -1364,6 +1393,7 @@ async def execute_antigravity(
                                         current_plan_idx = CardBuilder.match_step_index(
                                             planned_steps, current_plan_idx, act, len(completed_tool_steps)
                                         )
+                                        task_plan_idx = max(task_plan_idx, current_plan_idx)
                                 if act:
                                     from plugin_manager import plugin_manager
                                     await plugin_manager.dispatch_tool_call(act, {})
@@ -1612,6 +1642,15 @@ async def execute_antigravity(
                     active_action = current_tool_action or stream_action
                     display_action = active_action or (last_tool_action if not planned_steps else "")
                     if display_action or completed_tool_steps or planned_steps:
+                        effective_total_stages = len(planned_steps) if planned_steps else 4
+                        effective_tools_run = len(completed_tool_steps) + (1 if display_action else 0)
+                        task_max_progress_pct = CardBuilder._compute_monotonic_progress_pct(
+                            current_plan_idx,
+                            effective_total_stages,
+                            False,
+                            effective_tools_run,
+                            min_pct=task_max_progress_pct,
+                        )
                         indicator_card = CardBuilder.build_tool_indicator(
                             display_action,
                             user_text,
@@ -1621,7 +1660,8 @@ async def execute_antigravity(
                             completed_steps=completed_tool_steps,
                             planned_steps=planned_steps,
                             current_step_idx=current_plan_idx,
-                            process_status=process_status_info
+                            process_status=process_status_info,
+                            min_pct=task_max_progress_pct,
                         )
                     else:
                         indicator_card = CardBuilder.build_typing_indicator(

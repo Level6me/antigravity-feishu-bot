@@ -281,6 +281,19 @@ class TestLongHorizonMemoryAndDecisionGuard(unittest.TestCase):
         )
         self.assertEqual(strip_injected_prompt_headers(wrapped), "我的选择是：方案一")
 
+        # 4. Monotonic progress percentage: verify no 91% -> 83% -> 58% regression across 30+ tool calls
+        plan_4 = ["检查硬件环境", "分析固件偏移", "构建兼容镜像", "烧录验证"]
+        prev_pct = 0
+        idx = 0
+        for tool_step in range(1, 35):
+            idx = CardBuilder.match_step_index(plan_4, idx, "正在执行 Python 分析 (@ 0x1680)", tool_step)
+            pct = CardBuilder._compute_monotonic_progress_pct(idx, len(plan_4), False, tool_step, min_pct=prev_pct)
+            self.assertGreaterEqual(pct, prev_pct, f"Progress regressed at tool_step={tool_step}: {pct} < {prev_pct}")
+            prev_pct = pct
+        # Even if plan length expands or attempt 2 restarts with lower raw idx, min_pct locks progress!
+        locked_pct = CardBuilder._compute_monotonic_progress_pct(1, 6, False, 5, min_pct=prev_pct)
+        self.assertGreaterEqual(locked_pct, prev_pct)
+
 
 if __name__ == "__main__":
     unittest.main()
