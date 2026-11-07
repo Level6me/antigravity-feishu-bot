@@ -75,15 +75,22 @@ class TestV32RefactorSuite(unittest.TestCase):
         self.assertEqual(dec_hazard.security_level, "L3")
 
     def test_02_known_issue_1_step_display_enforcement(self):
-        # 1. Model emits 6 steps -> compressed to strictly 4 steps
+        # 1. Model emits 6 steps -> preserved intact (up to 8 steps supported); >8 steps sampled down to 8
         raw_6_steps = "[TASK_PLAN] 步骤1: 解析 | 步骤2: 检索 | 步骤3: 修改 | 步骤4: 测试 | 步骤5: 校验 | 步骤6: 总结交付 [/TASK_PLAN]"
         parsed = parse_task_plan(raw_6_steps)
         self.assertIsNotNone(parsed)
-        self.assertEqual(len(parsed), 4)
+        self.assertEqual(len(parsed), 6)
         self.assertEqual(parsed[0], "解析")
         self.assertEqual(parsed[-1], "总结交付")
 
-        # 2. When planned_steps is empty [], build_tool_indicator automatically synthesizes 3-4 planned steps
+        raw_10_steps = "[TASK_PLAN] 1.S1 | 2.S2 | 3.S3 | 4.S4 | 5.S5 | 6.S6 | 7.S7 | 8.S8 | 9.S9 | 10.S10 [/TASK_PLAN]"
+        parsed_10 = parse_task_plan(raw_10_steps)
+        self.assertEqual(len(parsed_10), 8)
+        self.assertEqual(parsed_10[0], "S1")
+        self.assertEqual(parsed_10[-1], "S10")
+
+        # 2. When planned_steps is empty [], build_tool_indicator automatically synthesizes dynamic planned steps
+        # and renders the Dual-Layer Progress Card (macro roadmap + real-time completed sub-steps trajectory)
         card = build_tool_indicator(
             tool_action="正在读取文件: executor.py",
             user_text="排查 executor.py 的代码漏洞并修复",
@@ -93,7 +100,7 @@ class TestV32RefactorSuite(unittest.TestCase):
         )
         card_json_str = str(card)
         self.assertIn("任务规划与执行清单", card_json_str)
-        self.assertNotIn("已完成前", card_json_str)
+        self.assertIn("实时底层执行轨迹", card_json_str)
 
     def test_03_known_issue_2_no_thinking_leak(self):
         # 1. Dangling closing </thought> and multi-paragraph English Thinking Process

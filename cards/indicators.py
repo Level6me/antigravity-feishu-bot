@@ -181,9 +181,14 @@ def is_complex_task(user_text: str) -> bool:
     return any(kw in t for kw in complex_keywords)
 
 
-def parse_task_plan(text: str) -> list[str] | None:
-    """Parse custom task plan tags emitted by the model: [TASK_PLAN] step1 | step2 ... [/TASK_PLAN]
-    Strictly enforces the 3-4 step display rule.
+# 宏观规划步骤上限：支持 2~8 步自适应弹性展示（轻量任务 2~4 步，常规工程 4~6 步，复杂多阶段工程 6~8 步）
+MAX_PLANNED_STEPS = 8
+MAX_VISIBLE_SUBSTEPS = 6
+
+
+def parse_task_plan(text: str, max_steps: int = MAX_PLANNED_STEPS) -> list[str] | None:
+    """Parse custom task plan tags emitted by the model: [TASK_PLAN] step1 | step2 ... [/TASK_PLAN].
+    Supports elastic 2 ~ 8 macro steps based on task complexity without discarding middle stages.
     """
     if not text:
         return None
@@ -199,128 +204,242 @@ def parse_task_plan(text: str) -> list[str] | None:
             steps = [s.strip() for s in re.split(r'[\|\n\r]+', raw) if s.strip()]
         else:
             return None
-        # Clean leading numbering like "1. " or "步骤1：" to normalize
         cleaned_steps = []
         for s in steps:
-            cs = re.sub(r'^(?:步骤\s*\d+[:：\.\、\s]*|\d+[\.\、\s]+)', '', s).strip()
-            if cs and len(cs) <= 36:
-                cleaned_steps.append(cs)
+            cs = re.sub(r'^(?:步骤\s*\d+[:：\.\、\s]*|阶段\s*\d+[:：\.\、\s]*|[Pp]\d+[:：\.\、\s]*|\d+[\.\、\s]+)', '', s).strip()
+            if not cs:
+                continue
+            if len(cs) > 44:
+                cs = cs[:42].rstrip() + "…"
+            cleaned_steps.append(cs)
         if len(cleaned_steps) >= 2:
-            if len(cleaned_steps) > 4:
-                # Strictly compress >4 steps into 4 macro stages (first 3 + final delivery stage)
-                cleaned_steps = cleaned_steps[:3] + [cleaned_steps[-1]]
+            if len(cleaned_steps) > max_steps:
+                # Preserve first step, last step, and evenly sample (max_steps - 2) intermediate milestones
+                mid_pool = cleaned_steps[1:-1]
+                keep_mid = max_steps - 2
+                sampled_mid = [
+                    mid_pool[int(round(i * (len(mid_pool) - 1) / max(1, keep_mid - 1)))]
+                    for i in range(keep_mid)
+                ]
+                cleaned_steps = [cleaned_steps[0]] + sampled_mid + [cleaned_steps[-1]]
             return cleaned_steps
     return None
 
 
 def generate_task_plan(user_text: str) -> list[str]:
-    """Generate a high-quality, structured 3-4 step execution plan based on the user's prompt."""
+    """Generate a context-aware, dynamic 3~7 step execution plan tailored to the user's prompt."""
     text = (user_text or "").lower()
-    
-    # 0. 安全审查 / 漏洞排查 / 审计 / 风险检查
+
+    # 识别是否包含额外后置阶段（单元测试、Git提交推送、远端/树莓派部署）
+    has_test_stage = any(k in text for k in ["测试", "单元测试", "unittest", "pytest", "跑通", "验证"])
+    has_git_stage = any(k in text for k in ["git", "push", "推送", "提交", "github"])
+    has_remote_stage = any(k in text for k in ["树莓派", "服务器", "ssh", "部署", "上线", "同步到", "pm2"])
+
+    def _append_tail_stages(base_steps: list[str], final_delivery: str) -> list[str]:
+        steps = list(base_steps)
+        if has_test_stage and not any("测试" in s for s in steps):
+            steps.append("运行单元测试与边界校验")
+        if has_git_stage and not any("提交" in s or "推送" in s for s in steps):
+            steps.append("提交代码变更并推送到远端仓库")
+        if has_remote_stage and not any("部署" in s or "服务器" in s or "树莓派" in s for s in steps):
+            steps.append("同步部署至目标节点并验证服务")
+        steps.append(final_delivery)
+        return steps[:MAX_PLANNED_STEPS]
+
+    # 0. 只读探查 / 状态排查 (简洁 3 步)
+    if any(k in text for k in ["看看有没有", "查一下", "是什么原因", "为什么", "看下状态", "运行的什么版本"]) and not any(
+        k in text for k in ["修改", "修复", "重构", "实现", "重写", "重新设计"]
+    ):
+        return [
+            "连接并读取目标环境与日志状态",
+            "交叉比对上下文与定位核心原因",
+            "汇总排查结论并输出诊断报告",
+        ]
+
+    # 1. 安全审查 / 漏洞排查 / 审计
     if any(k in text for k in ["审查", "漏洞", "安全", "排查", "审计"]):
-        return [
-            "全面审查源码与系统调用链路",
-            "排查潜在漏洞与逻辑安全风险",
-            "定位缺陷根因并执行修复加固",
-            "校验修复产物并输出分析报告"
-        ]
+        return _append_tail_stages(
+            [
+                "全面审查源码与系统调用链路",
+                "排查潜在漏洞与逻辑边界风险",
+                "定位缺陷根因并执行修复加固",
+            ],
+            "校验修复产物并输出分析报告",
+        )
 
-    # 1. 短指令确认 / 开始处理 / 处理
-    if text.strip() in ["开始处理", "开始", "继续", "处理", "帮我处理", "执行", "开整", "搞起", "修复"]:
+    # 2. 短指令确认 / 开始处理 / 继续执行
+    if text.strip() in ["开始处理", "开始", "继续", "处理", "帮我处理", "执行", "开整", "搞起", "修复"] or "[continue_paused_task]" in text:
         return [
-            "梳理待处理事项与执行方案",
+            "加载项目记忆胶囊与梳理待办事项",
             "执行核心模块与代码逻辑改造",
-            "校验语法规范并运行测试验证",
-            "汇总处理产物并交付最终结果"
+            "运行语法检查与自动化测试验证",
+            "归档工程状态并交付最终结果",
         ]
 
-    # 2. 报表 / 导出 / 数据分析 / Excel / CSV / Office 文件 / 文档
-    if any(k in text for k in ["excel", "xlsx", "csv", "表格", "报表", "统计", "分析", "导出", "word", "docx", "ppt", "pdf", "文档", "文件"]):
+    # 3. 报表 / 导出 / 数据分析 / Office 文档
+    if any(k in text for k in ["excel", "xlsx", "csv", "表格", "报表", "统计", "导出", "word", "docx", "ppt", "pdf", "文档"]):
         if any(k in text for k in ["服务器", "ssh", "远程", "端口", "安全", "日志", "数据库", "db", "sql"]):
             return [
-                "连接服务并获取原始日志数据",
-                "提取关键指标与安全分类统计",
-                "自动化生成分析报表文件",
-                "发送文件至飞书并输出总结报告"
+                "连接目标服务并采集原始日志数据",
+                "清洗数据并执行多维指标统计计算",
+                "自动化排版并生成结构化报表文件",
+                "推送文件至飞书并输出分析结论",
             ]
-        elif any(k in text for k in ["笑话", "故事", "文案", "翻译", "总结", "诗"]):
-            return [
-                "构思并整理核心文本内容",
-                "排版格式化并生成文档文件",
-                "发送文档至飞书并完成回复"
-            ]
-        else:
-            return [
-                "梳理数据源与分析指标",
-                "执行数据汇总与处理计算",
-                "排版生成报表文件",
-                "发送文件至飞书并输出分析结论"
-            ]
-            
-    # 2. 编程开发 / 脚本编写 / 代码工程 / 修复 Bug
-    if any(k in text for k in ["代码", "开发", "写一个", "脚本", "实现", "重构", "修复", "bug", "报错", "python", "前端", "后端", "api"]):
-        if any(k in text for k in ["测试", "跑通", "执行", "运行", "验证"]):
-            return [
-                "分析业务需求与规划技术方案",
-                "编写核心代码与功能逻辑",
-                "运行测试用例并校验执行结果",
-                "整理代码产物并输出使用说明"
-            ]
-        else:
-            return [
-                "分析需求与规划架构方案",
-                "编写核心业务逻辑与模块实现",
-                "校验代码语法与执行测试",
-                "交付成果并输出说明文档"
-            ]
-            
-    # 3. 运维巡检 / 服务器管理 / Docker / Linux 操作
-    if any(k in text for k in ["服务器", "ssh", "docker", "容器", "进程", "部署", "重启", "磁盘", "cpu", "内存", "网络", "防火墙"]):
         return [
-            "探测目标环境与验证连通性",
-            "检查系统运行状态与服务日志",
-            "执行运维指令与配置变更",
-            "校验服务健康状态并输出汇总报告"
+            "梳理数据源结构与核心分析指标",
+            "执行数据聚合与格式化排版处理",
+            "生成导出文件并推送至当前会话",
         ]
-        
-    # 4. 全网搜索 / 调研 / 资料收集
-    if any(k in text for k in ["搜索", "调研", "全网", "查一下", "最新", "找一下", "收集"]):
+
+    # 4. 编程开发 / 架构重新设计 / 修复 Bug
+    if any(k in text for k in ["代码", "开发", "写一个", "脚本", "实现", "重构", "重新设计", "修复", "bug", "报错", "python", "前端", "后端", "逻辑", "步骤"]):
+        return _append_tail_stages(
+            [
+                "审查现有模块代码与调用链路",
+                "设计技术架构与边界处理方案",
+                "重构核心业务逻辑与关联接口",
+            ],
+            "整理代码变更并输出交付总结",
+        )
+
+    # 5. 运维巡检 / 服务器管理 / Docker / 硬件调试
+    if any(k in text for k in ["服务器", "ssh", "docker", "容器", "进程", "部署", "重启", "磁盘", "cpu", "内存", "树莓派", "openocd", "烧录"]):
         return [
-            "拆解搜索关键词并检索相关资料",
-            "交叉比对与信息真伪过滤",
-            "提炼核心要点与深度归纳",
-            "输出结构化调研报告"
+            "探测目标主机环境与验证连通性",
+            "检查系统进程状态与实时运行日志",
+            "执行目标运维指令与配置变更",
+            "校验服务健康状态并输出汇总报告",
         ]
-        
-    # 5. 通用多步骤兜底
-    return [
-        "检索环境与读取相关上下文",
-        "执行核心操作与底层指令处理",
-        "校验处理结果与生成数据产物",
-        "整理交付内容并输出最终回复"
-    ]
+
+    # 6. 全网搜索 / 调研 / 资料收集
+    if any(k in text for k in ["搜索", "调研", "全网", "最新", "找一下", "收集"]):
+        return [
+            "拆解检索关键词并跨域抓取资料",
+            "交叉比对多源信息与真伪过滤",
+            "提炼核心要点并输出结构化报告",
+        ]
+
+    # 7. 通用多步骤兜底
+    return _append_tail_stages(
+        [
+            "检索工作区环境与读取相关上下文",
+            "执行核心操作与底层指令处理",
+            "校验处理结果与生成数据产物",
+        ],
+        "整理交付内容并输出最终回复",
+    )
+
+
+def _classify_action_phase(action: str) -> str:
+    """Classify a tool action into one of 4 execution phases: explore | implement | verify | deliver."""
+    act = (action or "").lower()
+    if any(k in act for k in ["推送代码", "git push", "提交 git", "git commit", "远程连接", "重载", "部署", "发送", "上传", "导出"]):
+        return "deliver"
+    if any(k in act for k in ["测试", "unittest", "pytest", "语法", "py_compile", "编译", "构建", "校验", "验证"]):
+        return "verify"
+    if any(k in act for k in ["编辑文件", "写入文件", "修改文件", "生成", "创建", "重构", "执行脚本"]):
+        return "implement"
+    return "explore"
+
+
+_STEP_STOP_KEYWORDS = {"正在", "执行", "进行", "处理", "操作", "任务", "步骤", "模块", "文件", "代码", "系统", "相关", "结果"}
 
 
 def match_step_index(planned_steps: list[str], current_idx: int, action: str, completed_count: int) -> int:
-    """Advance current_idx forward based on semantic keywords and tool completion count."""
+    """Advance current_idx forward using Phase-Aware Bounded Lookahead + Budget-Proportional Pacing.
+
+    Eliminates the old bug where `min(total - 2, completed_count)` jumped to Step 3 after just 2 file reads
+    and then stayed frozen at Step 3 forever.
+    """
     if not planned_steps:
         return 0
     total = len(planned_steps)
+    if total <= 1:
+        return 0
+    current_idx = max(0, min(current_idx, total - 1))
     action_lower = (action or "").lower()
-    
-    # 1. 优先语义/关键词向前探测匹配（绝不倒退）
-    for j in range(current_idx + 1, total):
+    phase = _classify_action_phase(action_lower)
+
+    # 1. 局部前瞻语义匹配（仅向后探测 1~2 步，防止首步远程探查直接跳到末步“部署到树莓派”）
+    lookahead_limit = min(total, current_idx + 3)
+    for j in range(current_idx + 1, lookahead_limit):
         step_text = planned_steps[j].lower()
-        keywords = [w for w in re.findall(r'[\u4e00-\u9fa5]{2,}|[a-zA-Z]{3,}', step_text)]
-        match_count = sum(1 for kw in keywords if kw in action_lower)
-        if match_count >= 1:
+        keywords = [
+            w for w in re.findall(r'[\u4e00-\u9fa5]{2,4}|[a-zA-Z0-9_]{3,}', step_text)
+            if w not in _STEP_STOP_KEYWORDS
+        ]
+        if any(kw in action_lower for kw in keywords):
             return j
-            
-    # 2. 次优：根据独立工具完成数平滑推进（保护最后一步留给回复生成/交付）
-    max_tool_step = max(0, total - 2)
-    suggested_idx = min(max_tool_step, completed_count)
+        # Phase-transition matching for the immediate next step (j == current_idx + 1)
+        if j == current_idx + 1:
+            step_phase = _classify_action_phase(step_text)
+            if phase == step_phase and phase in ("implement", "verify", "deliver"):
+                return j
+
+    # 2. 针对收尾交付动作（如 git push / 远程部署 / 发送报表），允许直接推进至对应后段或末步
+    if phase == "deliver":
+        for j in range(total - 1, current_idx, -1):
+            if _classify_action_phase(planned_steps[j]) == "deliver":
+                return j
+        return max(current_idx, total - 1)
+
+    if phase == "verify":
+        for j in range(current_idx + 1, total):
+            if _classify_action_phase(planned_steps[j]) == "verify":
+                return j
+
+    # 3. 阶段受限的平滑比例推进（每约 3 次底层工具调用推进 1 个宏观步，且不超过当前动作所处阶段的合理上限）
+    phase_ceiling_ratio = {
+        "explore": 0.38,
+        "implement": 0.72,
+        "verify": 0.88,
+        "deliver": 1.0,
+    }.get(phase, 0.65)
+    max_allowed_by_phase = min(total - 2 if phase != "deliver" else total - 1, int(total * phase_ceiling_ratio))
+    max_allowed_by_phase = max(0, max_allowed_by_phase)
+
+    paced_idx = completed_count // 3
+    suggested_idx = min(max_allowed_by_phase, paced_idx)
     return max(current_idx, suggested_idx)
+
+
+def _collapse_consecutive_steps(steps: list[str]) -> list[tuple[str, int]]:
+    """Collapse consecutive identical step labels into (label, count) pairs."""
+    collapsed: list[tuple[str, int]] = []
+    for s in (steps or []):
+        if not s:
+            continue
+        if collapsed and collapsed[-1][0] == s:
+            collapsed[-1] = (s, collapsed[-1][1] + 1)
+        else:
+            collapsed.append((s, 1))
+    return collapsed
+
+
+def _build_visual_progress_bar(current_idx: int, total: int, is_all_completed: bool, tool_count: int, think_seconds: int) -> str:
+    """Build a compact visual progress bar and telemetry line for the card top."""
+    if total <= 0:
+        total = 1
+    if is_all_completed:
+        pct = 100
+        bar = "🟢" * total
+        stage_str = f"全部 {total}/{total} 阶段已完成"
+    else:
+        done_stages = max(0, min(current_idx, total - 1))
+        # Calculate smooth percentage combining stage index and sub-tool progress within current stage
+        base_pct = int((done_stages / total) * 100)
+        stage_span = int(100 / total)
+        intra_bonus = min(stage_span - 2, (tool_count % 3) * max(3, stage_span // 3))
+        pct = max(5, min(96, base_pct + max(4, intra_bonus)))
+        bar = ("🟢" * done_stages) + "🔵" + ("⚪" * max(0, total - done_stages - 1))
+        stage_str = f"阶段 {done_stages + 1}/{total}"
+
+    parts = [f"{bar} **{pct}%**", stage_str]
+    if tool_count > 0:
+        parts.append(f"已调用 {tool_count} 次工具")
+    if think_seconds > 0:
+        parts.append(f"耗时 {think_seconds}s")
+    return " · ".join(parts)
 
 
 def build_planned_steps_indicator(
@@ -333,40 +452,66 @@ def build_planned_steps_indicator(
     download_success: bool = True,
     is_all_completed: bool = False,
     process_status: dict = None,
+    completed_steps: list[str] = None,
 ) -> dict:
-    """Build a rich roadmap checklist card showing all planned steps upfront with dynamic progress icons."""
+    """Build a Dual-Layer Adaptive Progress Card:
+    - Top: Visual progress bar + stage/tool/time telemetry.
+    - Layer 1: Macro planned roadmap (supports 2~8 steps) with live indented sub-action under the active stage.
+    - Layer 2: Recent completed tool operations log (with consecutive deduplication `×N`).
+    """
+    completed_steps = completed_steps or []
+    planned_steps = planned_steps[:MAX_PLANNED_STEPS]
     total = len(planned_steps)
     current_step_idx = max(0, min(current_step_idx, total - 1))
-    
+    total_tools_run = len(completed_steps) + (1 if (tool_action and not is_all_completed) else 0)
+
+    progress_bar_line = _build_visual_progress_bar(
+        current_step_idx, total, is_all_completed, total_tools_run, think_seconds
+    )
+
     lines = []
     for i, raw_step in enumerate(planned_steps):
         step = raw_step.strip()
         core = re.sub(r'^[•\-\*\s✅⏳⚪\d\.\、\[\]]+\s*', '', step).strip()
         core = re.sub(r'^(?:正在执行|正在运行|正在|已执行|已运行|已)\s*', '', core).strip()
-        
+
         if is_all_completed or i < current_step_idx:
-            # ✅ 已完成
             completed_text = f"已{core}" if not core.startswith("已") else core
             lines.append(f"• ✅ **{i+1}. {completed_text}**")
         elif i == current_step_idx:
-            # ⏳ 正在执行
             active_text = f"正在{core}" if not core.startswith("正在") else core
+            lines.append(f"• ⏳ **{i+1}. {active_text}**")
             if tool_action:
-                act_disp = clean_action_text(tool_action, max_len=24)
+                act_disp = clean_action_text(tool_action, max_len=36)
                 act_core = re.sub(r'^(?:正在执行|正在运行|正在|已执行|已运行|已)\s*', '', act_disp).strip()
-                if act_core and act_core not in active_text:
-                    lines.append(f"• ⏳ **{i+1}. {active_text}** `({act_core})`...")
-                else:
-                    lines.append(f"• ⏳ **{i+1}. {active_text}**...")
-            else:
-                lines.append(f"• ⏳ **{i+1}. {active_text}**...")
+                if act_core:
+                    lines.append(f"  └─ 🔄 *当前动作：正在{act_core}...*")
         else:
-            # ⚪ 待开始 (已规划待执行)
             lines.append(f"• ⚪ {i+1}. {core}")
 
     steps_block = "\n".join(lines)
-    time_hint = f"已运行 {think_seconds}s" if think_seconds > 0 else "请稍候..."
-    
+
+    # Layer 2: 实时底层工具操作轨迹回放 (折叠连续重复项，展示最近 MAX_VISIBLE_SUBSTEPS 项)
+    substeps_block = ""
+    if completed_steps:
+        collapsed = _collapse_consecutive_steps(completed_steps)
+        sub_lines = []
+        if len(collapsed) > MAX_VISIBLE_SUBSTEPS:
+            hidden_cnt = sum(c for _, c in collapsed[:-MAX_VISIBLE_SUBSTEPS])
+            sub_lines.append(f"<font color='grey'>*(前序已完成 {hidden_cnt} 项底层操作)*</font>")
+            visible_collapsed = collapsed[-MAX_VISIBLE_SUBSTEPS:]
+        else:
+            visible_collapsed = collapsed
+
+        for step_lbl, cnt in visible_collapsed:
+            formatted = format_step_item(step_lbl, is_completed=True, max_len=36)
+            # Replace heavy ✅ with lightweight ✓ for sub-actions so macro steps stand out visually
+            formatted = formatted.replace("• ✅ ", "  • `✓` ")
+            if cnt > 1:
+                formatted += f" `(×{cnt})`"
+            sub_lines.append(formatted)
+        substeps_block = f"\n\n**🔧 实时底层执行轨迹 (已完成 {len(completed_steps)} 步)：**\n" + "\n".join(sub_lines)
+
     # 智能进程诊断状态横幅
     diag_banner = ""
     if process_status and process_status.get("active") and not is_all_completed:
@@ -382,10 +527,17 @@ def build_planned_steps_indicator(
                 diag_banner += f"\n> 💻 **实际运行命令**：`{detail_cmd[:80]}`"
 
     if is_all_completed:
-        content = f"**📋 任务规划与执行清单 (共 {total} 步)：**\n\n{steps_block}\n\n*({time_hint}，全部步骤已执行完毕，正在输出回复)*"
+        content = (
+            f"📊 {progress_bar_line}\n\n"
+            f"**📋 任务规划与执行清单 (共 {total} 步)：**\n\n{steps_block}{substeps_block}\n\n"
+            f"*(全部规划阶段已执行完毕，正在输出总结回复)*"
+        )
     else:
-        content = f"**📋 任务规划与执行清单 (第 {current_step_idx + 1}/{total} 步)：**\n\n{steps_block}{diag_banner}\n\n*({time_hint}，AI 正在多步骤自主推进中)*"
-        
+        content = (
+            f"📊 {progress_bar_line}\n\n"
+            f"**📋 任务规划与执行清单 (第 {current_step_idx + 1}/{total} 阶段)：**\n\n{steps_block}{substeps_block}{diag_banner}"
+        )
+
     if downloaded_file_name:
         if download_success:
             content = f"✅ 已成功获取资源：**{downloaded_file_name}**\n\n{content}"
@@ -395,14 +547,14 @@ def build_planned_steps_indicator(
     curr_title = planned_steps[current_step_idx] if not is_all_completed else "任务处理完成"
     clean_title = re.sub(r'^[•\-\*\s✅⏳⚪\d\.\、\[\]]+\s*', '', curr_title).strip()
     clean_title = re.sub(r'^(?:正在执行|正在运行|正在|已执行|已运行|已)\s*', '', clean_title).strip()
-    
+
     if is_all_completed:
         header_title = f"✨ [{total}/{total}] 任务规划步骤已全部完成"
         template = "blue"
     else:
         header_title = f"🛠️ [{current_step_idx + 1}/{total}] {clean_title}"
         template = "turquoise"
-        
+
     if len(header_title) > 28:
         header_title = header_title[:25] + "..."
 
@@ -435,10 +587,9 @@ def build_tool_indicator(
     process_status=None,
 ):
     completed_steps = completed_steps or []
-    # Fallback: If model did not emit [TASK_PLAN], automatically synthesize a 3-4 step macro plan
-    # so the card ALWAYS adheres to the 3-4 step rule instead of dumping raw tool history!
+    # Fallback: If model did not emit [TASK_PLAN], automatically synthesize a dynamic 3~7 step macro plan
     if not planned_steps and (tool_action or completed_steps):
-        planned_steps = generate_task_plan(user_text)[:4]
+        planned_steps = generate_task_plan(user_text)[:MAX_PLANNED_STEPS]
         latest_act = tool_action or (completed_steps[-1] if completed_steps else "")
         current_step_idx = match_step_index(
             planned_steps, current_step_idx, latest_act, len(completed_steps)
@@ -446,7 +597,7 @@ def build_tool_indicator(
 
     if planned_steps:
         return build_planned_steps_indicator(
-            planned_steps=planned_steps[:4],
+            planned_steps=planned_steps[:MAX_PLANNED_STEPS],
             current_step_idx=current_step_idx,
             tool_action=tool_action,
             user_text=user_text,
@@ -455,6 +606,7 @@ def build_tool_indicator(
             download_success=download_success,
             is_all_completed=is_all_completed,
             process_status=process_status,
+            completed_steps=completed_steps,
         )
     action_disp = clean_action_text(tool_action) if tool_action else ""
     
@@ -479,8 +631,8 @@ def build_tool_indicator(
         total_steps = len(completed_steps) + (1 if action_disp else 0)
         lines = []
         
-        # 最多在卡片中展开显示最近 4 个已完成步骤，防止垂直高度过大
-        max_visible_history = 4
+        # 最多在卡片中展开显示最近 8 个已完成步骤，防止垂直高度过大
+        max_visible_history = 8
         if len(completed_steps) > max_visible_history:
             folded_count = len(completed_steps) - max_visible_history
             lines.append(f"*(已完成前 {folded_count} 个执行步骤)*")

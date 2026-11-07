@@ -664,7 +664,7 @@ async def _process_single_task(chat_id, task):
                 system_instruction += "[Voice Interaction: 请用自然亲切的口语化中文精炼回复，避免长代码块。]\n"
             if is_complex_agent:
                 system_instruction += (
-                    "[TASK_PLAN Rule: 若需调用工具，首行先输出 `[TASK_PLAN] 步骤1 | 步骤2 | 步骤3 [/TASK_PLAN]` 并立即执行；纯文本问答严禁输出此标签。]\n"
+                    "[TASK_PLAN Rule: 若需调用工具，首行先输出 `[TASK_PLAN] 步骤1 | 步骤2 | ... [/TASK_PLAN]`（按任务复杂度自适应规划 3~8 步，复杂任务可细化至 6~8 步）并立即执行；纯文本问答严禁输出此标签。]\n"
                 )
         else:
             session_data["_sys_prompt_injected_proj"] = current_proj
@@ -714,8 +714,8 @@ async def _process_single_task(chat_id, task):
                 system_instruction += (
                     "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
                     "【必须执行】：只要你判断当前任务需要调用工具执行操作（读写代码、运行终端命令、多步排错、生成导出文件等），必须在回复的最开始输出一行结构化规划标签：\n"
-                    "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | 步骤4名称 [/TASK_PLAN]\n"
-                    "规则要求：规划精炼定制（3~4步为宜），输出标签后立即调用首个工具开始执行，不要输出任何多余过渡句；纯文本问答严禁输出此标签。\n\n"
+                    "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | ... [/TASK_PLAN]\n"
+                    "规则要求：根据任务真实复杂度动态规划 3~8 个清晰阶段（简单探查 3~4 步，常规工程 4~6 步，跨模块/含测试部署的复杂工程 5~8 步），输出标签后立即调用首个工具开始执行，不要输出任何多余过渡句；纯文本问答严禁输出此标签。\n\n"
                 )
                 system_instruction += (
                     "[System Autonomous Execution Directive / 自主执行决策规范]\n"

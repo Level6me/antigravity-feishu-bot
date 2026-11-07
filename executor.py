@@ -386,13 +386,32 @@ def format_tool_action(tool_name: str = "", params: dict = None, raw_action: str
         if not clean_cmd:
             return "正在执行终端命令"
         first = clean_cmd.split()[0] if clean_cmd else ""
-        if first in ("python", "python3"):
+        if first in ("python", "python3", "./venv/bin/python3"):
+            if "-m unittest" in clean_cmd or "pytest" in clean_cmd:
+                return "正在运行单元测试验证"
+            if "-m py_compile" in clean_cmd:
+                return "正在校验代码语法规范"
             if "sqlite3" in clean_cmd or "db" in clean_cmd:
                 return "正在查询本地数据库"
+            m_py = re.search(r'([a-zA-Z0-9_.-]+\.py)\b', clean_cmd)
+            if m_py:
+                return f"正在执行脚本: {m_py.group(1)}"
             return "正在执行 Python 脚本"
+        elif first in ("ssh", "sshpass", "scp"):
+            return "正在远程连接目标节点执行"
+        elif first in ("pm2", "systemctl", "service"):
+            return "正在管理/重载后台服务"
         elif first in ("docker", "docker-compose"):
             return "正在查询 Docker 容器"
         elif first == "git":
+            if "push" in clean_cmd:
+                return "正在推送代码至远端仓库"
+            if "commit" in clean_cmd:
+                return "正在提交 Git 代码变更"
+            if "pull" in clean_cmd:
+                return "正在拉取远端最新代码"
+            if "status" in clean_cmd or "diff" in clean_cmd or "log" in clean_cmd:
+                return "正在检查 Git 仓库状态"
             return "正在执行 Git 操作"
         elif first in ("grep", "rg"):
             return "正在检索文件内容"
@@ -404,21 +423,22 @@ def format_tool_action(tool_name: str = "", params: dict = None, raw_action: str
             brief = clean_cmd[:18] + "..." if len(clean_cmd) > 20 else clean_cmd
             return f"正在运行命令: {brief}"
 
-    # 3. 针对常用文件与交互工具
-    if tool_name == "view_file":
-        path = params.get("AbsolutePath") or params.get("path") or ""
-        fname = os.path.basename(path.strip(' "\'')) if path else ""
+    # 3. 针对常用文件与交互工具 (兼容 agy 1.5.x read_file / edit_file / write_file 与旧版 view_file / write_to_file)
+    if tool_name in ("view_file", "read_file"):
+        path = params.get("Path") or params.get("AbsolutePath") or params.get("path") or ""
+        fname = os.path.basename(str(path).strip(' "\'')) if path else ""
         return f"正在读取文件: {fname}" if fname else "正在读取文件"
-    elif tool_name in ("write_to_file", "replace_file_content"):
-        path = params.get("TargetFile") or params.get("path") or ""
-        fname = os.path.basename(path.strip(' "\'')) if path else ""
-        return f"正在编辑文件: {fname}" if fname else "正在修改文件"
-    elif tool_name == "grep_search":
-        q = (params.get("Query") or "").strip(' "\'')
+    elif tool_name in ("write_to_file", "replace_file_content", "edit_file", "write_file"):
+        path = params.get("Path") or params.get("TargetFile") or params.get("path") or ""
+        fname = os.path.basename(str(path).strip(' "\'')) if path else ""
+        verb = "写入文件" if tool_name in ("write_file", "write_to_file") else "编辑文件"
+        return f"正在{verb}: {fname}" if fname else f"正在{verb}"
+    elif tool_name in ("grep_search", "grep"):
+        q = (params.get("Query") or params.get("query") or "").strip(' "\'')
         q = re.sub(r'[\r\n\t]+', ' ', q)[:12]
         return f"正在搜索代码: {q}" if q else "正在搜索代码"
-    elif tool_name == "find_by_name":
-        p = (params.get("Pattern") or "").strip(' "\'')
+    elif tool_name in ("find_by_name", "glob"):
+        p = (params.get("Pattern") or params.get("pattern") or "").strip(' "\'')
         p = re.sub(r'[\r\n\t]+', ' ', p)[:12]
         return f"正在查找文件: {p}" if p else "正在查找文件"
     elif tool_name == "list_dir":
@@ -436,8 +456,11 @@ def format_tool_action(tool_name: str = "", params: dict = None, raw_action: str
     TOOL_MAP = {
         "run_command": "执行终端命令",
         "view_file": "读取文件",
+        "read_file": "读取文件",
         "write_to_file": "写入文件",
+        "write_file": "写入文件",
         "replace_file_content": "编辑文件",
+        "edit_file": "编辑文件",
         "grep_search": "搜索代码",
         "find_by_name": "查找文件",
         "list_dir": "浏览目录",
@@ -1169,8 +1192,7 @@ async def execute_antigravity(
                                     should_break = True
                                     break
                             if current_tool_action:
-                                if current_tool_action not in completed_tool_steps:
-                                    completed_tool_steps.append(current_tool_action)
+                                completed_tool_steps.append(current_tool_action)
                                 current_tool_action = ""
                                 stream_action = ""
                                 current_tool_name = ""
@@ -1194,19 +1216,22 @@ async def execute_antigravity(
                                     planned_steps = parsed_steps
                                 current_turn_text = ""
 
-                            # Guarantee 3-4 step planned roadmap even if model omitted [TASK_PLAN]
+                            # Guarantee adaptive 3~8 step planned roadmap even if model omitted [TASK_PLAN]
                             if not planned_steps:
-                                planned_steps = CardBuilder.generate_task_plan(user_text)[:4]
+                                planned_steps = CardBuilder.generate_task_plan(user_text)
                                 current_plan_idx = 0
 
                             if t_state == "DONE":
                                 total_tool_invocations += 1
                                 sig_cmd = (t_params.get("CommandLine") or t_params.get("command") or t_params.get("Path") or t_params.get("TargetFile") or act or "").strip()
                                 recent_tool_signatures.append(f"{t_name}:{sig_cmd[:120]}")
-                                if act and act not in completed_tool_steps:
-                                    completed_tool_steps.append(act)
-                                elif current_tool_action and current_tool_action not in completed_tool_steps:
-                                    completed_tool_steps.append(current_tool_action)
+                                done_act = act or current_tool_action
+                                if done_act:
+                                    completed_tool_steps.append(done_act)
+                                    if planned_steps:
+                                        current_plan_idx = CardBuilder.match_step_index(
+                                            planned_steps, current_plan_idx, done_act, len(completed_tool_steps)
+                                        )
                                 current_tool_action = ""
                                 stream_action = ""
                                 current_tool_name = ""
@@ -1230,8 +1255,7 @@ async def execute_antigravity(
                             else:
                                 if act:
                                     if current_tool_action and act != current_tool_action:
-                                        if current_tool_action not in completed_tool_steps:
-                                            completed_tool_steps.append(current_tool_action)
+                                        completed_tool_steps.append(current_tool_action)
                                     current_tool_action = act
                                     stream_action = act
                                     last_tool_action = act
