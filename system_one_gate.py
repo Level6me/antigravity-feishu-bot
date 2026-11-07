@@ -599,23 +599,34 @@ def _enrich_with_hmdm(chat_id: str, user_text: str, dec: TypeSafeDecision) -> Ty
     """Fuse remote Jev or fallback TypeSafeDecision with HMDM Layer 3 & 4 Bayesian pooling."""
     try:
         from math_decision_model import math_decision_engine
-        remote_payload = {
-            "pillar_1_router": {
-                "is_conversational": (dec.action_type == "casual_greeting" and not dec.is_operation),
-                "needs_terminal": dec.needs_terminal,
-                "intent_confidence": dec.intent_confidence,
-            },
-            "pillar_2_complexity": {
-                "complexity_score": dec.complexity_score,
-                "confidence": dec.complexity_confidence,
-            },
-            "pillar_3_security": {
-                "is_high_risk": dec.is_dangerous,
-            },
-        }
+        remote_payload = None
+        if not dec.is_fallback:
+            remote_payload = {
+                "pillar_1_router": {
+                    "is_conversational": (dec.action_type == "casual_greeting" and not dec.is_operation),
+                    "needs_terminal": dec.needs_terminal,
+                    "intent_confidence": dec.intent_confidence,
+                },
+                "pillar_2_complexity": {
+                    "complexity_score": dec.complexity_score,
+                    "confidence": dec.complexity_confidence,
+                },
+                "pillar_3_security": {
+                    "is_high_risk": dec.is_dangerous,
+                },
+            }
         orth = math_decision_engine.evaluate_decision(
             chat_id, user_text, remote_jev_data=remote_payload
         )
+        if dec.is_fallback and dec.intent == "general_chat":
+            is_op = not orth.is_pure_qa and (orth.needs_task_plan or orth.effort_tier in ("Medium", "High"))
+            dec.complexity_score = orth.complexity_index
+            dec.complexity_confidence = round(1.0 - orth.local_entropy * 0.4, 3)
+            dec.is_operation = is_op
+            dec.needs_terminal = is_op
+            dec.action_type = "casual_greeting" if orth.is_pure_qa else ("execute_task" if is_op else "informational_inquiry")
+            dec.intent = "general_chat" if orth.is_pure_qa else "code_agent"
+            dec.intent_confidence = round(max(orth.posterior_probs.values()), 3)
         dec.needs_task_plan = orth.needs_task_plan or dec.is_operation or dec.needs_terminal
         dec.security_level = orth.security_level
         dec.local_entropy = orth.local_entropy
