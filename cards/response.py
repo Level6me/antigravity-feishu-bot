@@ -230,10 +230,12 @@ def build_budget_pause_card(
         elements.append({"tag": "markdown", "content": "\n".join(plan_lines)})
 
     if completed_steps:
-        recent_steps = completed_steps[-8:]
-        step_lines = [f"- `✓` {s}" for s in recent_steps]
-        if len(completed_steps) > 8:
-            step_lines.insert(0, f"*(前序已完成 {len(completed_steps) - 8} 步已写入项目记忆胶囊...)*")
+        from cards.indicators import _collapse_consecutive_steps, format_step_item
+        collapsed_all = _collapse_consecutive_steps(completed_steps)
+        recent_steps = collapsed_all[-6:]
+        step_lines = [format_step_item(s, False) for s in recent_steps]
+        if len(collapsed_all) > 6:
+            step_lines.insert(0, f"*(前序已完成 {len(completed_steps)} 次工具调用已归档至项目记忆胶囊...)*")
         elements.append(
             {
                 "tag": "markdown",

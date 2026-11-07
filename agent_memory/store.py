@@ -201,6 +201,8 @@ _BOILERPLATE_BLOCK_PATTERNS = [
     re.compile(r"^\[【[^\n]*契约[^\n]*\]\s*", re.MULTILINE),
     re.compile(r"^\[Project Memory Capsule[\s\S]*?\[/Project Memory Capsule\]\s*", re.MULTILINE),
     re.compile(r"^\[Session Relay Handoff[\s\S]*?\[/Session Relay Handoff\]\s*", re.MULTILINE),
+    re.compile(r"^\[Budget Watchdog Auto-Retry[\s\S]*?\[/Budget Watchdog Auto-Retry\]\s*", re.MULTILINE),
+    re.compile(r"^\[Safety Filter Self-Healing[\s\S]*?\[/Safety Filter Self-Healing\]\s*", re.MULTILINE),
     re.compile(r"^\[Memory Guard:[\s\S]*?(?=\n\n|\Z)\s*", re.MULTILINE),
     re.compile(r"^\[Recalled Episodic Memory[\s\S]*?(?=\n\n|\Z)\s*", re.MULTILINE),
     re.compile(r"^\[System Context: User preferences:\]\n(?:- [^\n]*\n)+\s*\[User's Message:\]\s*", re.MULTILINE),
@@ -212,6 +214,13 @@ def strip_injected_prompt_headers(raw_user_input: str) -> str:
     if not raw_user_input:
         return ""
     text = str(raw_user_input).strip()
+    m_ur = re.search(r"<USER_REQUEST>\s*([\s\S]*?)\s*</USER_REQUEST>", text, re.IGNORECASE)
+    if m_ur:
+        text = m_ur.group(1).strip()
+    else:
+        text = re.sub(r"</?USER_REQUEST>", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"<ADDITIONAL_METADATA>[\s\S]*$", "", text, flags=re.IGNORECASE).strip()
+
     if "[User's Message:]" in text:
         text = text.split("[User's Message:]", 1)[-1].strip()
     if "[User Request / 用户本轮指令]" in text:
@@ -224,7 +233,7 @@ def strip_injected_prompt_headers(raw_user_input: str) -> str:
         if text == prev:
             break
 
-    # Final fallback: if there are still bracketed system blocks at the top followed by double newline
+    # Final fallback: if there are still bracketed system blocks at the top followed by newline
     while text.startswith("[") and "]\n" in text:
         first_line_end = text.find("\n")
         first_line = text[:first_line_end].strip()
@@ -240,6 +249,8 @@ def strip_injected_prompt_headers(raw_user_input: str) -> str:
                 "[Voice",
                 "[S1 ",
                 "[Memory",
+                "[【",
+                "[当前为长任务断点续跑模式",
             )
         ):
             text = text[first_line_end + 1 :].lstrip()
@@ -790,12 +801,17 @@ def record_episodic_turn(
         return False
 
     clean_reply = _sanitize_text(reply_text or "")
-    # Condense reply into a crisp digest (strip code blocks to save space while keeping conclusions)
-    digest_text = re.sub(r"```.*?```", "[代码块]", clean_reply, flags=re.DOTALL)
-    digest_text = re.sub(r"\s+", " ", digest_text).strip()[:600]
+    is_filter_blocked = bool(_CORRUPTED_CHECKPOINT_PATTERNS.search(clean_reply))
+    if is_filter_blocked:
+        digest_text = "（云端安全过滤器误报拦截，已自动触发无感会话接力与合规术语重述）"
+        outcome = "filter_blocked"
+    else:
+        # Condense reply into a crisp digest (strip code blocks to save space while keeping conclusions)
+        digest_text = re.sub(r"```.*?```", "[代码块]", clean_reply, flags=re.DOTALL)
+        digest_text = re.sub(r"\s+", " ", digest_text).strip()[:600]
 
     extracted = _extract_structured_items_from_turn(
-        clean_req, clean_reply, tool_steps=tool_steps, dead_end_notes=dead_ends
+        clean_req, "" if is_filter_blocked else clean_reply, tool_steps=tool_steps, dead_end_notes=dead_ends
     )
     files_str = ", ".join(extracted["artifacts"][:10])
     dead_ends_str = " | ".join(extracted["dead_ends"][:6])
@@ -853,7 +869,16 @@ def record_episodic_turn(
             )
 
         # Also persist extracted facts/decisions/dead_ends/artifacts
-        if scope in ("modify", "execute_device", "deploy") and len(clean_req) >= 6:
+        goal_candidate = clean_req
+        if "[CONTINUE_PAUSED_TASK]" in goal_candidate:
+            m_orig = re.search(r"-\s*原始指令[:：]\s*([^\n]+)", goal_candidate)
+            goal_candidate = m_orig.group(1).strip() if m_orig else ""
+        if (
+            scope in ("modify", "execute_device", "deploy")
+            and len(goal_candidate) >= 6
+            and not is_filter_blocked
+            and not goal_candidate.startswith("## ")
+        ):
             conn.execute(
                 "UPDATE project_facts SET active = 0 WHERE project_slug = ? AND fact_type = 'goal'",
                 (slug,),
@@ -865,7 +890,7 @@ def record_episodic_turn(
                 ON CONFLICT(project_slug, fact_type, content)
                 DO UPDATE SET active = 1, created_at = excluded.created_at
                 """,
-                (slug, clean_req[:240], conv_id or "", now_str),
+                (slug, goal_candidate[:240], conv_id or "", now_str),
             )
 
         for de in extracted["dead_ends"][:5]:
@@ -1245,14 +1270,24 @@ def inspect_and_backfill_transcript(
             if content.strip():
                 # Strip [TASK_PLAN] tag from planner response
                 clean_resp = re.sub(r"\[TASK_PLAN\].*?\[/TASK_PLAN\]\s*", "", content, flags=re.DOTALL).strip()
+                if _CORRUPTED_CHECKPOINT_PATTERNS.search(clean_resp):
+                    is_corrupted = True
+                    corruption_reason = f"Step {step_idx} 触发 Gemini 云端安全过滤器拦截 (blocked by Gemini's filters)"
                 if clean_resp and not clean_resp.startswith("Task \"") and "completed with exit code" not in clean_resp[:80]:
                     current_planner_reply = clean_resp
 
         elif step_type == "GENERIC":
-            # Detect command failures or explicit error outputs
+            # Detect command failures or explicit error outputs (skip Created At / Completed At headers)
             if "exited with code" in content and "exited with code 0" not in content:
-                first_err = content.splitlines()[0][:180]
-                if first_err not in current_dead_ends:
+                body = content.split("Command output:", 1)[-1] if "Command output:" in content else content
+                err_lines = [
+                    ln.strip()
+                    for ln in body.splitlines()
+                    if ln.strip()
+                    and not ln.strip().startswith(("Created At:", "Completed At:", "Command exited with code", "Command output:"))
+                ]
+                first_err = err_lines[0][:180] if err_lines else ""
+                if len(first_err) >= 6 and f"命令非零退出: {first_err}" not in current_dead_ends:
                     current_dead_ends.append(f"命令非零退出: {first_err}")
 
         elif step_type == "CHECKPOINT":

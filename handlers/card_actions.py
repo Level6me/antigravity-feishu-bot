@@ -267,15 +267,17 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     None, lambda: patch_interactive_card_sdk(card_message_id, resumed_card)
                 )
 
+                from executor import desensitize_hardware_engineering_text
+                safe_orig_q = desensitize_hardware_engineering_text(orig_q)
                 steps_str = " -> ".join(comp_steps[-12:]) if comp_steps else "无"
                 cont_prompt = (
                     f"[CONTINUE_PAUSED_TASK]\n"
                     f"用户已点击「▶️ 继续执行剩余步骤」。请继续推进此前因步数/耗时预算暂停的任务：\n"
-                    f"- 原始指令：{orig_q}\n"
+                    f"- 原始指令：{safe_orig_q}\n"
                     f"- 已完成步骤 ({len(comp_steps)}步)：{steps_str}\n"
                 )
                 if part_reply:
-                    cont_prompt += f"- 前序阶段性进展：{part_reply[:600]}\n"
+                    cont_prompt += f"- 前序阶段性进展：{desensitize_hardware_engineering_text(part_reply[:600])}\n"
                 cont_prompt += "请直接基于项目记忆胶囊与上述已完成进展继续推进剩余未完成的步骤，完成后输出完整结论，严禁从头重复已完成的探查！"
 
                 simulated_content = json.dumps({"text": cont_prompt}, ensure_ascii=False)

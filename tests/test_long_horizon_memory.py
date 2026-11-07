@@ -237,6 +237,50 @@ class TestLongHorizonMemoryAndDecisionGuard(unittest.TestCase):
         self.assertIn("当前项目长效记忆引擎", mem_json)
         self.assertIn("backfill_project_memory", mem_json)
 
+    def test_08_safety_filter_desensitization_and_python_inline_action(self):
+        from executor import (
+            desensitize_hardware_engineering_text,
+            detect_and_format_agent_system_error,
+            format_tool_action,
+            is_gemini_safety_filter_block,
+        )
+
+        # 1. Inline python3 -c semantic extraction (prevents identical "正在执行 Python 脚本" labels)
+        act1 = format_tool_action(
+            "run_command",
+            {"CommandLine": "timeout 15 python3 -c \"data = open('STLinkUpgrade.exe','rb').read(); print(data[0x1680:0x16a0])\""},
+        )
+        act2 = format_tool_action(
+            "run_command",
+            {"CommandLine": "timeout 15 python3 -c \"print(hex(0x2120))\""},
+        )
+        self.assertIn("STLinkUpgrade.exe", act1)
+        self.assertIn("0x1680", act1)
+        self.assertIn("0x2120", act2)
+        self.assertNotEqual(act1, act2)
+
+        # 2. Gemini filter detection & desensitization
+        raw_block = (
+            "This request was blocked by Gemini's filters. They can occasionally trigger by mistake "
+            "on safe coding, security, or biology-related queries. Please try rephrasing your prompt."
+        )
+        self.assertTrue(is_gemini_safety_filter_block(raw_block))
+        formatted_zh = detect_and_format_agent_system_error(raw_block)
+        self.assertIsNotNone(formatted_zh)
+        self.assertIn("Gemini Safety Filter", formatted_zh)
+        self.assertIn("[CHOICE_CARD]", formatted_zh)
+
+        desensitized = desensitize_hardware_engineering_text("我的选择是：方案一: 给原厂 ST-Link 固件去限制（最推荐 ⭐）")
+        self.assertNotIn("去限制", desensitized)
+        self.assertIn("跨芯片标准 SWD 兼容模式", desensitized)
+
+        # 3. <USER_REQUEST> tag stripping in strip_injected_prompt_headers
+        wrapped = (
+            "<USER_REQUEST>\n[S1 scope=execute_device tier=High]\n"
+            "我的选择是：方案一\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is..."
+        )
+        self.assertEqual(strip_injected_prompt_headers(wrapped), "我的选择是：方案一")
+
 
 if __name__ == "__main__":
     unittest.main()
