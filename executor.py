@@ -1692,6 +1692,16 @@ async def execute_antigravity(
                 is_error = False
                 session_data["last_execution_error"] = False
                 session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策 · 高危操作待审批"
+                session_data["paused_l3_state"] = {
+                    "user_text": user_text,
+                    "completed_steps": list(completed_tool_steps),
+                    "planned_steps": list(planned_steps) if planned_steps else [],
+                    "command": typesafe_blocked_info.get("target", ""),
+                    "tool": typesafe_blocked_info.get("tool", ""),
+                    "cwd": typesafe_blocked_info.get("cwd", session_data.get("project", "")),
+                    "bot_reply_msg_id": bot_reply_msg_id,
+                    "timestamp": time.time(),
+                }
                 try:
                     await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
                 except Exception:

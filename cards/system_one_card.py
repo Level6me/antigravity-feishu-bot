@@ -448,7 +448,8 @@ def build_l3_confirm_result_card(
             f"👤 审批人：{operator_tag}\n"
             f"• **执行状态**：成功完成\n"
             f"• **执行耗时**：{elapsed_str}\n"
-            f"• **退出状态码**：{ret_str}"
+            f"• **退出状态码**：{ret_str}\n"
+            f"• **后续推进**：已自动唤醒 AI 接力推进剩余任务..."
         )
         clean_out = output.strip()
         if len(clean_out) > 2000:

@@ -159,6 +159,17 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         # 2. 拒绝分支
         if decision == "reject":
             log.info(f"[L3 Guard] Admin {operator_open_id} rejected command in chat {chat_id}: {command}")
+            if app_state.main_loop and app_state.main_loop.is_running():
+                async def do_cleanup_paused_l3():
+                    try:
+                        session_data = await get_session_async(chat_id)
+                        if "paused_l3_state" in session_data:
+                            session_data.pop("paused_l3_state", None)
+                            await save_session_async(chat_id, session_data)
+                    except Exception:
+                        pass
+                asyncio.run_coroutine_threadsafe(do_cleanup_paused_l3(), app_state.main_loop)
+
             res_card = CardBuilder.build_l3_confirm_result_card(
                 status="rejected",
                 command=command,
@@ -208,7 +219,23 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     ret_code = -1
 
                 elapsed = time.time() - t0
-                final_status = "success" if ret_code == 0 else "failed"
+
+                # 智能幂等清理容错：对于 kill/pkill/rm 等清理命令，若目标已不存在，判定为符合预期的幂等清理成功
+                is_idempotent_success = False
+                clean_cmd_lower = clean_cmd.lower().strip()
+                if any(clean_cmd_lower.startswith(p) for p in ("kill ", "kill -", "pkill ", "killall ", "rm ", "rm -")):
+                    out_lower = out_text.lower()
+                    if "no such process" in out_lower or "no such file or directory" in out_lower:
+                        is_idempotent_success = True
+
+                if ret_code == 0 or is_idempotent_success:
+                    final_status = "success"
+                    if is_idempotent_success and ret_code != 0:
+                        out_text = f"{out_text}\n(注：目标进程或资源在审批前已自然释放，符合幂等清理预期，判定为成功放行)".strip()
+                        ret_code = 0
+                else:
+                    final_status = "failed"
+
                 final_card = CardBuilder.build_l3_confirm_result_card(
                     status=final_status,
                     command=command,
@@ -220,6 +247,33 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: patch_interactive_card_sdk(card_message_id, final_card)
                 )
+
+                # 自动接力推进原任务（仅在成功时接力，避免死循环）
+                if final_status == "success":
+                    try:
+                        session_data = await get_session_async(chat_id)
+                        paused_l3 = session_data.pop("paused_l3_state", None) or {}
+                        await save_session_async(chat_id, session_data)
+
+                        orig_q = paused_l3.get("user_text") or session_data.get("last_user_query", "继续执行未完成的任务")
+                        comp_steps = paused_l3.get("completed_steps") or []
+                        steps_str = " -> ".join(comp_steps[-8:]) if comp_steps else "无"
+
+                        resume_prompt = (
+                            f"[AUTO_RESUME_AFTER_L3_APPROVAL]\n"
+                            f"管理员已在飞书审批卡片中【确认授权】并已在宿主机完成该高危敏感指令的执行：\n"
+                            f"- 授权执行指令：`{command}`\n"
+                            f"- 执行状态：成功完成 (退出码: {ret_code})\n"
+                            f"- 终端输出结果：\n```text\n{out_text[:1000]}\n```\n"
+                            f"- 前序任务目标：{orig_q}\n"
+                            f"- 已完成步骤：{steps_str}\n\n"
+                            f"请直接基于上述指令执行输出结果继续推进完成用户最初交办的任务，严禁重复执行刚刚已获批的指令，完成后向用户汇报最终结果！"
+                        )
+                        simulated_content = json.dumps({"text": resume_prompt}, ensure_ascii=False)
+                        await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
+                        log.info(f"[L3 Guard] Successfully triggered auto-resume for chat {chat_id} after approved execution")
+                    except Exception as resume_err:
+                        log.error(f"[L3 Guard] Failed to trigger auto-resume after approval: {resume_err}")
 
             asyncio.run_coroutine_threadsafe(do_execute_approved(), app_state.main_loop)
 
