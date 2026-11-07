@@ -233,6 +233,82 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         current_extend = app_state.extended_wait_chats.get(chat_id, 0)
         app_state.extended_wait_chats[chat_id] = max(current_extend, time.time()) + 900
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已确认继续等待，后台保持执行并已延长 15 分钟等待。"}})
+
+    elif action_value.get("action") == "continue_long_task":
+        log.info(f"User requested continue_long_task in chat {chat_id}")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_continue_long_task():
+                session_data = await get_session_async(chat_id)
+                paused = session_data.pop("paused_task_state", None) or {}
+                await save_session_async(chat_id, session_data)
+
+                orig_q = paused.get("user_text") or session_data.get("last_user_query") or "继续执行未完成的任务"
+                comp_steps = paused.get("completed_steps") or []
+                plan_steps = paused.get("planned_steps") or []
+                part_reply = paused.get("partial_reply") or ""
+                elapsed_s = int(paused.get("elapsed_seconds") or 0)
+                reason_s = paused.get("reason") or ""
+                scope_lbl = paused.get("scope_label") or ""
+                proj_dir = paused.get("project_dir") or session_data.get("project", "默认")
+
+                resumed_card = CardBuilder.build_budget_pause_card(
+                    user_text=orig_q,
+                    reason=reason_s,
+                    completed_steps=comp_steps,
+                    planned_steps=plan_steps,
+                    partial_reply=part_reply,
+                    elapsed_seconds=elapsed_s,
+                    scope_label=scope_lbl,
+                    current_model=session_data.get("model", "Default"),
+                    current_project=proj_dir,
+                    resumed_status="continued",
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, resumed_card)
+                )
+
+                steps_str = " -> ".join(comp_steps[-12:]) if comp_steps else "无"
+                cont_prompt = (
+                    f"[CONTINUE_PAUSED_TASK]\n"
+                    f"用户已点击「▶️ 继续执行剩余步骤」。请继续推进此前因步数/耗时预算暂停的任务：\n"
+                    f"- 原始指令：{orig_q}\n"
+                    f"- 已完成步骤 ({len(comp_steps)}步)：{steps_str}\n"
+                )
+                if part_reply:
+                    cont_prompt += f"- 前序阶段性进展：{part_reply[:600]}\n"
+                cont_prompt += "请直接基于项目记忆胶囊与上述已完成进展继续推进剩余未完成的步骤，完成后输出完整结论，严禁从头重复已完成的探查！"
+
+                simulated_content = json.dumps({"text": cont_prompt}, ensure_ascii=False)
+                await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
+
+            asyncio.run_coroutine_threadsafe(do_continue_long_task(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "🚀 已确认继续执行！正在为您接力推进剩余步骤..."}})
+
+    elif action_value.get("action") == "stop_paused_task":
+        log.info(f"User requested stop_paused_task in chat {chat_id}")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_stop_paused_task():
+                session_data = await get_session_async(chat_id)
+                paused = session_data.pop("paused_task_state", None) or {}
+                await save_session_async(chat_id, session_data)
+                stopped_card = CardBuilder.build_budget_pause_card(
+                    user_text=paused.get("user_text", "阶段性任务"),
+                    reason=paused.get("reason", ""),
+                    completed_steps=paused.get("completed_steps", []),
+                    planned_steps=paused.get("planned_steps", []),
+                    partial_reply=paused.get("partial_reply", ""),
+                    elapsed_seconds=int(paused.get("elapsed_seconds") or 0),
+                    scope_label=paused.get("scope_label", ""),
+                    current_model=session_data.get("model", "Default"),
+                    current_project=paused.get("project_dir") or session_data.get("project", "默认"),
+                    resumed_status="stopped",
+                )
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, stopped_card)
+                )
+
+            asyncio.run_coroutine_threadsafe(do_stop_paused_task(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已结束追加执行，当前阶段性进度已保存在项目记忆胶囊中。"}})
         
     elif action_value.get("action") == "browse_dir":
         if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
@@ -424,12 +500,44 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     removed = memories.pop(idx)
                     await save_profile_async(chat_id, memories)
                     log.info(f"Removed memory preference: '{removed}' in chat {chat_id}")
-                    
-                    new_card = CardBuilder.build_memory_card(memories)
+                    proj_summary = None
+                    try:
+                        from agent_memory import get_project_memory_summary
+                        session_data = await get_session_async(chat_id)
+                        proj_summary = get_project_memory_summary(
+                            (session_data or {}).get("project", "默认"), session_data=session_data
+                        )
+                    except Exception:
+                        pass
+                    new_card = CardBuilder.build_memory_card(memories, project_memory_summary=proj_summary)
                     await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             asyncio.run_coroutine_threadsafe(do_forget(), app_state.main_loop)
             
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功擦除该偏好记录！"}})
+
+    elif action_value.get("action") == "backfill_project_memory":
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_backfill_mem():
+                from agent_memory import get_project_memory_summary, inspect_and_backfill_transcript
+                import config
+                session_data = await get_session_async(chat_id)
+                memories = await get_profile_async(chat_id)
+                proj_dir = (session_data or {}).get("project", "默认")
+                conv_id = (session_data or {}).get("conversation", "")
+                if conv_id:
+                    tx_path = config.get_transcript_path(conv_id)
+                    await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        lambda: inspect_and_backfill_transcript(tx_path, project_dir=proj_dir, chat_id=chat_id, conv_id=conv_id),
+                    )
+                proj_summary = get_project_memory_summary(proj_dir, session_data=session_data)
+                new_card = CardBuilder.build_memory_card(memories, project_memory_summary=proj_summary)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+                )
+
+            asyncio.run_coroutine_threadsafe(do_backfill_mem(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在扫描并同步当前会话长效记忆..."}})
 
     elif action_value.get("action") == "create_project_prompt":
         if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):

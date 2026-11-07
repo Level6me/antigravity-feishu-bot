@@ -510,8 +510,39 @@ async def _process_single_task(chat_id, task):
             except Exception as e:
                 log.warning(f"[TypeSafe FastPath] Home Assistant dispatch failed: {e}")
 
-    # Plugin fast paths above do not need an agent process. For model-backed
-    # requests, warm the exact selected model/effort before prompt construction.
+    # Plugin fast paths above do not need an agent process.
+    # Before prewarming the agent session, inspect the current conversation's compaction health
+    # and perform Proactive Session Relay (`无感会话接力`) if checkpoints >= 3 or summary was corrupted.
+    relay_handoff_context = ""
+    try:
+        from agent_memory import (
+            check_and_prepare_session_relay,
+            classify_task_scope_and_budget,
+            recall_for_turn,
+            write_turn_contract,
+        )
+        from hooks.agy_hooks import ensure_agy_hooks_installed
+        if not getattr(app_state, "_agy_hooks_ensured", False):
+            ensure_agy_hooks_installed()
+            app_state._agy_hooks_ensured = True
+
+        relay_res = check_and_prepare_session_relay(
+            chat_id, session_data, project_dir=session_data.get("project", "默认")
+        )
+        if relay_res.get("relayed"):
+            relay_handoff_context = relay_res.get("handoff_context", "")
+            await save_session_async(chat_id, session_data)
+            try:
+                from session_pool import session_pool
+                await session_pool.reset_session(chat_id)
+            except Exception:
+                pass
+        elif session_data.get("_relay_handoff_context"):
+            relay_handoff_context = session_data.get("_relay_handoff_context", "")
+    except Exception as e:
+        log.warning(f"[Pipeline] Proactive session relay check failed: {e}")
+
+    # For model-backed requests, warm the exact selected model/effort before prompt construction.
     try:
         if prewarm_task:
             await prewarm_task
@@ -530,7 +561,7 @@ async def _process_single_task(chat_id, task):
 
     # 3. 插件 on_before_ai 钩子已在流程入口处优先执行完毕 (跳过重复调用)
 
-    # 4. 智能意图路由与人机交互规范 (严格贯彻：区分提问与命令 + 正交任务规划协议)
+    # 4. 智能意图路由与人机交互规范 (严格贯彻：区分提问与命令 + 正交任务规划协议 + 任务范围契约)
     # 提问/咨询：纯文本高效解答，不无端调用工具
     # 命令/操作（包含 Medium 与 High 档位）：统一注入 [TASK_PLAN] 3~4 步规划协议并自主调用工具执行到底！
     is_pure_non_op_chat = (
@@ -558,6 +589,28 @@ async def _process_single_task(chat_id, task):
 
     # Inject protocol into prompt
     current_proj = session_data.get("project", "默认")
+
+    # Classify orthogonal Task Scope & Step/Time Budget (`inspect` | `advise` | `modify` | `execute_device` | `deploy`)
+    scope_info = {"scope": "modify", "max_steps": 35, "max_seconds": 600, "boundary_directive": ""}
+    try:
+        from agent_memory import classify_task_scope_and_budget, write_turn_contract
+        scope_info = classify_task_scope_and_budget(
+            user_text,
+            tier=adaptive_tier or "Medium",
+            is_operation=bool(decision.is_operation or decision.needs_terminal),
+            is_continuation=bool(task.get("is_continuation")),
+        )
+        session_data["_active_turn_scope"] = scope_info
+        write_turn_contract(
+            chat_id=chat_id,
+            project_dir=current_proj,
+            user_request=user_text,
+            scope_info=scope_info,
+            conv_id=session_data.get("conversation", ""),
+            attempt=1,
+        )
+    except Exception as e:
+        log.warning(f"[Pipeline] Scope classification / contract write failed: {e}")
     
     # 极速轻量模式判定：非操作、无需终端、且属于日常寒暄/致谢/身份咨询或超低复杂度问答
     is_lightweight_chat = (
@@ -595,21 +648,23 @@ async def _process_single_task(chat_id, task):
             and not is_resumed
         )
 
+        t_scope = scope_info.get("scope", "modify")
+        t_steps = scope_info.get("max_steps", 35)
+        t_mins = max(1, int(scope_info.get("max_seconds", 600)) // 60)
+        boundary_dir = scope_info.get("boundary_directive", "")
+
         if already_injected_static:
-            # 同会话后续轮次：完整静态规范已在首轮写入 transcript.jsonl，此处仅注入精简动态指令，防止多轮对话上下文滚雪球膨胀
+            # 同会话后续轮次：采用超精简契约头 (<180B)，消除 76% 重复头部引发的上下文滚雪球膨胀与压缩触发
             system_instruction = (
-                "[System Rule: Reply ONLY in Simplified Chinese (简体中文). NEVER output internal chain-of-thought or English preambles.]\n"
-                f"[Active Project: {current_proj} | Guardrail: terminal commands MUST prefix `timeout <秒数>`; never restart main.py]\n"
+                f"[S1 scope={t_scope} tier={adaptive_tier or 'Medium'} budget={t_steps}步/{t_mins}m | Proj: {current_proj} | 仅用简体中文回复，禁输出思考过程；命令必加timeout；禁重启main.py；禁明文打印密钥]\n"
             )
-            if getattr(config, "TYPESAFE_TIER", "gateway") in ("sentry", "copilot") or getattr(decision, "security_level", "L0") in ("L1", "L2", "L3"):
-                system_instruction += (
-                    "[Security & Egress Guard: 严禁在最终回复中明文回显任何 API Token、私钥或服务器密码；严禁对生产环境执行未授权破坏性操作。]\n"
-                )
+            if boundary_dir:
+                system_instruction += f"[{boundary_dir}]\n"
             if task.get("message_type") == "audio" or task.get("is_voice_message"):
                 system_instruction += "[Voice Interaction: 请用自然亲切的口语化中文精炼回复，避免长代码块。]\n"
             if is_complex_agent:
                 system_instruction += (
-                    "[TASK_PLAN Rule: 若需调用工具执行操作，回复首行必须先输出 `[TASK_PLAN] 步骤1 | 步骤2 | 步骤3 [/TASK_PLAN]` 并立即自主调用工具执行；严守用户指令边界：若用户仅要求查看/排查环境或状态（如“看看有没有…”、“查一下…”），查明后立即回复结论，严禁擅自扩写任务去执行未要求的下载、逆向或烧录；纯文本问答严禁输出此标签。]\n"
+                    "[TASK_PLAN Rule: 若需调用工具，首行先输出 `[TASK_PLAN] 步骤1 | 步骤2 | 步骤3 [/TASK_PLAN]` 并立即执行；纯文本问答严禁输出此标签。]\n"
                 )
         else:
             session_data["_sys_prompt_injected_proj"] = current_proj
@@ -667,8 +722,12 @@ async def _process_single_task(chat_id, task):
                     "用户核心准则：【严格区分提问、探查与修改命令】。\n"
                     "1. 【命令必须自主执行并交付】：对于用户的操作、修改、运行、测试、排查等执行诉求（包括“改吧”、“执行”等简短授权），你必须作为全功能 Autonomous Agent 自主调用相应工具直接执行并交付最终结果！\n"
                     "2. 【绝对严禁推诿与二次确认】：严禁让用户在服务器或本地终端手动运行命令；严禁抛出多选方案让用户做选择题；严禁停下来等待用户确认；绝对严禁以“受安全策略限制”为借口拒绝执行命令！\n"
-                    "3. 【严守任务范围边界】：若用户仅要求查看、检查环境或确认状态（如“去看看有没有…”、“查一下…”），仅执行必要的只读探查并在查清后立即回复，严禁擅自发散去执行耗时的下载、逆向工程、重写代码或硬件烧录！\n\n"
+                    "3. 【严守任务范围边界】：若用户仅要求查看、检查环境或确认状态（如“去看看有没有…”、“查一下…”），仅执行必要的只读探查并在查清后立即回复，严禁擅自发散去执行耗时的下载、逆向工程、重写代码或硬件烧录！\n"
                 )
+                if boundary_dir:
+                    system_instruction += f"4. {boundary_dir}\n\n"
+                else:
+                    system_instruction += "\n"
             else:
                 # 轻量问答与概念咨询模式：纯文本高效解答，但绝不推诿操作诉求
                 system_instruction += (
@@ -682,6 +741,22 @@ async def _process_single_task(chat_id, task):
             mem_ctx = session_data.get("memory_context")
             if mem_ctx:
                 system_instruction += f"[User Long-Term Memory / 用户长期偏好与记忆]\n{mem_ctx}\n\n"
+
+        # 注入项目长效分层记忆 (PROJECT_STATE.md 胶囊 / 无感会话接力包 / FTS5 历史按需召回 / 死胡同禁令)
+        try:
+            from agent_memory import recall_for_turn
+            recalled_mem_block = recall_for_turn(
+                project_dir=current_proj,
+                user_query=user_text,
+                is_new_or_relayed=(not already_injected_static or bool(relay_handoff_context)),
+                relay_handoff_context=relay_handoff_context,
+            )
+            if recalled_mem_block:
+                system_instruction += f"{recalled_mem_block}\n\n"
+            if relay_handoff_context:
+                session_data.pop("_relay_handoff_context", None)
+        except Exception as e:
+            log.warning(f"[Pipeline] Memory recall injection failed: {e}")
 
         # 注入用户备忘录 Notes (JIT 按需挂载：常规本地代码开发杜绝敏感服务器凭证注入)
         raw_notes = session_data.get("notes", [])
@@ -699,21 +774,22 @@ async def _process_single_task(chat_id, task):
 
         # 注入 System One 自适应思考模式指令 (Adaptive Reasoning Effort: Low / Medium / High)
         adaptive_effort = session_data.get("typesafe_adaptive_tier")
-        if adaptive_effort == "Low":
-            system_instruction += (
-                "[System One Adaptive Reasoning: LOW]\n"
-                "当前任务判定为轻量日常问答或闲聊，请以极简快速思考直接给出精炼回答，避免冗长思考与过度分析。\n\n"
-            )
-        elif adaptive_effort == "High":
-            system_instruction += (
-                "[System One Adaptive Reasoning: HIGH]\n"
-                "当前任务判定为多步复杂工程或系统操作，请开启深度思考推理与严谨边界校验。\n\n"
-            )
-        elif adaptive_effort == "Medium":
-            system_instruction += (
-                "[System One Adaptive Reasoning: MEDIUM]\n"
-                "当前任务判定为常规工程开发，兼顾思考深度与响应效率。\n\n"
-            )
+        if not already_injected_static:
+            if adaptive_effort == "Low":
+                system_instruction += (
+                    "[System One Adaptive Reasoning: LOW]\n"
+                    "当前任务判定为轻量日常问答或闲聊，请以极简快速思考直接给出精炼回答，避免冗长思考与过度分析。\n\n"
+                )
+            elif adaptive_effort == "High":
+                system_instruction += (
+                    "[System One Adaptive Reasoning: HIGH]\n"
+                    "当前任务判定为多步复杂工程或系统操作，请开启深度思考推理与严谨边界校验。\n\n"
+                )
+            elif adaptive_effort == "Medium":
+                system_instruction += (
+                    "[System One Adaptive Reasoning: MEDIUM]\n"
+                    "当前任务判定为常规工程开发，兼顾思考深度与响应效率。\n\n"
+                )
     
     # Load long-term memory if this is a new conversation (engineering/task mode only)
     final_prompt = user_text

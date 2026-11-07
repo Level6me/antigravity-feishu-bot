@@ -74,6 +74,7 @@ github_deploy_key*
 
 # Plugin dynamic data & local plugin configs
 plugin_data/
+data/agent_memory/
 plugins/home_assistant
 plugins/*/config.json
 backups/

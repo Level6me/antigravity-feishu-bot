@@ -990,9 +990,13 @@ async def execute_antigravity(
                         downloaded_file_name, download_success, user_text, is_voice=is_voice_message
                     )
             else:
+                if session_data.pop("_was_budget_retry", False):
+                    retry_hint = f"🔄 首轮执行触及步数/耗时预算，已自动携记忆胶囊与已完成进度发起第 {attempt}/2 次收敛重试...\n\n{user_text}"
+                else:
+                    retry_hint = f"🔄 首次发起因无响应挂死，正在自动为您重新发起第 {attempt}/2 次重试...\n\n{user_text}"
                 init_card = CardBuilder.build_typing_indicator(
                     downloaded_file_name, download_success,
-                    f"🔄 首次发起因无响应挂死，正在自动为您重新发起第 {attempt}/2 次重试...\n\n{user_text}",
+                    retry_hint,
                     is_voice=is_voice_message
                 )
 
@@ -1092,7 +1096,30 @@ async def execute_antigravity(
                         if _val and _val not in ("最高权限",):
                             known_note_secrets.append(_val)
 
-            turn_stream = await sess.send_prompt_and_stream(system_instruction + final_prompt)
+            # 读取本轮 Scope 范围契约与步数/时间预算 (Budget & Stagnation Watchdog)
+            scope_info = session_data.get("_active_turn_scope") or {}
+            if not scope_info:
+                try:
+                    from agent_memory import classify_task_scope_and_budget
+                    scope_info = classify_task_scope_and_budget(
+                        user_text, tier=adaptive_tier_now or "Medium", is_operation=True
+                    )
+                except Exception:
+                    scope_info = {"scope": "modify", "max_steps": 35, "max_seconds": 600}
+            max_turn_steps = int(scope_info.get("max_steps", 35))
+            max_turn_seconds = int(scope_info.get("max_seconds", 600))
+            total_tool_invocations = 0
+            recent_tool_signatures = []
+            budget_intercepted = False
+            budget_exceeded_reason = ""
+
+            budget_retry_ctx = session_data.pop("_budget_retry_context", "") if attempt > 1 else ""
+            prompt_to_send = (
+                f"{system_instruction}{budget_retry_ctx}\n\n{final_prompt}"
+                if budget_retry_ctx
+                else (system_instruction + final_prompt)
+            )
+            turn_stream = await sess.send_prompt_and_stream(prompt_to_send)
 
             while True:
                 event_data = await turn_stream.get_event(timeout=0.2)
@@ -1134,6 +1161,13 @@ async def execute_antigravity(
                                 if parsed_steps and parsed_steps != planned_steps:
                                     planned_steps = parsed_steps
                                     current_plan_idx = min(current_plan_idx, len(planned_steps) - 1)
+                                if "[TASK_PLAN]" in delta and len(re.findall(r"\[TASK_PLAN\]", accumulated_text, re.IGNORECASE)) >= 3:
+                                    budget_intercepted = True
+                                    budget_exceeded_reason = "单轮内连续重复输出 [TASK_PLAN] 规划 >= 3 次（疑似上下文压缩后重规划循环）"
+                                    log.warning(f"[BudgetWatchdog] {budget_exceeded_reason} in chat {chat_id}; intercepting.")
+                                    await sess.close()
+                                    should_break = True
+                                    break
                             if current_tool_action:
                                 if current_tool_action not in completed_tool_steps:
                                     completed_tool_steps.append(current_tool_action)
@@ -1166,6 +1200,9 @@ async def execute_antigravity(
                                 current_plan_idx = 0
 
                             if t_state == "DONE":
+                                total_tool_invocations += 1
+                                sig_cmd = (t_params.get("CommandLine") or t_params.get("command") or t_params.get("Path") or t_params.get("TargetFile") or act or "").strip()
+                                recent_tool_signatures.append(f"{t_name}:{sig_cmd[:120]}")
                                 if act and act not in completed_tool_steps:
                                     completed_tool_steps.append(act)
                                 elif current_tool_action and current_tool_action not in completed_tool_steps:
@@ -1174,6 +1211,22 @@ async def execute_antigravity(
                                 stream_action = ""
                                 current_tool_name = ""
                                 tool_in_flight_start_time = None
+
+                                # Budget & Stagnation Watchdog check on tool completion
+                                if len(recent_tool_signatures) >= 3 and len(set(recent_tool_signatures[-3:])) == 1 and sig_cmd:
+                                    budget_intercepted = True
+                                    budget_exceeded_reason = f"连续 3 次重复调用相同工具/命令 ({act[:40]})，触发防原地打转看门狗"
+                                elif total_tool_invocations >= max_turn_steps:
+                                    budget_intercepted = True
+                                    budget_exceeded_reason = (
+                                        f"单轮工具调用步数已达范围契约上限 ({total_tool_invocations}/{max_turn_steps} 步, "
+                                        f"范围: {scope_info.get('scope_label') or scope_info.get('scope', 'modify')})"
+                                    )
+                                if budget_intercepted:
+                                    log.warning(f"[BudgetWatchdog] Intercepting turn on attempt {attempt} for chat {chat_id}: {budget_exceeded_reason}")
+                                    await sess.close()
+                                    should_break = True
+                                    break
                             else:
                                 if act:
                                     if current_tool_action and act != current_tool_action:
@@ -1327,7 +1380,19 @@ async def execute_antigravity(
                     effective_stall_timeout = BASE_STALL_TIMEOUT + extended_bonus
                     effective_stall_hard_timeout = BASE_STALL_HARD_TIMEOUT + extended_bonus
 
-                # 假死判定逻辑：移除 think_seconds >= effective_stall_timeout 的冗余前置限制，只要静默卡死达到阈值立即自愈
+                # 假死判定与单轮时间预算看门狗：
+                # 统一遵循“首次超预算/停滞立即截停并携记忆胶囊自动重试一遍(Attempt 2)；若再次超预算则截停并推送『▶️ 继续执行』按钮进度卡片”
+                effective_turn_budget_seconds = max_turn_seconds + extended_bonus
+                if think_seconds >= effective_turn_budget_seconds and not is_worker_active:
+                    budget_intercepted = True
+                    budget_exceeded_reason = (
+                        f"单轮执行耗时达到范围预算上限 ({think_seconds}s / {effective_turn_budget_seconds}s, "
+                        f"范围: {scope_info.get('scope_label') or scope_info.get('scope', 'modify')})"
+                    )
+                    log.warning(f"[BudgetWatchdog] Time budget exceeded on attempt {attempt} for chat {chat_id}: {budget_exceeded_reason}")
+                    await sess.close()
+                    break
+
                 if stall_seconds >= effective_stall_timeout:
                     # 即使 stall_seconds 达到阈值，只要进程树仍有活跃编译/网络子进程，且未突破硬上限，绝不误杀！
                     if is_worker_active and stall_seconds < effective_stall_hard_timeout:
@@ -1335,19 +1400,10 @@ async def execute_antigravity(
                         log.info(f"[Executor] No event for {stall_seconds}s but workers active ({active_worker_reason}{worker_desc}), extending wait")
                     else:
                         log.error(f"[Executor] Process stalled for chat {chat_id} (stall={stall_seconds}s, vitality={vitality_state.ewma_vitality:.4f}, limit={effective_stall_timeout}s), closing session...")
+                        budget_intercepted = True
+                        budget_exceeded_reason = f"任务执行连续 {stall_seconds}s 无有效进展响应（触发停滞保护）"
                         await sess.close()
-                        if attempt < 2 and not completed_tool_steps:
-                            log.warning(f"[Executor] Turn stalled on attempt {attempt}; triggering automatic self-healing retry (attempt 2/2)...")
-                            return {"has_reply": False, "returncode": -9, "is_error": True, "is_quota_error": False}
-                        error_card = CardBuilder.build_stall_error_card(user_text, think_seconds, stall_seconds)
-                        if bot_reply_msg_id:
-                            await _feishu_call(
-                                lambda: patch_interactive_card_sdk(bot_reply_msg_id, error_card),
-                                label="stall error card patch"
-                            )
-                        stderr_text = f"⚠️ 任务已检测到假死并自动终止（连续 {stall_seconds // 60} 分钟没有任何输出、进程树无任何 CPU/IO 活跃且无任何工具在运行）。"
-                        session_data["last_execution_error"] = True
-                        return {"has_reply": True, "reply_text": stderr_text, "is_error": True}
+                        break
 
                 if think_seconds > 43200:
                     log.error(f"[Executor] Process timeout reached (43200s / 12h) for chat {chat_id}...")
@@ -1504,6 +1560,108 @@ async def execute_antigravity(
                     "is_error": False,
                     "is_quota_error": False,
                     "typesafe_blocked": True,
+                }
+
+            if budget_intercepted:
+                partial_clean = extract_final_chinese_response(current_turn_text or accumulated_text)
+                proj_dir = session_data.get("project", "默认")
+                try:
+                    from agent_memory import read_project_capsule, update_project_capsule_incremental
+                    update_project_capsule_incremental(
+                        project_dir=proj_dir,
+                        user_request=user_text,
+                        reply_text=partial_clean or f"（阶段性截停：{budget_exceeded_reason}；已完成：{', '.join(completed_tool_steps[-6:])}）",
+                        chat_id=chat_id,
+                        conv_id=session_data.get("conversation", ""),
+                        scope=scope_info.get("scope", "modify"),
+                        tier=adaptive_tier_now or "Medium",
+                        outcome=f"budget_intercepted_attempt_{attempt}",
+                        tool_steps=completed_tool_steps,
+                    )
+                except Exception as mem_e:
+                    log.warning(f"[BudgetWatchdog] Failed to save partial progress to capsule: {mem_e}")
+
+                if attempt < 2:
+                    # 首次超预算/停滞：立即截停并携项目记忆胶囊自动重试一遍 (Attempt 2)
+                    capsule_snippet = ""
+                    try:
+                        from agent_memory import read_project_capsule
+                        capsule_snippet = read_project_capsule(proj_dir)[:2000]
+                    except Exception:
+                        pass
+                    steps_summary = " -> ".join(completed_tool_steps[-10:]) if completed_tool_steps else "尚无完成步骤"
+                    retry_ctx = (
+                        "\n[Budget Watchdog Auto-Retry / 首轮超预算自动收敛重试 (Attempt 2/2)]\n"
+                        f"- 截停原因: {budget_exceeded_reason}\n"
+                        f"- 首轮已完成工具轨迹 ({len(completed_tool_steps)}步): {steps_summary}\n"
+                    )
+                    if partial_clean:
+                        retry_ctx += f"- 首轮阶段性发现: {partial_clean[:500]}\n"
+                    if capsule_snippet:
+                        retry_ctx += f"- 项目记忆胶囊摘要:\n{capsule_snippet}\n"
+                    retry_ctx += (
+                        "- 【强制收敛指令】: 请直接基于上述首轮已完成结果与项目记忆胶囊，立即收敛并输出最终结论（或仅执行最后 1~2 步必要的收尾操作），"
+                        "严禁从头重复已执行过的探查步骤！\n"
+                        "[/Budget Watchdog Auto-Retry]\n"
+                    )
+                    session_data["_budget_retry_context"] = retry_ctx
+                    session_data["_was_budget_retry"] = True
+                    log.warning(f"[BudgetWatchdog] Attempt 1 intercepted for chat {chat_id}; triggering automatic retry (Attempt 2/2) with capsule context.")
+                    return {
+                        "has_reply": False,
+                        "returncode": -8,
+                        "is_error": True,
+                        "is_quota_error": False,
+                        "budget_exceeded": True,
+                    }
+
+                # 第二次重试依然超预算：立即截停并向飞书推送带「▶️ 继续执行剩余步骤」按钮的进度卡片
+                elapsed_s = int(time.time() - process_start_time)
+                session_data["paused_task_state"] = {
+                    "user_text": user_text,
+                    "scope": scope_info.get("scope", "modify"),
+                    "scope_label": scope_info.get("scope_label", ""),
+                    "completed_steps": list(completed_tool_steps),
+                    "planned_steps": list(planned_steps),
+                    "partial_reply": (partial_clean or "")[:1200],
+                    "elapsed_seconds": elapsed_s,
+                    "reason": budget_exceeded_reason,
+                    "project_dir": proj_dir,
+                    "created_at": time.time(),
+                }
+                session_data["last_execution_error"] = False
+                try:
+                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                except Exception:
+                    pass
+
+                pause_card = CardBuilder.build_budget_pause_card(
+                    user_text=user_text,
+                    reason=budget_exceeded_reason,
+                    completed_steps=completed_tool_steps,
+                    planned_steps=planned_steps,
+                    partial_reply=partial_clean,
+                    elapsed_seconds=elapsed_s,
+                    scope_label=scope_info.get("scope_label", ""),
+                    current_model=session_data.get("model", "Default"),
+                    current_project=proj_dir,
+                )
+                if bot_reply_msg_id:
+                    await _feishu_call(
+                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, pause_card),
+                        label="patch budget pause card"
+                    )
+                else:
+                    await _feishu_call(
+                        lambda: send_interactive_card_sdk(message_id, pause_card),
+                        label="send budget pause card"
+                    )
+                return {
+                    "has_reply": True,
+                    "returncode": 0,
+                    "is_error": False,
+                    "is_quota_error": False,
+                    "budget_paused": True,
                 }
 
 
@@ -1823,6 +1981,37 @@ async def execute_antigravity(
                     await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
                 except Exception as e:
                     log.warning(f"[Executor] Failed to persist last_ai_summary: {e}")
+
+                # 异步沉淀本轮记忆至 data/agent_memory (L1 记忆胶囊 PROJECT_STATE.md + L2 SQLite FTS5)
+                try:
+                    from agent_memory import inspect_and_backfill_transcript, update_project_capsule_incremental
+                    _proj_for_mem = session_data.get("project", "默认")
+                    _conv_for_mem = session_data.get("conversation", "")
+                    _scope_for_mem = (session_data.get("_active_turn_scope") or {}).get("scope", "modify")
+                    _tier_for_mem = adaptive_tier_now or "Medium"
+                    _steps_for_mem = list(completed_tool_steps)
+                    _tx_for_mem = transcript_path
+
+                    def _sync_record_mem():
+                        if _tx_for_mem and os.path.exists(_tx_for_mem):
+                            inspect_and_backfill_transcript(
+                                _tx_for_mem, project_dir=_proj_for_mem, chat_id=chat_id, conv_id=_conv_for_mem
+                            )
+                        update_project_capsule_incremental(
+                            project_dir=_proj_for_mem,
+                            user_request=user_text,
+                            reply_text=reply_text,
+                            chat_id=chat_id,
+                            conv_id=_conv_for_mem,
+                            scope=_scope_for_mem,
+                            tier=_tier_for_mem,
+                            outcome="success",
+                            tool_steps=_steps_for_mem,
+                        )
+
+                    loop.run_in_executor(None, _sync_record_mem)
+                except Exception as mem_err:
+                    log.warning(f"[Executor] Post-turn memory distillation warning: {mem_err}")
 
             final_card = CardBuilder.build_ai_response(
                 reply_text, 

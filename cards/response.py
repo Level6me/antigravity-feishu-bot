@@ -178,3 +178,142 @@ def build_ai_response(reply_text, choice_card_data=None, current_model="Default"
         },
         "elements": elements
     }
+
+
+def build_budget_pause_card(
+    user_text: str,
+    reason: str = "",
+    completed_steps: list = None,
+    planned_steps: list = None,
+    partial_reply: str = "",
+    elapsed_seconds: int = 0,
+    scope_label: str = "",
+    current_model: str = "Default",
+    current_project: str = "默认",
+    resumed_status: str = "",
+):
+    """Build an interactive pause/checkpoint card when Attempt 2 also exceeds the step/time/stagnation budget."""
+    completed_steps = completed_steps or []
+    planned_steps = planned_steps or []
+    mins = elapsed_seconds // 60
+    secs = elapsed_seconds % 60
+    time_str = f"{mins}分{secs}秒" if mins > 0 else f"{secs}秒"
+
+    short_q = (user_text or "").strip().replace("\n", " ")
+    if len(short_q) > 120:
+        short_q = short_q[:120] + "..."
+
+    elements = [
+        {
+            "tag": "markdown",
+            "content": (
+                f"⏸️ **任务阶段性截停保护（已自动重试 1 次仍超出预算）**\n\n"
+                f"- **当前指令**：`{short_q}`\n"
+                f"- **截停原因**：{reason or '单轮工具调用步数或耗时达到预算上限'}\n"
+                f"- **本轮耗时**：{time_str} | **已完成工具步数**：{len(completed_steps)} 步"
+                + (f" | **范围契约**：{scope_label}" if scope_label else "")
+            ),
+        }
+    ]
+
+    if planned_steps:
+        plan_lines = ["**📋 任务规划进度**："]
+        for i, st in enumerate(planned_steps[:6], 1):
+            done_mark = "✅" if i <= max(1, min(len(planned_steps) - 1, len(completed_steps) // 3)) else "⏳"
+            plan_lines.append(f"{done_mark} {i}. {st}")
+        elements.append({"tag": "markdown", "content": "\n".join(plan_lines)})
+
+    if completed_steps:
+        recent_steps = completed_steps[-8:]
+        step_lines = [f"- `✓` {s}" for s in recent_steps]
+        if len(completed_steps) > 8:
+            step_lines.insert(0, f"*(前序已完成 {len(completed_steps) - 8} 步已写入项目记忆胶囊...)*")
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": "**🔧 最近已完成操作轨迹**：\n" + "\n".join(step_lines),
+            }
+        )
+
+    if partial_reply and partial_reply.strip():
+        preview = partial_reply.strip()
+        if len(preview) > 800:
+            preview = preview[:800] + "..."
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": f"**💡 阶段性输出摘要**：\n{preview}",
+            }
+        )
+
+    elements.append({"tag": "hr"})
+
+    if resumed_status == "continued":
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": "🚀 **已确认继续执行！系统正在携项目记忆胶囊与已完成进度接力推进剩余步骤...**",
+            }
+        )
+        header_template = "wathet"
+        header_title = "🚀 正在接力继续执行..."
+    elif resumed_status == "stopped":
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": "🛑 **已结束本轮长任务追加执行，当前阶段性成果已归档至项目记忆胶囊。**",
+            }
+        )
+        header_template = "grey"
+        header_title = "✅ 阶段性任务已归档"
+    else:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": (
+                    "💾 **当前阶段进展与环境事实已自动保存至机器人数据目录的项目记忆胶囊 (`PROJECT_STATE.md`)。**\n"
+                    "请确认是否授权继续推进剩余步骤："
+                ),
+            }
+        )
+        elements.append(
+            {
+                "tag": "action",
+                "layout": "bisect",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "▶️ 继续执行剩余步骤"},
+                        "type": "primary",
+                        "value": {"action": "continue_long_task"},
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🛑 结束并保留当前进度"},
+                        "type": "default",
+                        "value": {"action": "stop_paused_task"},
+                    },
+                ],
+            }
+        )
+        header_template = "orange"
+        header_title = "⏸️ 任务超预算截停 · 等待确认继续"
+
+    project_name_only = os.path.basename(current_project) if (current_project and current_project not in ("默认", "Default")) else "默认"
+    elements.append(
+        {
+            "tag": "markdown",
+            "content": f"<font color='grey'>🤖 模型: {current_model} | 🗂️ 项目: {project_name_only} | 🛡️ 预算停滞看门狗</font>",
+        }
+    )
+    elements.append(create_footer())
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": header_template,
+            "title": {"content": header_title, "tag": "plain_text"},
+        },
+        "elements": elements,
+    }
+

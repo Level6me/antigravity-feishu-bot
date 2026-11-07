@@ -6,20 +6,61 @@ from datetime import datetime
 
 from cards.common import create_footer
 
-def build_memory_card(memories):
+def build_memory_card(memories, project_memory_summary=None):
     elements = []
-    elements.append({
-        "tag": "action",
-        "actions": [
+    action_buttons = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "➕ 新增偏好"},
+            "type": "primary",
+            "value": {"action": "prompt_add_memory"}
+        }
+    ]
+    if project_memory_summary:
+        action_buttons.append(
             {
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": "➕ 新增偏好"},
-                "type": "primary",
-                "value": {"action": "prompt_add_memory"}
+                "text": {"tag": "plain_text", "content": "🔄 同步当前会话记忆"},
+                "type": "default",
+                "value": {"action": "backfill_project_memory"}
             }
-        ]
+        )
+    elements.append({
+        "tag": "action",
+        "actions": action_buttons
     })
     elements.append({"tag": "hr"})
+
+    if project_memory_summary and isinstance(project_memory_summary, dict):
+        proj_dir = project_memory_summary.get("project_dir", "默认")
+        proj_slug = project_memory_summary.get("project_slug", "default_workspace")
+        turns_cnt = project_memory_summary.get("episodic_turns_count", 0)
+        facts_cnt = project_memory_summary.get("active_facts_count", 0)
+        de_cnt = project_memory_summary.get("dead_ends_count", 0)
+        cp_cnt = project_memory_summary.get("current_checkpoints", 0)
+        relay_cnt = project_memory_summary.get("relay_lineage_count", 0)
+        is_corrupted = project_memory_summary.get("is_corrupted", False)
+        capsule_md = (project_memory_summary.get("capsule_markdown") or "").strip()
+
+        status_badge = "⚠️ 摘要受损(待自动接力)" if is_corrupted else ("🟢 健康" if cp_cnt < 3 else "🟡 接近接力阈值")
+        elements.append({
+            "tag": "markdown",
+            "content": (
+                f"🗂️ **当前项目长效记忆引擎 (`data/agent_memory`)**\n"
+                f"- **活跃项目**：`{proj_dir}` (`{proj_slug}`)\n"
+                f"- **FTS5 历史轮次**：**{turns_cnt}** 轮 | **结构化事实**：**{facts_cnt}** 条 | **死胡同禁令**：**{de_cnt}** 条\n"
+                f"- **当前会话压缩**：**{cp_cnt}** 次 ({status_badge}) | **跨会话无感接力**：**{relay_cnt}** 次"
+            )
+        })
+        if capsule_md:
+            preview_md = capsule_md
+            if len(preview_md) > 1500:
+                preview_md = preview_md[:1500] + "\n_(...更多内容保存在 PROJECT_STATE.md)_"
+            elements.append({
+                "tag": "markdown",
+                "content": f"**📋 项目记忆胶囊 (`PROJECT_STATE.md`) 摘要**：\n{preview_md}"
+            })
+        elements.append({"tag": "hr"})
 
     if not memories:
         elements.append({

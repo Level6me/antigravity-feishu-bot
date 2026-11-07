@@ -28,6 +28,7 @@ class CardBuilder:
     build_stall_error_card = staticmethod(indicators.build_stall_error_card)
 
     build_ai_response = staticmethod(response.build_ai_response)
+    build_budget_pause_card = staticmethod(response.build_budget_pause_card)
 
     build_dir_browser_card = staticmethod(projects.build_dir_browser_card)
 
