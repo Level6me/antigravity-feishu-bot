@@ -416,13 +416,13 @@ def _collapse_consecutive_steps(steps: list[str]) -> list[tuple[str, int]]:
     return collapsed
 
 
-def _build_visual_progress_bar(current_idx: int, total: int, is_all_completed: bool, tool_count: int, think_seconds: int) -> str:
-    """Build a compact visual progress bar and telemetry line for the card top."""
+def _build_visual_progress_bar(current_idx: int, total: int, is_all_completed: bool, tool_count: int, think_seconds: int, bar_width: int = 10) -> str:
+    """Build a 10-cell block progress bar (■■■■■□□□□□) and telemetry line for the card top."""
     if total <= 0:
         total = 1
     if is_all_completed:
         pct = 100
-        bar = "🟢" * total
+        bar = "■" * bar_width
         stage_str = f"全部 {total}/{total} 阶段已完成"
     else:
         done_stages = max(0, min(current_idx, total - 1))
@@ -430,11 +430,12 @@ def _build_visual_progress_bar(current_idx: int, total: int, is_all_completed: b
         base_pct = int((done_stages / total) * 100)
         stage_span = int(100 / total)
         intra_bonus = min(stage_span - 2, (tool_count % 3) * max(3, stage_span // 3))
-        pct = max(5, min(96, base_pct + max(4, intra_bonus)))
-        bar = ("🟢" * done_stages) + "🔵" + ("⚪" * max(0, total - done_stages - 1))
+        pct = max(10, min(95, base_pct + max(5, intra_bonus)))
+        filled = max(1, min(bar_width - 1, int(round((pct / 100.0) * bar_width))))
+        bar = ("■" * filled) + ("□" * (bar_width - filled))
         stage_str = f"阶段 {done_stages + 1}/{total}"
 
-    parts = [f"{bar} **{pct}%**", stage_str]
+    parts = [f"`{bar}` **{pct}%**", stage_str]
     if tool_count > 0:
         parts.append(f"已调用 {tool_count} 次工具")
     if think_seconds > 0:
@@ -649,12 +650,14 @@ def build_tool_indicator(
             lines.append("• ⏳ 正在整理并生成最终回复...")
             
         steps_block = "\n".join(lines)
+        filled_fallback = max(1, min(9, total_steps))
+        fallback_bar = ("■" * filled_fallback) + ("□" * (10 - filled_fallback))
         if total_steps > 1:
-            content = f"**🤖 任务多步骤执行中 (第 {total_steps} 步)：**\n\n{steps_block}{diag_banner}\n\n*({time_hint}，后台正在全速推进中)*"
+            content = f"📊 `{fallback_bar}` · **第 {total_steps} 步** · {time_hint}\n\n**🤖 任务多步骤执行中：**\n\n{steps_block}{diag_banner}\n\n*(后台正在全速推进中)*"
         else:
-            content = f"**🤖 任务执行进展：**\n\n{steps_block}{diag_banner}\n\n*(AI 正在运行底层命令或操作文件，{time_hint})*"
+            content = f"📊 `{fallback_bar}` · {time_hint}\n\n**🤖 任务执行进展：**\n\n{steps_block}{diag_banner}\n\n*(AI 正在运行底层命令或操作文件)*"
     else:
-        content = f"**🤖 任务执行进展：**\n\n• ⏳ 正在执行底层操作...{diag_banner}\n\n*(AI 正在运行底层命令或操作文件，{time_hint})*"
+        content = f"📊 `■□□□□□□□□□` · {time_hint}\n\n**🤖 任务执行进展：**\n\n• ⏳ 正在执行底层操作...{diag_banner}\n\n*(AI 正在运行底层命令或操作文件)*"
     
     if downloaded_file_name:
         if download_success:
@@ -720,11 +723,11 @@ def build_streaming_indicator(
     if len(header_title) > 28:
         header_title = header_title[:25] + "..."
     
-    status_bar = f"*( ⏱️ 已耗时 {think_seconds}s"
+    status_bar = f"*( 📊 `■■■■■■■■■■` **100%** | ⏱️ 已耗时 {think_seconds}s"
     if total_planned_steps > 0:
-        status_bar += f" | ✅ 全套 {total_planned_steps} 个任务规划步骤已全部完成"
+        status_bar += f" | ✅ 全套 {total_planned_steps} 个规划阶段已完成"
     elif completed_steps_count > 0:
-        status_bar += f" | ✅ 已完成 {completed_steps_count} 个步骤"
+        status_bar += f" | ✅ 已完成 {completed_steps_count} 项底层操作"
     elif tool_action:
         action_disp = clean_action_text(tool_action)
         status_bar += f" | 🛠️ {action_disp}"

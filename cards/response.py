@@ -203,15 +203,21 @@ def build_budget_pause_card(
     if len(short_q) > 120:
         short_q = short_q[:120] + "..."
 
+    total_plan = max(1, len(planned_steps)) if planned_steps else 4
+    done_plan = max(1, min(total_plan - 1, len(completed_steps) // 3)) if completed_steps else 1
+    pct = max(10, min(90, int((done_plan / total_plan) * 100)))
+    filled = max(1, min(9, int(round(pct / 10.0))))
+    block_bar = ("■" * filled) + ("□" * (10 - filled))
+
     elements = [
         {
             "tag": "markdown",
             "content": (
-                f"⏸️ **任务阶段性截停保护（已自动重试 1 次仍超出预算）**\n\n"
+                f"⏸️ **任务阶段性截停保护（已自动重试 1 次仍超出预算）**\n"
+                f"📊 **阶段进度**：`{block_bar}` **{pct}%** · 已执行 {len(completed_steps)} 步 · 耗时 {time_str}\n\n"
                 f"- **当前指令**：`{short_q}`\n"
-                f"- **截停原因**：{reason or '单轮工具调用步数或耗时达到预算上限'}\n"
-                f"- **本轮耗时**：{time_str} | **已完成工具步数**：{len(completed_steps)} 步"
-                + (f" | **范围契约**：{scope_label}" if scope_label else "")
+                f"- **截停原因**：{reason or '单轮工具调用步数或耗时达到预算上限'}"
+                + (f"\n- **范围契约**：{scope_label}" if scope_label else "")
             ),
         }
     ]

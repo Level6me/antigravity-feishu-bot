@@ -101,6 +101,8 @@ class TestV32RefactorSuite(unittest.TestCase):
         card_json_str = str(card)
         self.assertIn("任务规划与执行清单", card_json_str)
         self.assertIn("实时底层执行轨迹", card_json_str)
+        self.assertIn("■", card_json_str)
+        self.assertIn("□", card_json_str)
 
     def test_03_known_issue_2_no_thinking_leak(self):
         # 1. Dangling closing </thought> and multi-paragraph English Thinking Process
