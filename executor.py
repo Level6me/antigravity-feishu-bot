@@ -2074,6 +2074,10 @@ async def execute_antigravity(
                     system_err_reply = detect_and_format_agent_system_error(combined_err_text)
                     if system_err_reply:
                         reply_text = system_err_reply
+                    elif process.returncode in (-9, 137):
+                        reply_text = "⚠️ 任务后台执行进程被异常终止 (SIGKILL / 退出码 -9)，通常由于安全策略拦截、系统 OOM 保护或外部终止信号导致，请重新发起指令。"
+                    elif process.returncode in (-15, 143):
+                        reply_text = "⚠️ 任务后台执行进程收到终止信号 (SIGTERM)，通常由于服务重启或任务被手动中止导致，请重新发起指令。"
                     else:
                         reply_text = stderr_text.strip() or "⚠️ 模型未返回任何有效回复，请重试或更换模型。"
                 is_error = True
