@@ -180,21 +180,26 @@ async def process_chat_queue(chat_id):
     try:
         while not queue.empty():
             task = await queue.get()
+            task_done_cleanly = False
             try:
                 await _process_single_task(chat_id, task)
                 stats.record_success()
+                task_done_cleanly = True
             except asyncio.CancelledError:
+                # 收到取消异常（如服务重启或被中断），不删除 pending_task，保留在数据库中供重启后 restore 恢复
                 raise
             except Exception as e:
                 stats.record_failure()
                 log.error(f"Error processing queued task for {chat_id}: {e}")
+                task_done_cleanly = True
             finally:
                 queue.task_done()
-                created_at = task.get("created_at")
-                if created_at:
-                    delete_pending_task(chat_id, created_at)
+                if task_done_cleanly:
+                    created_at = task.get("created_at")
+                    if created_at:
+                        delete_pending_task(chat_id, created_at)
     except asyncio.CancelledError:
-        log.info(f"Chat worker for {chat_id} was cancelled by /stop")
+        log.info(f"Chat worker for {chat_id} was cancelled")
         try:
             from plugin_manager import plugin_manager
             await plugin_manager.dispatch_task_stop(chat_id)
