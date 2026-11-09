@@ -251,12 +251,34 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 # 自动接力推进原任务（仅在成功时接力，避免死循环）
                 if final_status == "success":
                     try:
+                        try:
+                            from math_decision_model import math_decision_engine
+                            math_decision_engine.reset_session_risk(chat_id)
+                        except Exception:
+                            pass
+
                         session_data = await get_session_async(chat_id)
                         paused_l3 = session_data.pop("paused_l3_state", None) or {}
+                        orig_q = paused_l3.get("user_text") or session_data.get("last_user_query", "继续执行未完成的任务")
+                        comp_steps = list(paused_l3.get("completed_steps") or [])
+                        plan_steps = list(paused_l3.get("planned_steps") or [])
+                        prior_elapsed_s = int(paused_l3.get("elapsed_seconds") or 0) + max(1, int(round(elapsed)))
+                        approved_list = list(session_data.get("_approved_l3_commands") or [])
+                        for _c in (command.strip(), clean_cmd.strip()):
+                            if _c and _c not in approved_list:
+                                approved_list.append(_c)
+                        session_data["_approved_l3_commands"] = approved_list[-10:]
+                        session_data["_is_authorized_l3_resume"] = True
+                        session_data["_resumed_task_progress"] = {
+                            "user_text": orig_q,
+                            "elapsed_seconds": prior_elapsed_s,
+                            "completed_steps": comp_steps + [f"授权执行: {clean_cmd[:24]}"],
+                            "planned_steps": plan_steps,
+                            "current_plan_idx": int(paused_l3.get("current_plan_idx") or 0),
+                            "max_progress_pct": int(paused_l3.get("max_progress_pct") or 0),
+                        }
                         await save_session_async(chat_id, session_data)
 
-                        orig_q = paused_l3.get("user_text") or session_data.get("last_user_query", "继续执行未完成的任务")
-                        comp_steps = paused_l3.get("completed_steps") or []
                         steps_str = " -> ".join(comp_steps[-8:]) if comp_steps else "无"
 
                         resume_prompt = (
@@ -292,9 +314,13 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         log.info(f"User requested continue_long_task in chat {chat_id}")
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_continue_long_task():
+                try:
+                    from math_decision_model import math_decision_engine
+                    math_decision_engine.reset_session_risk(chat_id)
+                except Exception:
+                    pass
                 session_data = await get_session_async(chat_id)
                 paused = session_data.pop("paused_task_state", None) or {}
-                await save_session_async(chat_id, session_data)
 
                 orig_q = paused.get("user_text") or session_data.get("last_user_query") or "继续执行未完成的任务"
                 comp_steps = paused.get("completed_steps") or []
@@ -304,6 +330,16 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 reason_s = paused.get("reason") or ""
                 scope_lbl = paused.get("scope_label") or ""
                 proj_dir = paused.get("project_dir") or session_data.get("project", "默认")
+
+                session_data["_resumed_task_progress"] = {
+                    "user_text": orig_q,
+                    "elapsed_seconds": elapsed_s,
+                    "completed_steps": list(comp_steps),
+                    "planned_steps": list(plan_steps),
+                    "current_plan_idx": int(paused.get("current_plan_idx") or 0),
+                    "max_progress_pct": int(paused.get("max_progress_pct") or 0),
+                }
+                await save_session_async(chat_id, session_data)
 
                 resumed_card = CardBuilder.build_budget_pause_card(
                     user_text=orig_q,

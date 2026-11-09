@@ -281,17 +281,23 @@ class HybridMathDecisionEngine:
         ends_q = 0.4 if clean.endswith(("?", "？", "吗", "呢")) else 0.0
         phi_question = min(1.0, max(0.0, is_qa_head + ends_q - 0.8 * phi_tech_entity - 0.6 * phi_imperative))
 
+        is_internal_continuation = clean.startswith(
+            ("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]")
+        )
         phi_confirm = 1.0 if (n <= 24 and _CONFIRM_CONTINUATION_PATTERN.match(clean)) else 0.0
-        if "我全都要" in clean or "全部执行" in clean or "按规格书" in clean:
+        if "我全都要" in clean or "全部执行" in clean or "按规格书" in clean or is_internal_continuation:
             phi_confirm = 1.0
             phi_imperative = max(phi_imperative, 0.85)
 
         multistep_hits = len(_MULTISTEP_PATTERN.findall(clean))
         phi_multistep = min(1.0, 0.30 * multistep_hits + (0.45 if high_verbs > 0 else 0.0))
 
-        hazard_l3 = 1.0 if _HAZARD_L3_PATTERN.search(clean) else 0.0
-        hazard_l2 = 0.65 if _HAZARD_L2_PATTERN.search(clean) else 0.0
-        phi_hazard = max(hazard_l3, hazard_l2)
+        if is_internal_continuation:
+            phi_hazard = 0.0
+        else:
+            hazard_l3 = 1.0 if _HAZARD_L3_PATTERN.search(clean) else 0.0
+            hazard_l2 = 0.65 if _HAZARD_L2_PATTERN.search(clean) else 0.0
+            phi_hazard = max(hazard_l3, hazard_l2)
 
         phi_entropy = _char_shannon_entropy(clean[:400])
 
@@ -384,9 +390,15 @@ class HybridMathDecisionEngine:
         # Pure short greetings or obvious single-step commands don't need 2s HTTP latency
         if not has_context and posteriors["chat"] >= 0.80 and fv.phi_tech_entity == 0.0 and fv.phi_imperative == 0.0:
             return False
-        if posteriors["deep_arch"] >= 0.78 and fv.phi_imperative >= 0.5:
+        if posteriors["deep_arch"] >= 0.78 and fv.phi_imperative >= 0.5 and fv.phi_hazard < 0.5:
             return False
         return True
+
+    def reset_session_risk(self, chat_id: str) -> None:
+        """Clear cumulative risk for a session after admin L3 approval or explicit reset."""
+        st = self.get_session_state(chat_id)
+        st.cumulative_risk = 0.0
+        st.last_update_ts = time.time()
 
     # ------------------------------------------------------------------
     # Layer 3 & 4: Bayesian Pooling, Continuous Complexity C*, Plan Pi_t & Risk R_t
@@ -398,8 +410,13 @@ class HybridMathDecisionEngine:
         remote_jev_data: Optional[Dict] = None,
         has_shell_scope: bool = True,
         is_outside_workspace: bool = False,
+        update_state: bool = True,
     ) -> OrthogonalDecision:
         state = self.get_session_state(chat_id)
+        clean_prompt = (prompt_text or "").lstrip()
+        is_internal_continuation = clean_prompt.startswith(
+            ("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]")
+        )
         fv = self.extract_features(prompt_text)
         local_post, norm_entropy = self.compute_local_posterior(fv, state)
 
@@ -481,32 +498,43 @@ class HybridMathDecisionEngine:
 
         # Layer 4: Session-level EWMA / Hawkes Cumulative Risk Decay Model R_t
         now = time.time()
-        dt = max(0.0, now - state.last_update_ts)
-        decay = math.pow(self.risk_decay_base, dt / self.risk_half_life_sec)
-
-        r_instant = (
-            0.75 * fv.phi_hazard
-            + (0.35 if is_outside_workspace else 0.0)
-            + (0.30 if (not has_shell_scope and fv.phi_imperative > 0.3) else 0.0)
-        )
-        if used_remote and remote_jev_data:
-            s_node = remote_jev_data.get("pillar_3_security", {}) or {}
-            if s_node.get("is_high_risk"):
-                r_instant = max(r_instant, 0.72)
-
-        r_t = round(min(1.5, decay * state.cumulative_risk + r_instant), 4)
-        state.cumulative_risk = r_t
-        state.last_update_ts = now
-
-        # Orthogonal Security Level mapping (NEVER skipped just because EffortTier is Low/Medium!)
-        if fv.phi_hazard >= 0.95 or r_t >= 0.95:
-            sec_level: SecurityLevel = "L3"
-        elif r_t >= 0.62 or fv.phi_hazard >= 0.60:
-            sec_level = "L2"
-        elif r_t >= 0.30:
-            sec_level = "L1"
+        if is_internal_continuation:
+            r_t = 0.0
+            if update_state:
+                state.cumulative_risk = 0.0
+                state.last_update_ts = now
+            sec_level: SecurityLevel = "L0"
         else:
-            sec_level = "L0"
+            dt = max(0.0, now - state.last_update_ts)
+            decay = math.pow(self.risk_decay_base, dt / self.risk_half_life_sec)
+
+            r_instant = (
+                0.75 * fv.phi_hazard
+                + (0.35 if is_outside_workspace else 0.0)
+                + (0.30 if (not has_shell_scope and fv.phi_imperative > 0.3) else 0.0)
+            )
+            if used_remote and remote_jev_data:
+                s_node = remote_jev_data.get("pillar_3_security", {}) or {}
+                if s_node.get("is_high_risk"):
+                    r_instant = max(r_instant, 0.72)
+
+            r_t = round(min(1.5, decay * state.cumulative_risk + r_instant), 4)
+
+            # Orthogonal Security Level mapping (NEVER skipped just because EffortTier is Low/Medium!)
+            if fv.phi_hazard >= 0.95 or r_t >= 0.95:
+                sec_level = "L3"
+            elif r_t >= 0.62 or fv.phi_hazard >= 0.60:
+                sec_level = "L2"
+            elif r_t >= 0.30:
+                sec_level = "L1"
+            else:
+                sec_level = "L0"
+
+            if update_state:
+                # Cap persisted cumulative risk when L3 is triggered so a blocked request
+                # does not lock out subsequent legitimate messages in the same session.
+                state.cumulative_risk = min(r_t, 0.55) if sec_level == "L3" else r_t
+                state.last_update_ts = now
 
         reason = (
             f"Tier={effort_tier}(C*={c_star:.2f}), Plan={needs_task_plan}(P={p_plan:.2f}), "

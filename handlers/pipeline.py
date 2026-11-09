@@ -309,9 +309,27 @@ async def _process_single_task(chat_id, task):
         task.get("is_voice_message")
     )
     if not bot_reply_msg_id and not is_resumed:
-        init_card = CardBuilder.build_typing_indicator(
-            downloaded_file_name, download_success, user_text, is_voice=is_voice_message
-        )
+        resumed_prog = session_data.get("_resumed_task_progress") or {}
+        if resumed_prog and (resumed_prog.get("planned_steps") or resumed_prog.get("completed_steps")):
+            init_card = CardBuilder.build_tool_indicator(
+                "继续推进剩余步骤",
+                resumed_prog.get("user_text") or user_text,
+                downloaded_file_name,
+                download_success,
+                int(resumed_prog.get("elapsed_seconds") or 0),
+                completed_steps=list(resumed_prog.get("completed_steps") or []),
+                planned_steps=list(resumed_prog.get("planned_steps") or []),
+                current_step_idx=int(resumed_prog.get("current_plan_idx") or 0),
+                min_pct=int(resumed_prog.get("max_progress_pct") or 0),
+            )
+        else:
+            init_card = CardBuilder.build_typing_indicator(
+                downloaded_file_name,
+                download_success,
+                user_text,
+                think_seconds=int(resumed_prog.get("elapsed_seconds") or 0),
+                is_voice=is_voice_message,
+            )
         try:
             bot_reply_msg_id = await app_state.run_feishu_sync(
                 loop, lambda: send_interactive_card_sdk(message_id, init_card)
@@ -337,7 +355,9 @@ async def _process_single_task(chat_id, task):
     prewarmed_effort = infer_effort_from_model(prewarmed_model, session_data.get("reasoning_effort", "medium"))
     try:
         from math_decision_model import math_decision_engine
-        local_preview = math_decision_engine.evaluate_decision(chat_id, user_text, remote_jev_data=None)
+        local_preview = math_decision_engine.evaluate_decision(
+            chat_id, user_text, remote_jev_data=None, update_state=False
+        )
         if getattr(config, "TYPESAFE_AUTO_MODE", True) and local_preview.effort_tier:
             base_m = session_data.get("base_model") or session_data.get("model", "Default")
             prewarmed_model = resolve_adaptive_model(base_m, local_preview.effort_tier)
@@ -397,8 +417,11 @@ async def _process_single_task(chat_id, task):
 
     session_data["bot_reply_msg_id"] = bot_reply_msg_id
 
-    # 1. 安全沙箱门禁拦截（基于 TypeSafe Noul 概率评判与置信度兜底）
-    if decision.is_dangerous:
+    # 1. 安全沙箱门禁拦截（基于 TypeSafe Noul 概率评判与置信度兜底；豁免系统内部已授权接力/续跑消息）
+    is_internal_resume = user_text.lstrip().startswith(
+        ("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]")
+    ) or bool(session_data.pop("_is_authorized_l3_resume", False))
+    if decision.is_dangerous and not is_internal_resume:
         log.warning(f"[Security] Intercepted dangerous request: '{user_text}' (prob={decision.danger_prob:.2f})")
         warn_card = CardBuilder.build_security_warning(user_text)
         if bot_reply_msg_id:

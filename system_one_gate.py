@@ -371,6 +371,39 @@ async def evaluate_message_gate(
     """
     start_hmdm_t = time.perf_counter()
 
+    # 0a. 系统内部授权接力 / 暂停续跑消息白名单旁路（已由管理员在审批卡片确认或点击继续，不再对历史回显文本做危险拦截）
+    clean_u_head = (user_text or "").lstrip()
+    if clean_u_head.startswith(("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]")):
+        try:
+            from math_decision_model import math_decision_engine
+            math_decision_engine.reset_session_risk(chat_id)
+        except Exception:
+            pass
+        elapsed_hmdm = (time.perf_counter() - start_hmdm_t) * 1000.0
+        log.info(
+            f"[TypeSafe FastPath] Internal authorized resume bypass in {elapsed_hmdm:.2f}ms for chat {chat_id}"
+        )
+        return TypeSafeDecision(
+            is_dangerous=False,
+            danger_prob=0.0,
+            intent="code_agent",
+            intent_confidence=0.99,
+            intent_probabilities={"chat": 0.01, "standard_op": 0.24, "deep_arch": 0.75},
+            complexity_score=1.45,
+            complexity_confidence=0.95,
+            needs_terminal=True,
+            is_operation=True,
+            action_type="execute_task",
+            latency_ms=round(elapsed_hmdm, 2),
+            is_fallback=False,
+            raw_answers={"fast_path": "internal_authorized_resume"},
+            needs_task_plan=True,
+            security_level="L0",
+            local_entropy=0.10,
+            math_tier="High",
+            math_reason="Tier=High(C*=1.45), Plan=True, Sec=L0(R=0.00), AuthorizedResume=True",
+        )
+
     # Sync Markov dialog state if context indicates a pending task proposal
     try:
         from math_decision_model import math_decision_engine
@@ -873,7 +906,7 @@ async def evaluate_tool_execution(command: str, context: str = "", timeout_secon
 
     # 2. 本地高危物理特征速断拦截（无需等待远程 Jev 决策）
     is_crit = bool(re.search(
-        r'(?i)(?:\brm\s+-[a-z]*r[a-z]*f\s+(?:/|\*)|\bmkfs(?:\.[a-z0-9]+)?\b|:\(\)\s*\{|'
+        r'(?i)(?:\brm\s+-[a-z]*r[a-z]*f\s+(?:/(?:\s|$|\*|[;&|"\'])|\*(?:\s|$|[;&|"\']))|\bmkfs(?:\.[a-z0-9]+)?\b|:\(\)\s*\{|'
         r'\bdd\s+if=/dev/|^(?:timeout\s+\d+\s+)?(?:sudo\s+)?(?:shutdown|reboot|poweroff|init\s+[06])\b)',
         cmd_strip
     ))

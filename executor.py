@@ -975,14 +975,22 @@ async def execute_antigravity(
         except Exception as e:
             log.error(f"Failed to sync conversation id from log: {e}")
 
-    task_max_progress_pct = 0
-    task_planned_steps = []
-    task_plan_idx = 0
-    task_completed_tool_steps = []
-    task_explicit_plan_locked = False
+    resumed_task_ctx = session_data.pop("_resumed_task_progress", None) or {}
+    if resumed_task_ctx:
+        try:
+            await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+        except Exception:
+            pass
+    prior_elapsed_seconds = max(0, int(resumed_task_ctx.get("elapsed_seconds") or 0))
+    task_start_time = time.time() - prior_elapsed_seconds
+    task_max_progress_pct = int(resumed_task_ctx.get("max_progress_pct") or 0)
+    task_planned_steps = list(resumed_task_ctx.get("planned_steps") or [])
+    task_plan_idx = int(resumed_task_ctx.get("current_plan_idx") or 0)
+    task_completed_tool_steps = list(resumed_task_ctx.get("completed_steps") or [])
+    task_explicit_plan_locked = bool(task_planned_steps)
 
     async def _run_single_attempt(attempt):
-        nonlocal bot_reply_msg_id, target_transcript_path, task_max_progress_pct, task_planned_steps, task_plan_idx, task_completed_tool_steps, task_explicit_plan_locked
+        nonlocal bot_reply_msg_id, target_transcript_path, task_start_time, task_max_progress_pct, task_planned_steps, task_plan_idx, task_completed_tool_steps, task_explicit_plan_locked
         logs_dir = os.path.abspath(os.path.join(BASE_DIR, "logs"))
         os.makedirs(logs_dir, exist_ok=True)
         log_file_path = os.path.join(logs_dir, f"agy_log_{uuid.uuid4().hex}.txt")
@@ -1067,16 +1075,37 @@ async def execute_antigravity(
                 )
             )
 
-            if attempt == 1:
+            cur_init_elapsed = max(0, int(time.time() - task_start_time))
+            if planned_steps or task_completed_tool_steps:
+                retry_action = (
+                    f"第 {attempt}/2 次收敛接力"
+                    if attempt > 1
+                    else ("继续推进剩余步骤" if is_resumed or prior_elapsed_seconds > 0 else "正在推进任务")
+                )
+                init_card = CardBuilder.build_tool_indicator(
+                    retry_action,
+                    user_text,
+                    downloaded_file_name,
+                    download_success,
+                    cur_init_elapsed,
+                    completed_steps=list(task_completed_tool_steps),
+                    planned_steps=planned_steps,
+                    current_step_idx=current_plan_idx,
+                    min_pct=task_max_progress_pct,
+                )
+            elif attempt == 1:
                 if is_resumed:
                     init_card = CardBuilder.build_typing_indicator(
                         downloaded_file_name, download_success,
                         f"🔄 检测到服务刚完成重启，正在自动继续执行未完成的任务...\n\n{user_text}",
+                        think_seconds=cur_init_elapsed,
                         is_voice=is_voice_message
                     )
                 else:
                     init_card = CardBuilder.build_typing_indicator(
-                        downloaded_file_name, download_success, user_text, is_voice=is_voice_message
+                        downloaded_file_name, download_success, user_text,
+                        think_seconds=cur_init_elapsed,
+                        is_voice=is_voice_message
                     )
             else:
                 if session_data.pop("_was_safety_filter_retry", False):
@@ -1088,6 +1117,7 @@ async def execute_antigravity(
                 init_card = CardBuilder.build_typing_indicator(
                     downloaded_file_name, download_success,
                     retry_hint,
+                    think_seconds=cur_init_elapsed,
                     is_voice=is_voice_message
                 )
 
@@ -1138,7 +1168,7 @@ async def execute_antigravity(
                                 fp = os.path.join(entry_path, ".system_generated", "logs", "transcript.jsonl")
                                 if os.path.exists(fp):
                                     mtime = os.path.getmtime(fp)
-                                    if mtime >= process_start_time - 2:
+                                    if mtime >= attempt_start_time - 2:
                                         return fp
                     except Exception:
                         pass
@@ -1146,8 +1176,10 @@ async def execute_antigravity(
 
             last_streamed_length = 0
             last_patch_time = time.time()
-            process_start_time = time.time()
-            last_progress_time = process_start_time
+            attempt_start_time = time.time()
+            process_start_time = task_start_time
+            think_seconds = max(0, int(attempt_start_time - process_start_time))
+            last_progress_time = attempt_start_time
             last_cpu_check_time = 0
             is_worker_active = False
             active_worker_reason = "idle"
@@ -1318,10 +1350,14 @@ async def execute_antigravity(
 
                             raw_cmd_param = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
                             raw_path_param = (t_params.get("Path") or t_params.get("TargetFile") or t_params.get("AbsolutePath") or t_params.get("path") or "").strip()
+                            has_explicit_subrange = any(
+                                t_params.get(k) not in (None, "")
+                                for k in ("StartLine", "EndLine", "Target", "Replacement", "Content")
+                            )
                             raw_range_param = (
                                 f":{t_params.get('StartLine', '')}-{t_params.get('EndLine', '')}:{str(t_params.get('Target', ''))[:80]}"
-                                if raw_path_param
-                                else ""
+                                if (raw_path_param and has_explicit_subrange)
+                                else f":step_{total_tool_invocations}"
                             )
                             raw_query_param = (t_params.get("query") or t_params.get("Query") or "").strip()
                             candidate_raw_sig = raw_cmd_param or (f"{raw_path_param}{raw_range_param}" if raw_path_param else "") or raw_query_param
@@ -1428,32 +1464,37 @@ async def execute_antigravity(
                                 call_key = f"{raw_call_id}:{t_name}" if raw_call_id else f"{t_name}:{cmd_target[:100]}:{len(completed_tool_steps)}"
                                 if call_key and call_key not in evaluated_tool_calls and cmd_target:
                                     evaluated_tool_calls.add(call_key)
-                                    try:
-                                        from system_one_gate import evaluate_tool_execution
-                                        tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
-                                        if tool_dec.decision_source in ("jev", "local") and not tool_dec.is_fallback:
-                                            session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
-                                        if not tool_dec.is_allowed:
-                                            log.critical(f"[TypeSafe Co-Pilot] High-risk tool event intercepted: {cmd_target} -> {tool_dec.reason}")
-                                            typesafe_blocked_info = {
-                                                "tool": t_name,
-                                                "target": cmd_target,
-                                                "reason": tool_dec.reason or "安全策略拒绝了该高风险操作",
-                                                "risk_level": tool_dec.risk_level,
-                                                "call_id": call_key,
-                                                "cwd": session_data.get("project") or ""
-                                            }
-                                            await sess.close()
-                                            should_break = True
-                                            break
-                                        else:
-                                            typesafe_tool_audits.append({
-                                                "tool": t_name,
-                                                "risk": tool_dec.risk_level,
-                                                "latency_ms": tool_dec.latency_ms
-                                            })
-                                    except Exception as e:
-                                        log.warning(f"[TypeSafe Co-Pilot] Tool execution evaluation error: {e}")
+                                    approved_cmds = set(session_data.get("_approved_l3_commands") or [])
+                                    clean_cmd_target = re.sub(r'^timeout\s+\d+\s+', '', cmd_target.strip()).strip()
+                                    if cmd_target.strip() in approved_cmds or clean_cmd_target in approved_cmds:
+                                        log.info(f"[TypeSafe Co-Pilot] Command matches previously approved L3 command, allowing: {cmd_target}")
+                                    else:
+                                        try:
+                                            from system_one_gate import evaluate_tool_execution
+                                            tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
+                                            if tool_dec.decision_source in ("jev", "local") and not tool_dec.is_fallback:
+                                                session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
+                                            if not tool_dec.is_allowed:
+                                                log.critical(f"[TypeSafe Co-Pilot] High-risk tool event intercepted: {cmd_target} -> {tool_dec.reason}")
+                                                typesafe_blocked_info = {
+                                                    "tool": t_name,
+                                                    "target": cmd_target,
+                                                    "reason": tool_dec.reason or "安全策略拒绝了该高风险操作",
+                                                    "risk_level": tool_dec.risk_level,
+                                                    "call_id": call_key,
+                                                    "cwd": session_data.get("project") or ""
+                                                }
+                                                await sess.close()
+                                                should_break = True
+                                                break
+                                            else:
+                                                typesafe_tool_audits.append({
+                                                    "tool": t_name,
+                                                    "risk": tool_dec.risk_level,
+                                                    "latency_ms": tool_dec.latency_ms
+                                                })
+                                        except Exception as e:
+                                            log.warning(f"[TypeSafe Co-Pilot] Tool execution evaluation error: {e}")
                     elif event_type == "result":
                         if current_tool_action:
                             if current_tool_action not in completed_tool_steps:
@@ -1485,11 +1526,12 @@ async def execute_antigravity(
                         if raw_line:
                             stderr_text = f"{stderr_text}\n{raw_line}".strip()[-16384:]
 
+                think_seconds = max(0, int(now - process_start_time))
+                attempt_elapsed_seconds = max(0, int(now - attempt_start_time))
+                stall_seconds = int(now - last_progress_time)
+
                 if should_break or stream_is_done:
                     break
-
-                think_seconds = int(now - process_start_time)
-                stall_seconds = int(now - last_progress_time)
 
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
@@ -1535,10 +1577,10 @@ async def execute_antigravity(
                 # 假死判定与单轮时间预算看门狗：
                 # 统一遵循“首次超预算/停滞立即截停并携记忆胶囊自动重试一遍(Attempt 2)；若再次超预算则截停并推送『▶️ 继续执行』按钮进度卡片”
                 effective_turn_budget_seconds = max_turn_seconds + extended_bonus
-                if think_seconds >= effective_turn_budget_seconds and not is_worker_active:
+                if attempt_elapsed_seconds >= effective_turn_budget_seconds and not is_worker_active:
                     budget_intercepted = True
                     budget_exceeded_reason = (
-                        f"单轮执行耗时达到范围预算上限 ({think_seconds}s / {effective_turn_budget_seconds}s, "
+                        f"单轮执行耗时达到范围预算上限 ({attempt_elapsed_seconds}s / {effective_turn_budget_seconds}s, "
                         f"范围: {scope_info.get('scope_label') or scope_info.get('scope', 'modify')})"
                     )
                     log.warning(f"[BudgetWatchdog] Time budget exceeded on attempt {attempt} for chat {chat_id}: {budget_exceeded_reason}")
@@ -1589,7 +1631,7 @@ async def execute_antigravity(
                 # 判定是否切换到打字机文本流式输出：
                 # 1. 如果工具正在执行中，绝对不切换，保持显示规划步骤/工具进度卡片；
                 # 2. 如果是纯问答无工具任务，只要有文本输出立即打字机流式呈现；
-                # 3. 如果是多步骤复杂任务，仅在所有工具执行完毕、且模型输出实质性总结文本（>=25字）时才切换至打字机
+                # 3. 如果是多步骤复杂任务，仅在所有工具执行完毕、且模型输出实质性长总结文本（>=120字）时才切换至打字机
                 is_streaming_text = False
                 guard_before_delivery = (
                     config.TYPESAFE_ENABLED
@@ -1608,18 +1650,12 @@ async def execute_antigravity(
                         elif not is_complex:
                             is_streaming_text = True
                         else:
-                            min_chars = 15 if (planned_steps and current_plan_idx >= len(planned_steps) - 1) else 25
-                            if len(clean_partial) >= min_chars:
-                                if planned_steps:
-                                    current_plan_idx = len(planned_steps) - 1
+                            if len(clean_partial) >= 120:
                                 is_streaming_text = True
                     elif not is_complex:
                         is_streaming_text = True
                     else:
-                        min_chars = 15 if (planned_steps and current_plan_idx >= len(planned_steps) - 1) else 25
-                        if len(clean_partial) >= min_chars:
-                            if planned_steps:
-                                current_plan_idx = len(planned_steps) - 1
+                        if len(clean_partial) >= 120:
                             is_streaming_text = True
 
                 desired_patch_interval = 0.20
@@ -1696,6 +1732,9 @@ async def execute_antigravity(
                     "user_text": user_text,
                     "completed_steps": list(completed_tool_steps),
                     "planned_steps": list(planned_steps) if planned_steps else [],
+                    "current_plan_idx": current_plan_idx,
+                    "max_progress_pct": task_max_progress_pct,
+                    "elapsed_seconds": max(0, int(time.time() - process_start_time)),
                     "command": typesafe_blocked_info.get("target", ""),
                     "tool": typesafe_blocked_info.get("tool", ""),
                     "cwd": typesafe_blocked_info.get("cwd", session_data.get("project", "")),
@@ -1788,13 +1827,15 @@ async def execute_antigravity(
                     }
 
                 # 第二次重试依然超预算：立即截停并向飞书推送带「▶️ 继续执行剩余步骤」按钮的进度卡片
-                elapsed_s = int(time.time() - process_start_time)
+                elapsed_s = max(0, int(time.time() - process_start_time))
                 session_data["paused_task_state"] = {
                     "user_text": user_text,
                     "scope": scope_info.get("scope", "modify"),
                     "scope_label": scope_info.get("scope_label", ""),
                     "completed_steps": list(completed_tool_steps),
                     "planned_steps": list(planned_steps),
+                    "current_plan_idx": current_plan_idx,
+                    "max_progress_pct": task_max_progress_pct,
                     "partial_reply": (partial_clean or "")[:1200],
                     "elapsed_seconds": elapsed_s,
                     "reason": budget_exceeded_reason,
