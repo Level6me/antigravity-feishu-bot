@@ -298,6 +298,14 @@ async def _process_single_task(chat_id, task):
     if not user_text:
         return
 
+    # 会话轮次隔离守卫：若非审批卡片触发的自动接力轮次，严格重置本轮全量高危指令授权
+    is_authorized_resume = (
+        user_text.startswith("[AUTO_RESUME_AFTER_L3_APPROVAL]") or 
+        bool(session_data.pop("_is_authorized_l3_resume", False))
+    )
+    if not is_authorized_resume:
+        session_data.pop("_l3_authorize_all_turn", None)
+
     # 0. 插件前置输入拦截与预处理 (Hook: on_before_ai)
     # 优先拦截处理处于交互式等待状态的输入 (如配置网关 URL、Token 等)，杜绝无谓的 Jev 认知网关冷启动与 FastPath 串扰
     from plugin_manager import plugin_manager

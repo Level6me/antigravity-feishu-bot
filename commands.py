@@ -714,6 +714,15 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             except Exception as e:
                 log.debug(f"[commands] session_pool.reset_session on /stop: {e}")
 
+            # 清理本轮会话的高危指令全局授权状态与暂缓任务
+            try:
+                session_data.pop("_l3_authorize_all_turn", None)
+                session_data.pop("paused_l3_state", None)
+                from database import save_session_async
+                await save_session_async(chat_id, session_data)
+            except Exception:
+                pass
+
             # 触发所有插件的 on_task_stop 钩子，立即终止蜂鸣器循环音与报警
             try:
                 from plugin_manager import plugin_manager

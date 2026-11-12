@@ -1236,6 +1236,7 @@ async def execute_antigravity(
             current_tool_raw_sig = ""
             budget_intercepted = False
             budget_exceeded_reason = ""
+            conv_id = session_data.get("conversation") or getattr(sess, "conversation_id", "") or ""
 
             budget_retry_ctx = session_data.pop("_budget_retry_context", "") if attempt > 1 else ""
             prompt_for_attempt = (
@@ -1446,6 +1447,15 @@ async def execute_antigravity(
                                         session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
                             elif ts_tier == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
                                 cmd_target = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
+                                # 恢复 agy stream-json 在 StepView 阶段对长命令的省略号截断（512字符截断）
+                                if (cmd_target.endswith("…") or cmd_target.endswith("...")) and t_name == "run_command":
+                                    effective_cid = conv_id or session_data.get("conversation") or ""
+                                    if effective_cid:
+                                        from config import recover_full_tool_call
+                                        full_cmd = recover_full_tool_call(effective_cid, t_name, prefix_hint=cmd_target)
+                                        if full_cmd:
+                                            log.info(f"[TypeSafe Co-Pilot] Recovered un-truncated tool command ({len(full_cmd)} chars) from transcript_full.jsonl")
+                                            cmd_target = full_cmd
                                 if not cmd_target:
                                     if t_name in ("write_to_file", "replace_file_content", "edit_file", "write_file"):
                                         target_file = (t_params.get("TargetFile") or t_params.get("Path") or t_params.get("path") or "").strip()
@@ -1466,8 +1476,14 @@ async def execute_antigravity(
                                     evaluated_tool_calls.add(call_key)
                                     approved_cmds = set(session_data.get("_approved_l3_commands") or [])
                                     clean_cmd_target = re.sub(r'^timeout\s+\d+\s+', '', cmd_target.strip()).strip()
-                                    if cmd_target.strip() in approved_cmds or clean_cmd_target in approved_cmds:
-                                        log.info(f"[TypeSafe Co-Pilot] Command matches previously approved L3 command, allowing: {cmd_target}")
+                                    is_turn_authorized = session_data.get("_l3_authorize_all_turn", False)
+                                    if is_turn_authorized or cmd_target.strip() in approved_cmds or clean_cmd_target in approved_cmds:
+                                        log.info(f"[TypeSafe Co-Pilot] Command allowed (turn_authorized={is_turn_authorized}): {cmd_target}")
+                                        typesafe_tool_audits.append({
+                                            "tool": t_name,
+                                            "risk": "turn_authorized" if is_turn_authorized else "approved",
+                                            "latency_ms": 0.0
+                                        })
                                     else:
                                         try:
                                             from system_one_gate import evaluate_tool_execution
@@ -1475,6 +1491,14 @@ async def execute_antigravity(
                                             if tool_dec.decision_source in ("jev", "local") and not tool_dec.is_fallback:
                                                 session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
                                             if not tool_dec.is_allowed:
+                                                # 二次防御：若此时命令仍含截断符，再次尝试从 transcript 追回完整命令
+                                                if (cmd_target.endswith("…") or cmd_target.endswith("...")) and t_name == "run_command":
+                                                    effective_cid = conv_id or session_data.get("conversation") or ""
+                                                    if effective_cid:
+                                                        from config import recover_full_tool_call
+                                                        full_cmd = recover_full_tool_call(effective_cid, t_name, prefix_hint=cmd_target)
+                                                        if full_cmd:
+                                                            cmd_target = full_cmd
                                                 log.critical(f"[TypeSafe Co-Pilot] High-risk tool event intercepted: {cmd_target} -> {tool_dec.reason}")
                                                 typesafe_blocked_info = {
                                                     "tool": t_name,
@@ -2347,6 +2371,13 @@ async def execute_antigravity(
                         lambda: send_card_to_chat_sdk(chat_id, final_card),
                         label="final-card send to chat"
                     )
+
+            # 本轮会话任务已顺利完成并输出最终答复，自动回收本轮全量高危指令授权
+            if session_data.pop("_l3_authorize_all_turn", None):
+                try:
+                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                except Exception:
+                    pass
 
             return {"has_reply": bool(final_reply), "returncode": process.returncode, "is_error": is_error, "is_quota_error": is_quota_exhausted}
 

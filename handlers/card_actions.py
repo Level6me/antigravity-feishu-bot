@@ -146,6 +146,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             
     elif action_value.get("action") == "l3_confirm_action":
         decision = action_value.get("decision", "reject")
+        scope = action_value.get("scope", "once")  # "once" or "turn"
         command = action_value.get("command", "")
         tool = action_value.get("tool", "")
         cwd = action_value.get("cwd", "")
@@ -163,9 +164,9 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 async def do_cleanup_paused_l3():
                     try:
                         session_data = await get_session_async(chat_id)
-                        if "paused_l3_state" in session_data:
-                            session_data.pop("paused_l3_state", None)
-                            await save_session_async(chat_id, session_data)
+                        session_data.pop("paused_l3_state", None)
+                        session_data.pop("_l3_authorize_all_turn", None)
+                        await save_session_async(chat_id, session_data)
                     except Exception:
                         pass
                 asyncio.run_coroutine_threadsafe(do_cleanup_paused_l3(), app_state.main_loop)
@@ -173,28 +174,101 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             res_card = CardBuilder.build_l3_confirm_result_card(
                 status="rejected",
                 command=command,
-                operator_id=operator_open_id
+                operator_id=operator_open_id,
+                scope=scope
             )
             return P2CardActionTriggerResponse({
                 "card": {"type": "raw", "data": res_card},
                 "toast": {"type": "info", "content": "已拒绝执行该高危敏感指令"}
             })
 
-        # 3. 授权执行分支
-        log.info(f"[L3 Guard] Admin {operator_open_id} approved command in chat {chat_id}: {command} (cwd={cwd})")
+        # 3. 授权执行分支 (支持仅单次授权 / 本轮后续所有高危指令授权)
+        is_turn_scope = (scope == "turn")
+        log.info(f"[L3 Guard] Admin {operator_open_id} approved command in chat {chat_id} (scope={scope}): {command} (cwd={cwd})")
         running_card = CardBuilder.build_l3_confirm_result_card(
             status="running",
             command=command,
-            operator_id=operator_open_id
+            operator_id=operator_open_id,
+            scope=scope
         )
 
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_execute_approved():
+                nonlocal command
                 t0 = time.time()
                 ret_code = 0
                 out_text = ""
+
+                # 若用户选择授权本轮所有，立即标记当前 session 状态
+                if is_turn_scope:
+                    try:
+                        cur_sess = await get_session_async(chat_id)
+                        cur_sess["_l3_authorize_all_turn"] = True
+                        await save_session_async(chat_id, cur_sess)
+                    except Exception as s_err:
+                        log.warning(f"[L3 Guard] Failed saving _l3_authorize_all_turn: {s_err}")
+
+                # 多级恢复完整指令：优先从 session_data 提取完整未截断的指令，若破损则从 transcript_full.jsonl 找回
                 try:
-                    clean_cmd = re.sub(r'^timeout\s+\d+\s+', '', command.strip()).strip()
+                    s_data = await get_session_async(chat_id)
+                    p_l3 = s_data.get("paused_l3_state") or {}
+                    saved_cmd = (p_l3.get("command") or "").strip()
+                    if saved_cmd and not (saved_cmd.endswith("…") or saved_cmd.endswith("...")):
+                        command = saved_cmd
+                    elif not command or command.endswith("…") or command.endswith("..."):
+                        c_id = s_data.get("conversation")
+                        if c_id:
+                            from config import recover_full_tool_call
+                            rec_cmd = recover_full_tool_call(c_id, tool or "run_command", prefix_hint=command or saved_cmd)
+                            if rec_cmd:
+                                log.info(f"[L3 Guard] Recovered full un-truncated command ({len(rec_cmd)} chars) from transcript_full.jsonl")
+                                command = rec_cmd
+                except Exception as rec_err:
+                    log.warning(f"[L3 Guard] Failed while resolving full command: {rec_err}")
+
+                clean_cmd = re.sub(r'^timeout\s+\d+\s+', '', command.strip()).strip()
+
+                # 语法预检与截断熔断防护：严防将未闭合引号或带省略号的破损命令交付 shell 执行
+                is_truncated = clean_cmd.endswith("…") or clean_cmd.endswith("...")
+                syntax_err = ""
+                if not is_truncated:
+                    try:
+                        sh_check = await asyncio.create_subprocess_exec(
+                            "sh", "-n", "-c", clean_cmd,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        _, chk_err = await asyncio.wait_for(sh_check.communicate(), timeout=3.0)
+                        if sh_check.returncode != 0:
+                            syntax_err = chk_err.decode('utf-8', errors='replace').strip()
+                    except Exception as e:
+                        log.warning(f"[L3 Guard] Syntax check helper exception: {e}")
+
+                if is_truncated or (syntax_err and "Syntax error: Unterminated quoted string" in syntax_err):
+                    out_text = (
+                        "⚠️【安全拦截】待执行的系统指令在模型输出或上报流中已被截断（检测到未闭合引号或省略号），"
+                        "为防止破损指令引发语法崩溃或不可逆的破坏，已安全熔断中止执行！\n"
+                    )
+                    if syntax_err:
+                        out_text += f"语法解析错误详情：{syntax_err}\n"
+                    out_text += "请直接在对话中将该指令拆解或重新发送执行。"
+                    ret_code = -1
+                    elapsed = time.time() - t0
+                    final_card = CardBuilder.build_l3_confirm_result_card(
+                        status="failed",
+                        command=command,
+                        operator_id=operator_open_id,
+                        output=out_text,
+                        returncode=ret_code,
+                        elapsed_seconds=elapsed,
+                        scope=scope
+                    )
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: patch_interactive_card_sdk(card_message_id, final_card)
+                    )
+                    return
+
+                try:
                     proc = await asyncio.create_subprocess_shell(
                         clean_cmd,
                         cwd=cwd if (cwd and os.path.isdir(cwd)) else None,
@@ -242,7 +316,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     operator_id=operator_open_id,
                     output=out_text,
                     returncode=ret_code,
-                    elapsed_seconds=elapsed
+                    elapsed_seconds=elapsed,
+                    scope=scope
                 )
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: patch_interactive_card_sdk(card_message_id, final_card)
@@ -268,6 +343,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                             if _c and _c not in approved_list:
                                 approved_list.append(_c)
                         session_data["_approved_l3_commands"] = approved_list[-10:]
+                        if is_turn_scope:
+                            session_data["_l3_authorize_all_turn"] = True
                         session_data["_is_authorized_l3_resume"] = True
                         session_data["_resumed_task_progress"] = {
                             "user_text": orig_q,
@@ -280,11 +357,13 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                         await save_session_async(chat_id, session_data)
 
                         steps_str = " -> ".join(comp_steps[-8:]) if comp_steps else "无"
+                        scope_str = "⚡ 本轮后续所有高危指令免密放行 (本轮结束自动失效)" if is_turn_scope else "仅限本次指令"
 
                         resume_prompt = (
                             f"[AUTO_RESUME_AFTER_L3_APPROVAL]\n"
                             f"管理员已在飞书审批卡片中【确认授权】并已在宿主机完成该高危敏感指令的执行：\n"
                             f"- 授权执行指令：`{command}`\n"
+                            f"- 授权范围：{scope_str}\n"
                             f"- 执行状态：成功完成 (退出码: {ret_code})\n"
                             f"- 终端输出结果：\n```text\n{out_text[:1000]}\n```\n"
                             f"- 前序任务目标：{orig_q}\n"
@@ -293,15 +372,16 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                         )
                         simulated_content = json.dumps({"text": resume_prompt}, ensure_ascii=False)
                         await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
-                        log.info(f"[L3 Guard] Successfully triggered auto-resume for chat {chat_id} after approved execution")
+                        log.info(f"[L3 Guard] Successfully triggered auto-resume for chat {chat_id} after approved execution (scope={scope})")
                     except Exception as resume_err:
                         log.error(f"[L3 Guard] Failed to trigger auto-resume after approval: {resume_err}")
 
             asyncio.run_coroutine_threadsafe(do_execute_approved(), app_state.main_loop)
 
+        toast_msg = "已确认授权：本轮后续高危指令将自动放行，正在后台调度执行..." if is_turn_scope else "已确认授权单次执行，正在后台调度执行..."
         return P2CardActionTriggerResponse({
             "card": {"type": "raw", "data": running_card},
-            "toast": {"type": "success", "content": "已确认授权，正在后台调度执行..."}
+            "toast": {"type": "success", "content": toast_msg}
         })
 
     elif action_value.get("action") == "extend_wait":

@@ -1,6 +1,7 @@
 import os
 import sys
 import shutil
+import json
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
@@ -112,6 +113,61 @@ def get_transcript_path(conv_id: str) -> str:
         "logs",
         "transcript.jsonl",
     )
+
+
+def get_transcript_full_path(conv_id: str) -> str:
+    """Canonical transcript_full.jsonl path for a conversation id."""
+    return os.path.join(
+        get_brain_dir(),
+        conv_id,
+        ".system_generated",
+        "logs",
+        "transcript_full.jsonl",
+    )
+
+
+def recover_full_tool_call(conv_id: str, tool_name: str = "run_command", prefix_hint: str = "") -> Optional[str]:
+    """Recover un-truncated full tool call command from transcript_full.jsonl (or transcript.jsonl).
+    agy in stream-json mode truncates long tool parameters to ~512 chars with an ellipsis ('…' or '...').
+    This function reads the un-truncated full argument from transcript_full.jsonl.
+    """
+    if not conv_id:
+        return None
+    full_path = get_transcript_full_path(conv_id)
+    compact_path = get_transcript_path(conv_id)
+    paths_to_try = [full_path, compact_path]
+
+    clean_hint = (prefix_hint or "").rstrip("…. ").strip()
+
+    for p in paths_to_try:
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except Exception:
+                    continue
+                for tc in data.get("tool_calls") or []:
+                    if tc.get("name") == tool_name:
+                        args = tc.get("args") or {}
+                        cmd = args.get("CommandLine") or args.get("command")
+                        if isinstance(cmd, str) and cmd.strip():
+                            clean_cmd = cmd.strip()
+                            if not clean_hint:
+                                return clean_cmd
+                            # Check prefix matching (up to 60 chars)
+                            check_len = min(60, len(clean_hint))
+                            if clean_cmd.startswith(clean_hint[:check_len]):
+                                return clean_cmd
+        except Exception:
+            pass
+    return None
 
 
 def get_oauth_token_path() -> str:

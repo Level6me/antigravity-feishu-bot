@@ -376,7 +376,10 @@ def build_l3_high_risk_confirm_card(
             "tag": "markdown",
             "content": (
                 "🛡️ **System One (L3 全流程守卫) 高危操作审批**\n\n"
-                "检测到当前任务尝试在主机环境中调用具有高风险的系统指令。为了防止误操作或系统破坏，**执行已暂缓**，请您核对并选择操作："
+                "检测到当前任务尝试在主机环境中调用具有高风险的系统指令。为了防止误操作或系统破坏，**执行已暂缓**，请您核对并选择操作：\n"
+                "• **仅授权单次**：仅放行并执行当前这一条指令，后续高危操作仍需二次审批。\n"
+                "• **授权本轮所有**：放行当前指令，并**信任当前这一轮会话**后续的所有高危操作（本轮任务完成后自动重置失效）。\n"
+                "• **拒绝并终止**：立即终止当前任务执行。"
             )
         },
         {
@@ -398,12 +401,13 @@ def build_l3_high_risk_confirm_card(
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "⚠️ 授权执行 (Authorize)"
+                        "content": "⚠️ 仅授权单次 (Once)"
                     },
                     "type": "danger",
                     "value": {
                         "action": "l3_confirm_action",
                         "decision": "approve",
+                        "scope": "once",
                         "tool": tool_name,
                         "command": clean_cmd,
                         "risk_level": risk_level,
@@ -416,7 +420,31 @@ def build_l3_high_risk_confirm_card(
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "🚫 拒绝并终止 (Reject)"
+                        "content": "⚡ 授权本轮所有 (Turn)"
+                    },
+                    "type": "primary",
+                    "value": {
+                        "action": "l3_confirm_action",
+                        "decision": "approve",
+                        "scope": "turn",
+                        "tool": tool_name,
+                        "command": clean_cmd,
+                        "risk_level": risk_level,
+                        "cwd": project_dir,
+                        "call_id": call_id,
+                        "chat_id": chat_id
+                    }
+                }
+            ]
+        },
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "🚫 拒绝并终止当前任务 (Reject)"
                     },
                     "type": "default",
                     "value": {
@@ -451,7 +479,8 @@ def build_l3_confirm_result_card(
     operator_id: str = "",
     output: str = "",
     returncode: Optional[int] = None,
-    elapsed_seconds: Optional[float] = None
+    elapsed_seconds: Optional[float] = None,
+    scope: str = "once"
 ) -> dict:
     """Build result card for L3 high-risk action confirmation state transition."""
     operator_tag = f"<at user_id=\"{operator_id}\"></at>" if operator_id else "管理员"
@@ -459,10 +488,17 @@ def build_l3_confirm_result_card(
     if len(cmd_preview) > 300:
         cmd_preview = f"{cmd_preview[:300]}..."
 
+    is_turn = (scope == "turn")
+    scope_tag = "⚡ 本轮所有高危指令" if is_turn else "⚠️ 仅本次指令"
+
     if status == "running":
         header_template = "turquoise"
-        title_text = "⏳ 高危指令已授权，正在执行..."
-        desc = f"👤 操作人：{operator_tag}\n\n已确认授权执行该高危敏感指令，系统正在受控环境中调度执行，请稍候..."
+        title_text = "⚡ 高危指令本轮已授权，正在执行..." if is_turn else "⏳ 高危指令已授权，正在执行..."
+        desc = (
+            f"👤 操作人：{operator_tag}\n\n"
+            f"已确认【{'授权本轮后续所有高危指令' if is_turn else '授权单次执行'}】，"
+            f"当前指令正在受控环境中调度执行，{'后续同轮高危操作将自动放行...' if is_turn else '请稍候...'}"
+        )
         out_block = []
     elif status == "rejected":
         header_template = "grey"
@@ -476,6 +512,7 @@ def build_l3_confirm_result_card(
         ret_str = f"`{returncode}`" if returncode is not None else "`0`"
         desc = (
             f"👤 审批人：{operator_tag}\n"
+            f"• **授权范围**：`{scope_tag}`{' (本轮结束自动失效)' if is_turn else ''}\n"
             f"• **执行状态**：成功完成\n"
             f"• **执行耗时**：{elapsed_str}\n"
             f"• **退出状态码**：{ret_str}\n"
