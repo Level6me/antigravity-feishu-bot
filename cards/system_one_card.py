@@ -98,8 +98,17 @@ def build_typesafe_config_card(
         },
         {
             "tag": "action",
-            "layout": "bisect",
+            "layout": "flow",
             "actions": [
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "✓ decision-preview" if model == "decision-model-preview" else "切为阿里 decision-preview"
+                    },
+                    "type": "primary" if model == "decision-model-preview" else "default",
+                    "value": {"action": "set_typesafe_model", "model": "decision-model-preview"}
+                },
                 {
                     "tag": "button",
                     "text": {
