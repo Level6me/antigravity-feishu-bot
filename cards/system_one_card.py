@@ -126,6 +126,15 @@ def build_typesafe_config_card(
                     },
                     "type": "primary" if model == "jev-1.13.0" else "default",
                     "value": {"action": "set_typesafe_model", "model": "jev-1.13.0"}
+                },
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": f"✓ 自定义: {model}" if model not in ("decision-model-preview", "jev-latest", "jev-1.13.0") else "➕ 输入其他模型"
+                    },
+                    "type": "primary" if model not in ("decision-model-preview", "jev-latest", "jev-1.13.0") else "default",
+                    "value": {"action": "prompt_typesafe_model"}
                 }
             ]
         },
@@ -173,13 +182,25 @@ def build_typesafe_config_card(
             "actions": [
                 {
                     "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🏷️ 设置模型名称"},
+                    "type": "default",
+                    "value": {"action": "prompt_typesafe_model"}
+                },
+                {
+                    "tag": "button",
                     "text": {
                         "tag": "plain_text",
                         "content": "🛑 停用网关" if enabled else "🟢 启用网关"
                     },
                     "type": "default" if enabled else "primary",
                     "value": {"action": "toggle_typesafe_enabled"}
-                },
+                }
+            ]
+        },
+        {
+            "tag": "action",
+            "layout": "flow",
+            "actions": [
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "🗑️ 清除 Key"},

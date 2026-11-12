@@ -995,6 +995,23 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_prompt_ts_url(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复 Base URL"}})
 
+    elif action_value.get("action") == "prompt_typesafe_model":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该设置仅管理员可用！"}})
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def do_prompt_ts_model():
+                session_data = await get_session_async(chat_id)
+                session_data["pending_command"] = PendingCommand.TYPESAFE_SET_MODEL.value
+                await save_session_async(chat_id, session_data)
+                msg = (
+                    "🤖 **设置决策网关模型名称 (Model)**\n\n"
+                    "请在此直接回复您想要使用的模型名称（例如：`decision-model-preview` 或 `jev-latest`）：\n\n"
+                    "*(系统收到后将自动写入本地 .env 并即刻热生效)*"
+                )
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+            asyncio.run_coroutine_threadsafe(do_prompt_ts_model(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复模型名称"}})
+
     elif action_value.get("action") == "toggle_typesafe_enabled":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
