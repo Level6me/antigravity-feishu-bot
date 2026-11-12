@@ -2010,11 +2010,17 @@ async def execute_antigravity(
             if not is_quota_exhausted and not typesafe_blocked_info:
                 reply_text = extract_final_chinese_response(reply_text)
 
+            # 若成功提取到模型有效回复，说明本轮核心任务/文本已正常生成交付，不可判定为执行失败或追加故障诊断
+            if reply_text and not is_quota_exhausted:
+                is_error = False
+                session_data["last_execution_error"] = False
+
             from plugin_manager import plugin_manager
             reply_text = await plugin_manager.dispatch_after_ai(reply_text, chat_id, session_data)
 
             # Level 3 (Co-Pilot): 任务执行异常时的自愈根因诊断
-            if is_error and not is_quota_exhausted and not typesafe_blocked_info:
+            # 仅当任务确实处于失败状态且未生成有效答复时，才执行故障诊断并追加诊断卡片
+            if is_error and not reply_text and not is_quota_exhausted and not typesafe_blocked_info:
                 if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
                     try:
                         from system_one_gate import evaluate_tool_error
