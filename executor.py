@@ -1936,7 +1936,7 @@ async def execute_antigravity(
                 final_reply = extract_final_response_from_transcript(transcript_path, initial_transcript_size)
             
             # 探测是否由于模型配额耗尽或云端安全过滤器误报导致报错/拦截
-            from utils.quota import detect_and_format_quota_error
+            from utils.quota import detect_and_format_quota_error, is_quota_error
             combined_err_text = f"{stream_error_msg}\n{stderr_text}\n{accumulated_text}\n{final_reply or ''}".strip()
             quota_err_reply = None
 
@@ -2016,12 +2016,16 @@ async def execute_antigravity(
                 )
                 is_error = False
 
-            elif not final_reply or final_reply == "Sorry, I couldn't generate a response.":
+            elif (
+                not final_reply
+                or final_reply == "Sorry, I couldn't generate a response."
+                or (is_error and is_quota_error(f"{stream_error_msg}\n{stderr_text}"))
+            ):
                 quota_err_reply = await detect_and_format_quota_error(combined_err_text, model=session_data.get("model", ""))
                 if quota_err_reply:
                     is_quota_exhausted = True
                     final_reply = quota_err_reply
-                else:
+                elif not final_reply or final_reply == "Sorry, I couldn't generate a response.":
                     system_err_reply = detect_and_format_agent_system_error(combined_err_text)
                     if system_err_reply:
                         final_reply = system_err_reply
@@ -2058,8 +2062,16 @@ async def execute_antigravity(
             from plugin_manager import plugin_manager
             reply_text = await plugin_manager.dispatch_after_ai(reply_text, chat_id, session_data)
 
+            # 若经标签清洗后 reply_text 为空且任务异常结束，先于 System One 故障诊断执行额度耗尽检测，避免额度报错被误判为 general_error
+            if is_error and not reply_text and not is_quota_exhausted and not typesafe_blocked_info:
+                if not quota_err_reply:
+                    quota_err_reply = await detect_and_format_quota_error(combined_err_text, model=session_data.get("model", ""))
+                if quota_err_reply:
+                    reply_text = quota_err_reply
+                    is_quota_exhausted = True
+
             # Level 3 (Co-Pilot): 任务执行异常时的自愈根因诊断
-            # 仅当任务确实处于失败状态且未生成有效答复时，才执行故障诊断并追加诊断卡片
+            # 仅当任务确实处于失败状态且未生成有效答复（且非配额耗尽）时，才执行故障诊断并追加诊断卡片
             if is_error and not reply_text and not is_quota_exhausted and not typesafe_blocked_info:
                 if getattr(config, "TYPESAFE_TIER", "gateway") == "copilot" and getattr(config, "TYPESAFE_ENABLED", True):
                     try:
