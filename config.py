@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import shutil
 import json
@@ -126,7 +127,13 @@ def get_transcript_full_path(conv_id: str) -> str:
     )
 
 
-def recover_full_tool_call(conv_id: str, tool_name: str = "run_command", prefix_hint: str = "") -> Optional[str]:
+def recover_full_tool_call(
+    conv_id: str,
+    tool_name: str = "run_command",
+    prefix_hint: str = "",
+    retries: int = 2,
+    retry_delay: float = 0.08,
+) -> Optional[str]:
     """Recover un-truncated full tool call command from transcript_full.jsonl (or transcript.jsonl).
     agy in stream-json mode truncates long tool parameters to ~512 chars with an ellipsis ('…' or '...').
     This function reads the un-truncated full argument from transcript_full.jsonl.
@@ -138,35 +145,63 @@ def recover_full_tool_call(conv_id: str, tool_name: str = "run_command", prefix_
     paths_to_try = [full_path, compact_path]
 
     clean_hint = (prefix_hint or "").rstrip("…. ").strip()
+    clean_hint_no_timeout = re.sub(r"^timeout\s+(?:-k\s+\S+\s+)?\d+(?:\.\d+)?[smhd]?\s+", "", clean_hint).strip()
 
-    for p in paths_to_try:
-        if not os.path.exists(p):
-            continue
-        try:
-            with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-            for line in reversed(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except Exception:
-                    continue
-                for tc in data.get("tool_calls") or []:
-                    if tc.get("name") == tool_name:
-                        args = tc.get("args") or {}
-                        cmd = args.get("CommandLine") or args.get("command")
-                        if isinstance(cmd, str) and cmd.strip():
-                            clean_cmd = cmd.strip()
-                            if not clean_hint:
-                                return clean_cmd
-                            # Check prefix matching (up to 60 chars)
-                            check_len = min(60, len(clean_hint))
-                            if clean_cmd.startswith(clean_hint[:check_len]):
-                                return clean_cmd
-        except Exception:
-            pass
+    def _matches_hint(candidate: str) -> bool:
+        if not clean_hint:
+            return True
+        check_len = min(60, len(clean_hint))
+        if check_len > 0 and candidate.startswith(clean_hint[:check_len]):
+            return True
+        cand_no_timeout = re.sub(r"^timeout\s+(?:-k\s+\S+\s+)?\d+(?:\.\d+)?[smhd]?\s+", "", candidate).strip()
+        check_len_nt = min(60, len(clean_hint_no_timeout))
+        if check_len_nt > 0 and cand_no_timeout.startswith(clean_hint_no_timeout[:check_len_nt]):
+            return True
+        return False
+
+    import time as _time
+    max_attempts = max(1, retries + 1)
+    for attempt in range(max_attempts):
+        for p in paths_to_try:
+            if not os.path.exists(p):
+                continue
+            try:
+                with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                for line in reversed(lines):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+                    tool_calls = list(data.get("tool_calls") or [])
+                    step_obj = data.get("step")
+                    if isinstance(step_obj, dict):
+                        t_info = step_obj.get("tool_info")
+                        if isinstance(t_info, dict):
+                            tool_calls.append({
+                                "name": step_obj.get("tool_name") or step_obj.get("name") or "",
+                                "args": t_info.get("parameters") or t_info.get("args") or {},
+                            })
+                    for tc in tool_calls:
+                        if tc.get("name") == tool_name or not tool_name:
+                            args = tc.get("args") or tc.get("parameters") or {}
+                            if not isinstance(args, dict):
+                                continue
+                            cmd = args.get("CommandLine") or args.get("command")
+                            if isinstance(cmd, str) and cmd.strip():
+                                clean_cmd = cmd.strip()
+                                # Never treat a still-truncated string from compact transcript.jsonl as recovered
+                                if clean_cmd.endswith("…") or clean_cmd.endswith("..."):
+                                    continue
+                                if _matches_hint(clean_cmd):
+                                    return clean_cmd
+            except Exception:
+                pass
+        if attempt < max_attempts - 1 and retry_delay > 0:
+            _time.sleep(retry_delay)
     return None
 
 

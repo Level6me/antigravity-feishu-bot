@@ -299,9 +299,11 @@ async def _process_single_task(chat_id, task):
         return
 
     # 会话轮次隔离守卫：若非审批卡片触发的自动接力轮次，严格重置本轮全量高危指令授权
+    # 注意：必须先无条件 pop _is_authorized_l3_resume，避免因 or 短路导致该标记残留到下一轮普通用户提问
+    _popped_l3_resume_flag = bool(session_data.pop("_is_authorized_l3_resume", False))
     is_authorized_resume = (
-        user_text.startswith("[AUTO_RESUME_AFTER_L3_APPROVAL]") or 
-        bool(session_data.pop("_is_authorized_l3_resume", False))
+        user_text.lstrip().startswith(("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]"))
+        or _popped_l3_resume_flag
     )
     if not is_authorized_resume:
         session_data.pop("_l3_authorize_all_turn", None)
@@ -431,9 +433,12 @@ async def _process_single_task(chat_id, task):
     session_data["bot_reply_msg_id"] = bot_reply_msg_id
 
     # 1. 安全沙箱门禁拦截（基于 TypeSafe Noul 概率评判与置信度兜底；豁免系统内部已授权接力/续跑消息）
-    is_internal_resume = user_text.lstrip().startswith(
-        ("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]")
-    ) or bool(session_data.pop("_is_authorized_l3_resume", False))
+    _popped_internal_resume = bool(session_data.pop("_is_authorized_l3_resume", False))
+    is_internal_resume = (
+        is_authorized_resume
+        or _popped_internal_resume
+        or user_text.lstrip().startswith(("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]"))
+    )
     if decision.is_dangerous and not is_internal_resume:
         log.warning(f"[Security] Intercepted dangerous request: '{user_text}' (prob={decision.danger_prob:.2f})")
         warn_card = CardBuilder.build_security_warning(user_text)

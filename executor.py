@@ -1449,6 +1449,8 @@ async def execute_antigravity(
                                 cmd_target = (t_params.get("CommandLine") or t_params.get("command") or "").strip()
                                 # 恢复 agy stream-json 在 StepView 阶段对长命令的省略号截断（512字符截断）
                                 if (cmd_target.endswith("…") or cmd_target.endswith("...")) and t_name == "run_command":
+                                    if not (conv_id or session_data.get("conversation")) and os.path.exists(log_file_path):
+                                        await _sync_conversation_id_from_log(log_file_path)
                                     effective_cid = conv_id or session_data.get("conversation") or ""
                                     if effective_cid:
                                         from config import recover_full_tool_call
@@ -1752,8 +1754,21 @@ async def execute_antigravity(
                 is_error = False
                 session_data["last_execution_error"] = False
                 session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策 · 高危操作待审批"
+                # 防止多次连续 L3 审批时将 [AUTO_RESUME_AFTER_L3_APPROVAL] 嵌套进 user_text 引发套娃膨胀
+                orig_l3_user_text = user_text
+                if (orig_l3_user_text or "").lstrip().startswith(("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]")):
+                    m_orig_target = re.search(r"-\s*前序任务目标：(.+)", orig_l3_user_text)
+                    if m_orig_target:
+                        orig_l3_user_text = m_orig_target.group(1).strip()
+                    else:
+                        orig_l3_user_text = (
+                            (session_data.get("_resumed_task_progress") or {}).get("user_text")
+                            or (session_data.get("paused_l3_state") or {}).get("user_text")
+                            or session_data.get("last_user_query")
+                            or "继续执行未完成的任务"
+                        )
                 session_data["paused_l3_state"] = {
-                    "user_text": user_text,
+                    "user_text": orig_l3_user_text,
                     "completed_steps": list(completed_tool_steps),
                     "planned_steps": list(planned_steps) if planned_steps else [],
                     "current_plan_idx": current_plan_idx,
@@ -1762,6 +1777,7 @@ async def execute_antigravity(
                     "command": typesafe_blocked_info.get("target", ""),
                     "tool": typesafe_blocked_info.get("tool", ""),
                     "cwd": typesafe_blocked_info.get("cwd", session_data.get("project", "")),
+                    "conv_id": conv_id or session_data.get("conversation", ""),
                     "bot_reply_msg_id": bot_reply_msg_id,
                     "timestamp": time.time(),
                 }

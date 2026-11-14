@@ -368,6 +368,9 @@ def build_l3_high_risk_confirm_card(
 
     clean_cmd = command.strip()
     cmd_preview = clean_cmd if len(clean_cmd) <= 300 else f"{clean_cmd[:300]}..."
+    # 防止超长命令（如 >10KB 的内联脚本）塞入 3 个按钮 value 导致飞书卡片 JSON 超出 30KB 限制报错 (code 2200/230025)
+    # 完整未截断指令已保存在 session_data["paused_l3_state"]["command"] 与 transcript_full.jsonl 中
+    btn_cmd = clean_cmd if len(clean_cmd) <= 1500 else f"{clean_cmd[:1500]}..."
     clean_reason = reason.strip() or "Jev 认知模型判定该操作具有破坏性或不确定性风险"
     cwd_display = project_dir if (project_dir and project_dir not in ["默认", "Default"]) else "默认工作区"
 
@@ -409,7 +412,7 @@ def build_l3_high_risk_confirm_card(
                         "decision": "approve",
                         "scope": "once",
                         "tool": tool_name,
-                        "command": clean_cmd,
+                        "command": btn_cmd,
                         "risk_level": risk_level,
                         "cwd": project_dir,
                         "call_id": call_id,
@@ -428,7 +431,7 @@ def build_l3_high_risk_confirm_card(
                         "decision": "approve",
                         "scope": "turn",
                         "tool": tool_name,
-                        "command": clean_cmd,
+                        "command": btn_cmd,
                         "risk_level": risk_level,
                         "cwd": project_dir,
                         "call_id": call_id,
@@ -451,7 +454,7 @@ def build_l3_high_risk_confirm_card(
                         "action": "l3_confirm_action",
                         "decision": "reject",
                         "tool": tool_name,
-                        "command": clean_cmd,
+                        "command": btn_cmd,
                         "risk_level": risk_level,
                         "cwd": project_dir,
                         "call_id": call_id,
@@ -518,7 +521,7 @@ def build_l3_confirm_result_card(
             f"• **退出状态码**：{ret_str}\n"
             f"• **后续推进**：已自动唤醒 AI 接力推进剩余任务..."
         )
-        clean_out = output.strip()
+        clean_out = output.strip().replace("```", "'''")
         if len(clean_out) > 2000:
             clean_out = f"{clean_out[:2000]}\n... (日志过长已截断)"
         out_content = clean_out if clean_out else "(命令执行成功，无标准输出)"
@@ -529,6 +532,30 @@ def build_l3_confirm_result_card(
                 "content": f"📋 **执行输出 (Output)**：\n```bash\n{out_content}\n```"
             }
         ]
+    elif status == "warning":
+        header_template = "orange"
+        title_text = "⚠️ 高危指令返回非零状态，AI 正在自愈接力..."
+        elapsed_str = f"`{elapsed_seconds:.2f}s`" if elapsed_seconds is not None else "`未知`"
+        ret_str = f"`{returncode}`" if returncode is not None else "`非0`"
+        desc = (
+            f"👤 审批人：{operator_tag}\n"
+            f"• **授权范围**：`{scope_tag}`{' (本轮结束自动失效)' if is_turn else ''}\n"
+            f"• **执行状态**：返回非零状态码 / 触发安全拆解保护\n"
+            f"• **执行耗时**：{elapsed_str}\n"
+            f"• **退出状态码**：{ret_str}\n"
+            f"• **后续推进**：已将输出与报错回传 AI 自动修正并继续推进任务..."
+        )
+        clean_out = output.strip().replace("```", "'''")
+        if len(clean_out) > 2000:
+            clean_out = f"{clean_out[:2000]}\n... (日志过长已截断)"
+        out_content = clean_out if clean_out else "(无详细错误输出)"
+        out_block = [
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": f"⚠️ **执行反馈 (Diagnostic Output)**：\n```bash\n{out_content}\n```"
+            }
+        ]
     else:  # failed
         header_template = "carmine"
         title_text = "❌ 高危指令执行返回异常"
@@ -536,11 +563,12 @@ def build_l3_confirm_result_card(
         ret_str = f"`{returncode}`" if returncode is not None else "`非0`"
         desc = (
             f"👤 审批人：{operator_tag}\n"
+            f"• **授权范围**：`{scope_tag}`{' (本轮结束自动失效)' if is_turn else ''}\n"
             f"• **执行状态**：执行失败 / 异常中断\n"
             f"• **执行耗时**：{elapsed_str}\n"
             f"• **退出状态码**：{ret_str}"
         )
-        clean_out = output.strip()
+        clean_out = output.strip().replace("```", "'''")
         if len(clean_out) > 2000:
             clean_out = f"{clean_out[:2000]}\n... (日志过长已截断)"
         out_content = clean_out if clean_out else "(无详细错误输出)"

@@ -194,10 +194,11 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_execute_approved():
-                nonlocal command
+                nonlocal command, tool, cwd
                 t0 = time.time()
                 ret_code = 0
                 out_text = ""
+                p_l3 = {}
 
                 # 若用户选择授权本轮所有，立即标记当前 session 状态
                 if is_turn_scope:
@@ -213,28 +214,59 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     s_data = await get_session_async(chat_id)
                     p_l3 = s_data.get("paused_l3_state") or {}
                     saved_cmd = (p_l3.get("command") or "").strip()
+                    if not tool and p_l3.get("tool"):
+                        tool = p_l3.get("tool")
+                    if not cwd and p_l3.get("cwd"):
+                        cwd = p_l3.get("cwd")
                     if saved_cmd and not (saved_cmd.endswith("…") or saved_cmd.endswith("...")):
                         command = saved_cmd
                     elif not command or command.endswith("…") or command.endswith("..."):
-                        c_id = s_data.get("conversation")
+                        c_id = p_l3.get("conv_id") or s_data.get("conversation")
                         if c_id:
                             from config import recover_full_tool_call
-                            rec_cmd = recover_full_tool_call(c_id, tool or "run_command", prefix_hint=command or saved_cmd)
+                            rec_cmd = recover_full_tool_call(
+                                c_id,
+                                tool or "run_command",
+                                prefix_hint=saved_cmd or command,
+                            )
                             if rec_cmd:
                                 log.info(f"[L3 Guard] Recovered full un-truncated command ({len(rec_cmd)} chars) from transcript_full.jsonl")
                                 command = rec_cmd
                 except Exception as rec_err:
                     log.warning(f"[L3 Guard] Failed while resolving full command: {rec_err}")
 
-                clean_cmd = re.sub(r'^timeout\s+\d+\s+', '', command.strip()).strip()
+                # 解析前置 timeout <N>[smhd] 参数，兼顾 shell 关键字兼容性与真实超时保护
+                raw_cmd_stripped = command.strip()
+                wait_timeout_sec = 300.0
+                m_timeout = re.match(
+                    r"^timeout\s+(?:-k\s+\S+\s+)?(\d+(?:\.\d+)?)([smhd])?\s+(.*)",
+                    raw_cmd_stripped,
+                    re.DOTALL,
+                )
+                if m_timeout:
+                    val_num = float(m_timeout.group(1))
+                    unit = (m_timeout.group(2) or "s").lower()
+                    mult = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}.get(unit, 1.0)
+                    wait_timeout_sec = min(1800.0, max(20.0, val_num * mult + 10.0))
+                    clean_cmd = m_timeout.group(3).strip()
+                else:
+                    clean_cmd = re.sub(r"^timeout\s+\d+\s+", "", raw_cmd_stripped).strip()
 
-                # 语法预检与截断熔断防护：严防将未闭合引号或带省略号的破损命令交付 shell 执行
+                eff_tool = (tool or "run_command").strip()
+                is_non_shell_tool = (
+                    eff_tool not in ("", "run_command")
+                    or bool(re.match(r"^(?:write_to_file|replace_file_content|edit_file|write_file|tool:|tool_action:)\b", clean_cmd))
+                )
+
+                shell_bin = "/bin/bash" if os.path.exists("/bin/bash") else "sh"
+
+                # 语法预检与截断熔断防护：严防将未闭合引号或带省略号的破损命令直接交付 shell 执行
                 is_truncated = clean_cmd.endswith("…") or clean_cmd.endswith("...")
                 syntax_err = ""
-                if not is_truncated:
+                if not is_non_shell_tool and not is_truncated and clean_cmd:
                     try:
                         sh_check = await asyncio.create_subprocess_exec(
-                            "sh", "-n", "-c", clean_cmd,
+                            shell_bin, "-n", "-c", clean_cmd,
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE
                         )
@@ -244,62 +276,79 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     except Exception as e:
                         log.warning(f"[L3 Guard] Syntax check helper exception: {e}")
 
-                if is_truncated or (syntax_err and "Syntax error: Unterminated quoted string" in syntax_err):
+                is_unterminated_quote = bool(
+                    syntax_err and (
+                        "Unterminated quoted string" in syntax_err
+                        or "unexpected EOF while looking for matching" in syntax_err
+                        or "syntax error: unexpected end of file" in syntax_err.lower()
+                    )
+                )
+
+                if is_non_shell_tool:
+                    out_text = f"已确认授权工具操作 ({eff_tool})，正在唤醒 AI 继续完成该文件/工具操作..."
+                    ret_code = 0
+                elif is_truncated or is_unterminated_quote:
+                    log.warning(
+                        f"[L3 Guard] Intercepted truncated/broken command on approval in chat {chat_id} "
+                        f"(is_truncated={is_truncated}, syntax_err={syntax_err})"
+                    )
                     out_text = (
-                        "⚠️【安全拦截】待执行的系统指令在模型输出或上报流中已被截断（检测到未闭合引号或省略号），"
-                        "为防止破损指令引发语法崩溃或不可逆的破坏，已安全熔断中止执行！\n"
+                        "⚠️【安全拆解保护】待执行的单行系统指令因超长在上报流中发生截断（检测到省略号或未闭合引号），"
+                        "已拦截直接执行并自动唤醒 AI 将该脚本拆解写入临时文件后安全重试。\n"
                     )
                     if syntax_err:
-                        out_text += f"语法解析错误详情：{syntax_err}\n"
-                    out_text += "请直接在对话中将该指令拆解或重新发送执行。"
-                    ret_code = -1
-                    elapsed = time.time() - t0
-                    final_card = CardBuilder.build_l3_confirm_result_card(
-                        status="failed",
-                        command=command,
-                        operator_id=operator_open_id,
-                        output=out_text,
-                        returncode=ret_code,
-                        elapsed_seconds=elapsed,
-                        scope=scope
-                    )
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: patch_interactive_card_sdk(card_message_id, final_card)
-                    )
-                    return
-
-                try:
-                    proc = await asyncio.create_subprocess_shell(
-                        clean_cmd,
-                        cwd=cwd if (cwd and os.path.isdir(cwd)) else None,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
+                        out_text += f"语法预检详情：{syntax_err}"
+                    ret_code = 2
+                else:
                     try:
-                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800.0)
-                        out_str = stdout.decode('utf-8', errors='replace')
-                        err_str = stderr.decode('utf-8', errors='replace')
-                        out_text = f"{out_str}\n{err_str}".strip()
-                        ret_code = proc.returncode
-                    except asyncio.TimeoutError:
+                        exec_env = os.environ.copy()
+                        cur_path = exec_env.get("PATH", "")
+                        extra_paths = [
+                            os.path.expanduser("~/.local/bin"),
+                            "/usr/local/sbin",
+                            "/usr/local/bin",
+                            "/usr/sbin",
+                            "/usr/bin",
+                            "/sbin",
+                            "/bin",
+                        ]
+                        for ep in reversed(extra_paths):
+                            if ep and ep not in cur_path.split(":"):
+                                cur_path = f"{ep}:{cur_path}" if cur_path else ep
+                        exec_env["PATH"] = cur_path
+
+                        proc = await asyncio.create_subprocess_exec(
+                            shell_bin, "-c", clean_cmd,
+                            cwd=cwd if (cwd and os.path.isdir(cwd)) else None,
+                            env=exec_env,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
                         try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                        out_text = "执行超时 (1800s / 30分钟)，已被系统强制截断中止"
+                            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=wait_timeout_sec)
+                            out_str = stdout.decode('utf-8', errors='replace')
+                            err_str = stderr.decode('utf-8', errors='replace')
+                            out_text = f"{out_str}\n{err_str}".strip()
+                            ret_code = proc.returncode
+                        except asyncio.TimeoutError:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                            out_text = f"执行超时 ({int(wait_timeout_sec)}s)，已被系统安全截断中止"
+                            ret_code = 124
+                    except Exception as ex:
+                        out_text = f"执行异常: {ex}"
                         ret_code = -1
-                except Exception as ex:
-                    out_text = f"执行异常: {ex}"
-                    ret_code = -1
 
                 elapsed = time.time() - t0
 
-                # 智能幂等清理容错：对于 kill/pkill/rm 等清理命令，若目标已不存在，判定为符合预期的幂等清理成功
+                # 智能幂等清理容错：由于 L3 旁路审计存在网络延迟，毫秒级命令（如 kill/rm）可能已在拦截前由 agy 执行完毕
                 is_idempotent_success = False
                 clean_cmd_lower = clean_cmd.lower().strip()
                 if any(clean_cmd_lower.startswith(p) for p in ("kill ", "kill -", "pkill ", "killall ", "rm ", "rm -")):
                     out_lower = out_text.lower()
-                    if "no such process" in out_lower or "no such file or directory" in out_lower:
+                    if "no such process" in out_lower or "no such file or directory" in out_lower or (ret_code == 1 and not out_lower):
                         is_idempotent_success = True
 
                 if ret_code == 0 or is_idempotent_success:
@@ -308,7 +357,11 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                         out_text = f"{out_text}\n(注：目标进程或资源在审批前已自然释放，符合幂等清理预期，判定为成功放行)".strip()
                         ret_code = 0
                 else:
-                    final_status = "failed"
+                    # 非零退出码或截断保护：更新卡片为自愈接力状态，并将报错反馈给 AI 自动修正，避免任务直接卡死
+                    log.warning(
+                        f"[L3 Guard] Command returned non-zero ({ret_code}) in chat {chat_id}, triggering AI self-healing resume: {out_text[:200]}"
+                    )
+                    final_status = "warning"
 
                 final_card = CardBuilder.build_l3_confirm_result_card(
                     status=final_status,
@@ -319,62 +372,96 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     elapsed_seconds=elapsed,
                     scope=scope
                 )
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, final_card)
-                )
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: patch_interactive_card_sdk(card_message_id, final_card)
+                    )
+                except Exception as patch_err:
+                    log.warning(f"[L3 Guard] Failed to patch result card (continuing to auto-resume): {patch_err}")
 
-                # 自动接力推进原任务（仅在成功时接力，避免死循环）
-                if final_status == "success":
+                # 自动接力推进原任务（成功时直接继续；非零退出或截断时携带诊断信息唤醒 AI 自愈修正，杜绝任务停摆）
+                try:
                     try:
-                        try:
-                            from math_decision_model import math_decision_engine
-                            math_decision_engine.reset_session_risk(chat_id)
-                        except Exception:
-                            pass
+                        from math_decision_model import math_decision_engine
+                        math_decision_engine.reset_session_risk(chat_id)
+                    except Exception:
+                        pass
 
-                        session_data = await get_session_async(chat_id)
-                        paused_l3 = session_data.pop("paused_l3_state", None) or {}
-                        orig_q = paused_l3.get("user_text") or session_data.get("last_user_query", "继续执行未完成的任务")
-                        comp_steps = list(paused_l3.get("completed_steps") or [])
-                        plan_steps = list(paused_l3.get("planned_steps") or [])
-                        prior_elapsed_s = int(paused_l3.get("elapsed_seconds") or 0) + max(1, int(round(elapsed)))
-                        approved_list = list(session_data.get("_approved_l3_commands") or [])
+                    session_data = await get_session_async(chat_id)
+                    paused_l3 = session_data.pop("paused_l3_state", None) or p_l3 or {}
+                    orig_q = paused_l3.get("user_text") or session_data.get("last_user_query", "继续执行未完成的任务")
+                    if (orig_q or "").lstrip().startswith(("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]")):
+                        m_orig_q = re.search(r"-\s*前序任务目标：(.+)", orig_q)
+                        orig_q = m_orig_q.group(1).strip() if m_orig_q else (session_data.get("last_user_query") or "继续执行未完成的任务")
+
+                    comp_steps = list(paused_l3.get("completed_steps") or [])
+                    plan_steps = list(paused_l3.get("planned_steps") or [])
+                    prior_elapsed_s = int(paused_l3.get("elapsed_seconds") or 0) + max(1, int(round(elapsed)))
+                    approved_list = list(session_data.get("_approved_l3_commands") or [])
+                    if final_status == "success":
                         for _c in (command.strip(), clean_cmd.strip()):
                             if _c and _c not in approved_list:
                                 approved_list.append(_c)
-                        session_data["_approved_l3_commands"] = approved_list[-10:]
-                        if is_turn_scope:
-                            session_data["_l3_authorize_all_turn"] = True
-                        session_data["_is_authorized_l3_resume"] = True
-                        session_data["_resumed_task_progress"] = {
-                            "user_text": orig_q,
-                            "elapsed_seconds": prior_elapsed_s,
-                            "completed_steps": comp_steps + [f"授权执行: {clean_cmd[:24]}"],
-                            "planned_steps": plan_steps,
-                            "current_plan_idx": int(paused_l3.get("current_plan_idx") or 0),
-                            "max_progress_pct": int(paused_l3.get("max_progress_pct") or 0),
-                        }
-                        await save_session_async(chat_id, session_data)
+                    session_data["_approved_l3_commands"] = approved_list[-10:]
+                    if is_turn_scope:
+                        session_data["_l3_authorize_all_turn"] = True
+                    session_data["_is_authorized_l3_resume"] = True
+                    step_tag = f"授权执行: {clean_cmd[:24]}" if final_status == "success" else f"授权自愈: {clean_cmd[:24]}"
+                    session_data["_resumed_task_progress"] = {
+                        "user_text": orig_q,
+                        "elapsed_seconds": prior_elapsed_s,
+                        "completed_steps": comp_steps + [step_tag],
+                        "planned_steps": plan_steps,
+                        "current_plan_idx": int(paused_l3.get("current_plan_idx") or 0),
+                        "max_progress_pct": int(paused_l3.get("max_progress_pct") or 0),
+                    }
+                    await save_session_async(chat_id, session_data)
 
-                        steps_str = " -> ".join(comp_steps[-8:]) if comp_steps else "无"
-                        scope_str = "⚡ 本轮后续所有高危指令免密放行 (本轮结束自动失效)" if is_turn_scope else "仅限本次指令"
+                    steps_str = " -> ".join(comp_steps[-8:]) if comp_steps else "无"
+                    scope_str = "⚡ 本轮后续所有高危指令免密放行 (本轮结束自动失效)" if is_turn_scope else "仅限本次指令"
 
-                        resume_prompt = (
-                            f"[AUTO_RESUME_AFTER_L3_APPROVAL]\n"
-                            f"管理员已在飞书审批卡片中【确认授权】并已在宿主机完成该高危敏感指令的执行：\n"
-                            f"- 授权执行指令：`{command}`\n"
-                            f"- 授权范围：{scope_str}\n"
-                            f"- 执行状态：成功完成 (退出码: {ret_code})\n"
-                            f"- 终端输出结果：\n```text\n{out_text[:1000]}\n```\n"
-                            f"- 前序任务目标：{orig_q}\n"
-                            f"- 已完成步骤：{steps_str}\n\n"
-                            f"请直接基于上述指令执行输出结果继续推进完成用户最初交办的任务，严禁重复执行刚刚已获批的指令，完成后向用户汇报最终结果！"
+                    if final_status == "success":
+                        if is_non_shell_tool:
+                            action_guide = (
+                                "管理员已批准该高危工具操作权限，请直接继续执行刚才被暂缓的操作并推进完成用户最初交办的任务，完成后向用户汇报最终结果！"
+                            )
+                        else:
+                            action_guide = (
+                                "请直接基于上述指令执行输出结果继续推进完成用户最初交办的任务，严禁重复执行刚刚已获批的指令，完成后向用户汇报最终结果！"
+                            )
+                        status_line = f"成功完成 (退出码: {ret_code})"
+                    elif is_truncated or is_unterminated_quote:
+                        status_line = f"单行指令超长截断/引号未闭合保护 (状态码: {ret_code})"
+                        action_guide = (
+                            "管理员已批准执行权限，但原单行命令因超长在流式上报中被截断（或引号未闭合）未能直接执行。"
+                            "请勿再次拼接超长单行命令（如长 python3 -c / node -e），请改为先将脚本写入临时文件再运行，继续推进并完成用户最初交办的任务！"
                         )
-                        simulated_content = json.dumps({"text": resume_prompt}, ensure_ascii=False)
-                        await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
-                        log.info(f"[L3 Guard] Successfully triggered auto-resume for chat {chat_id} after approved execution (scope={scope})")
-                    except Exception as resume_err:
-                        log.error(f"[L3 Guard] Failed to trigger auto-resume after approval: {resume_err}")
+                    else:
+                        status_line = f"命令返回非零退出码 (退出码: {ret_code})"
+                        action_guide = (
+                            "管理员已批准操作权限，但该指令在宿主机执行时返回了非零状态码。"
+                            "请根据上述终端报错信息分析原因并自愈修正（如补充工作目录参数、修正语法或调整实现方案，严禁原封不动盲目重复同一条失败指令），继续完成用户最初交办的任务！"
+                        )
+
+                    resume_prompt = (
+                        f"[AUTO_RESUME_AFTER_L3_APPROVAL]\n"
+                        f"管理员已在飞书审批卡片中【确认授权】并已在宿主机完成该高危敏感指令的调度：\n"
+                        f"- 授权执行指令：`{command[:500]}`\n"
+                        f"- 授权范围：{scope_str}\n"
+                        f"- 执行状态：{status_line}\n"
+                        f"- 终端输出结果：\n```text\n{out_text[:1200]}\n```\n"
+                        f"- 前序任务目标：{orig_q}\n"
+                        f"- 已完成步骤：{steps_str}\n\n"
+                        f"{action_guide}"
+                    )
+                    simulated_content = json.dumps({"text": resume_prompt}, ensure_ascii=False)
+                    await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
+                    log.info(
+                        f"[L3 Guard] Successfully triggered auto-resume for chat {chat_id} "
+                        f"after approved execution (scope={scope}, status={final_status}, ret={ret_code})"
+                    )
+                except Exception as resume_err:
+                    log.error(f"[L3 Guard] Failed to trigger auto-resume after approval: {resume_err}")
 
             asyncio.run_coroutine_threadsafe(do_execute_approved(), app_state.main_loop)
 
