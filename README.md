@@ -5,29 +5,34 @@
 ![Python](https://img.shields.io/badge/Python-3.10+-brightgreen?style=flat-square)
 ![Feishu](https://img.shields.io/badge/Feishu-WebSocket%20Lark%20OAPI-orange?style=flat-square)
 ![Engine](https://img.shields.io/badge/Engine-Google%20Antigravity%20(agy)-purple?style=flat-square)
-![Gateway](https://img.shields.io/badge/Gateway-System%20One%20(Jev)-teal?style=flat-square)
+![Gateway](https://img.shields.io/badge/Gateway-System%20One%20%2B%20HMDM-teal?style=flat-square)
 ![Plugins](https://img.shields.io/badge/Plugins-Dynamic%20Store%20%26%20Hot%20Reload-blue?style=flat-square)
 ![Process](https://img.shields.io/badge/Process-PM2%20%7C%20Docker-blueviolet?style=flat-square)
 
 </div>
 
-基于飞书原生 WebSocket 长连接与宿主机 `antigravity`（`agy`）核心引擎，深度融合 **System One (Jev)** 毫秒级决策网关与**动态热插拔插件生态**的企业级全能智能研发与运维助手。
+基于飞书原生 WebSocket 长连接与宿主机 `antigravity`（`agy`）核心引擎，深度融合 **System One 混合全链路决策网关（决策模型 + HMDM）**与**动态热插拔插件生态**的企业级全能智能研发与运维助手。
 
-无需公网 IP 或 Webhook 回调配置，在飞书内即可直接远程驱动服务器完成全栈代码读写、智能终端命令执行、多模态音视频深度解析、Home Assistant 智能家居控制、长效偏好记忆与任务自动化规划。
+无需公网 IP 或 Webhook 回调配置，在飞书内即可直接远程驱动服务器完成全栈代码读写、智能终端命令执行、多模态音视频深度解析、Home Assistant 智能家居控制、长程分层记忆与任务自动化规划。
 
 ---
 
 ## 🌟 核心特性与技术亮点
 
-### 🧠 1. System One (Jev) 毫秒级决策网关与自适应思考
-- **前置安全沙箱防护（Safety Gate）**：基于 Jev 结构化安全模型，毫秒级前置拦截 Prompt 注入、提权攻击、恶意破坏指令（越权删除、格式化等），筑牢宿主机安全底座。
-- **任务复杂度与意图结构化度量**：毫秒级并行输出分类意图、置信度与连续复杂度数值（`complexity_score` 与 `needs_terminal` 标记），动态隔离轻量对话与重型工程任务。
-- **动态自适应思考档位（Adaptive Reasoning Effort）**：
-  - 根据任务复杂度动态自适应调度推理档位（`LOW` / `MEDIUM` / `HIGH`）。
-  - **全链路参数强制对齐与安全校验**：模型后缀（如 `-high` / `-medium` / `-low`）与底层 CLI `--effort` 自动对齐联动，彻底杜绝参数冲突导致的启动异常。
-- **高频场景极速 Fast-Path（< 200ms 秒回）**：
-  - 针对服务器健康监控（`server_health`）、随身备忘（`notes`）、计划调度（`cron`）、智能家居（`smart_home`）等高频意图，直接命中 Fast-Path 本地秒级回传交互卡片，零模型冷启动延迟与 Token 消耗。
-- **无感静默降级（Zero-Overhead Fallback）**：未配置 Key 或网络不可达时，自动短路无缝降级为纯本地内存级启发式规则引擎（耗时仅 **~0.05ms**）。
+### 🧠 1. System One 混合决策网关与自适应推理
+- **灵活接入决策大模型**：
+  - 可通过 `.env` 或飞书端 `/s1` 控制台热配置不同平台的决策大模型与接口地址（支持如 **阿里云百炼 `decision-model-preview`**、**TypeSafe `jev-latest`** 及其他兼容协议的模型与自定义网关端点）。
+- **L1 / L2 / L3 三级全链路安全模式（可在 `/s1` 面板实时切换）**：
+  - **L1 · 入口决策 (`gateway`)**：毫秒级识别用户意图、拦截越权与 Prompt 注入请求，并分流高频插件直通。
+  - **L2 · 双向决策 (`sentry`)**：在 L1 基础上增加**模型输出端安全守卫**，在文字与语音发出前自动识别并对 Token、密码、私钥等敏感凭证进行原位脱敏保护。
+  - **L3 · 全流程决策 (`copilot`)**：覆盖输入、工具执行、报错诊断与输出全链路；高危终端操作自动弹出**交互式审批卡片**（支持单次/本轮放行），报错时自动执行根因诊断并注入 `Memory Guard` 死胡同防重记录。
+- **HMDM 四层混合数学决策引擎（< 0.5ms 本地推理）**：
+  - 融合 8 维句法/语义特征抽取、Markov 会话状态转移、贝叶斯后验融合与 EWMA 风险衰减模型，对闲聊走零延迟 Fast-Path 放行；对复杂工程任务自动注入 `scope` 边界契约与步数/时间预算控制。
+- **动态 N 档自适应思考路由（`LOW` / `MEDIUM` / `HIGH` / `XHIGH`）**：
+  - 按模型族动态聚类全部可用档位（兼容 1/2/3/4 及未来 N 档模型，如 `Gemini 4 Hydrogen` 的 `Low → Medium → High → XHigh`），按任务复杂度与连续排障次数自动升降档，并强制对齐底层 CLI `--effort` 与预热进程池升级。
+- **高频意图极速 Fast-Path（< 200ms 秒回）**：
+  - 针对服务器健康监控（`server_health`）、随身备忘（`notes`）、计划调度（`cron`）、智能家居（`smart_home`）与网关配置查询等高频意图，直接命中 Fast-Path 本地秒级回传交互卡片，零大模型冷启动延迟与 Token 消耗。
+- **无感静默降级（Zero-Overhead Fallback）**：未配置 Key 或远程网关超时/不可达时，自动无缝切换为纯本地 HMDM 数学引擎与正则启发式规则，全程不中断主任务链路。
 
 ---
 
@@ -36,12 +41,13 @@
 - **多阶段生命周期 Hook**：提供 `before_ai`、`after_ai`、`on_command`、`on_card_action` 深度生命周期钩子。
 - **开箱即用核心插件库**：
   - 🏠 **Home Assistant**：NLP 语义直达控制智能家居设备与场景联动，毫秒级状态同步与卡片回显。
-  - ⏰ **Cron Scheduler**：支持自然语言或标准 Cron 表达式设置定时提醒与周期自动化任务。
+  - ⏰ **Cron Scheduler**：支持自然语言或标准 Cron 表达式设置定时提醒与周期自动化任务（含历史执行审计日志视图）。
   - 📝 **Notes Manager**：随身交互式便签与备忘录管理面板。
   - 🧠 **AI Memory**：跨会话沉淀用户个性化习惯、工程偏好与安全红线。
   - 📟 **Passport Bridge**：协同硬件网关与音色调度控制。
-  - 🔌 **Raspberry Pi GPIO Status**：硬件状态感知、引脚交互控制与蜂鸣器/LED 思考状态指示。
-  - 🔄 **System Updater**：全自动平滑无损 OTA 在线自升级。
+  - 📊 **Server Health & Multi-Agent**：主机系统健康巡检直出卡片与多智能体协同任务调度支持。
+  - 🔌 **Raspberry Pi GPIO API Status**：树莓派引脚交互控制与 LED 呼吸灯/蜂鸣器思考状态同步指示。
+  - 🔄 **System Updater**：全自动平滑无损 OTA 在线自升级（支持 GitHub 与 Gitee 双源）。
 - **交互式插件中心 (`/plugins`)**：飞书端可视化卡片，支持一键启停插件、查看运行状态与版本配置。
 
 ---
@@ -54,11 +60,10 @@
 
 ---
 
-### 💬 4. 原生卡片流转与异步会话管理
-- **极致秒级响应（Early Typing Card）**：消息送达后抢先秒级下发交互卡片，杜绝用户等待焦虑。
-- **原地流转刷新（In-place Patch）**：任务排队、资源加载、思考推理、步骤推进到最终交付，单卡片全生命周期平滑更新。
-- **会话独立排队**：按 `chat_id` 维护独立异步任务队列，避免并发冲突；支持 `/stop` 随时紧急熔断中断任务。
-- **上下文预热池（Prewarm Pool）**：内置会话常驻与预热守护机制，大幅削减大模型 CLI 初始化冷启动延迟。
+### 💬 4. 原生卡片流转、长程记忆与高可用会话池
+- **极致秒级响应与弹性进度展示**：消息送达后秒级下发交互卡片；任务运行期间采用 **10 格方块进度条**（`■■■■■□□□□□`）与 **2~8 弹性宏观步骤**，结合阶段自适应刷新呈现双层执行轨迹与实时耗时。
+- **长程分层记忆与断点接力（Session Relay）**：内置上下文压缩守卫（Compaction Guard）、预算看门狗与长任务自动接力机制，防止超长任务截断丢失状态。
+- **会话独立排队与高可用预热池**：按 `chat_id` 维护独立异步队列并支持 `/stop` 紧急熔断；常驻预热池支持随自适应思考档位自动升级会话、40 分钟 TTL 定时回收、Stream 异常自动重连与顶层异常飞书实时提示。
 
 ---
 
@@ -88,7 +93,7 @@
 ### 🎛️ 1. 模型与记忆控制
 | 指令 | 别名 | 权限级别 | 功能与交互说明 |
 | :--- | :--- | :---: | :--- |
-| `/model` | `/card` / `/menu` | 全部用户 | 弹出大模型选择面板，自由热切换模型（Gemini 3.7/3.8、Claude 等） |
+| `/model` | `/card` / `/menu` | 全部用户 | 弹出大模型选择面板，按模型族动态热切换（Gemini 4 Hydrogen/Argon、Gemini 3.8 Flash、Claude 5.5 等） |
 | `/context` | - | 全部用户 | 查看对话上下文 Token 占用统计与容量看板 |
 | `/memory` | `/pref` | 全部用户 | 查看与管理用户的个人偏好设定（支持交互式新增与删除） |
 | `/brain` | - | 全部用户 | 查看 Antigravity 全局跨会话记忆库与偏好知识透视 |
@@ -107,8 +112,8 @@
 | :--- | :--- | :---: | :--- |
 | `/help` | - | 全部用户 | 呼出交互式帮助卡片与全功能快捷控制大厅 |
 | `/stop` | - | 全部用户 | 紧急叫停当前会话中正在执行的后台任务并清空排队任务 |
-| `/s1` | `/sys1` / `/system1` | 全部用户 | **打开 System One (TypeSafe Jev) 决策网关控制台**（连通性测试、模型切换、Key 设置与启用开关） |
-| `/update` | - | 管理员 | 检查云端最新版本；输入 `/update confirm` 触发 OTA 无损平滑热升级 |
+| `/s1` | `/sys1` / `/system1` | 全部用户 | **打开 System One 决策网关控制台**（L1/L2/L3 等级切换、自适应思考开关、百炼 `decision-model-preview` / `jev-latest` / 自定义模型及 Base URL 热配置、连通性测试） |
+| `/update` | - | 管理员 | 检查云端最新版本（支持 `/update confirm` 触发 OTA 无损平滑热升级，内置 Gitee 备用源） |
 | `/ping` | - | 全部用户 | 探测核心服务与网络健康存活状态 |
 | `/auth` | - | 全部用户 | 向系统管理员发送授权申请卡片（若已授权则提示正常） |
 | `/user` | - | 管理员 | 用户与群聊权限管理控制台（`/user grant/revoke/ban/promote/demote/reset-admin`） |
@@ -132,7 +137,7 @@ flowchart TD
     
     Pre -->|Slash 命令 (/project /s1 /plugins 等)| Cmd["commands.py (交互式卡片渲染)"]
     
-    Pre -->|自然语言请求| Gate{"System One 决策网关\n(Jev Engine)"}
+    Pre -->|自然语言请求| Gate{"System One 决策网关\n(决策大模型 + HMDM L1/L2/L3)"}
     
     Gate -->|高频意图直达| FastPath{"Fast-Path 极速插件总线\n(< 200ms)"}
     FastPath -->|系统健康| HealthPlug["server_health 插件"]
@@ -144,10 +149,13 @@ flowchart TD
     Gate -->|拦截安全隐患| RejectCard["安全风控拦截告警卡片"] --> CardUI
     
     Gate -->|复杂工程任务| AgentQueue["会话异步排队队列 (chat_id)"]
-    AgentQueue --> Adapter["自适应推理档位对齐 (Effort Matcher)"]
+    AgentQueue --> Adapter["N 档动态路由 & Scope 契约\n(Low ~ XHigh / SessionPool)"]
     Adapter --> Executor["executor.py (Antigravity CLI 引擎)"]
     
-    Executor -->|Task Plan 步骤流转| CardUI
+    Executor -->|L3 工具风险审批 / 报错自愈| CoPilot["Co-Pilot 运行期审计与 Memory Guard"]
+    CoPilot -->|审批卡片 / 自愈续跑| CardUI
+    Executor -->|L2 出口凭据脱敏| OutputGuard["Sentry 输出安全守卫"] --> CardUI
+    Executor -->|10 格弹性进度 & Task Plan| CardUI
     Executor -->|执行 Shell / 读写代码| HostFS["宿主机操作系统 & 工作区"]
     Executor -->|产出图像/文件回传| MultiModal["handlers/media.py (飞书富媒体通道)"]
     MultiModal --> CardUI
@@ -165,9 +173,10 @@ flowchart TD
      - **基础版（Basic）**：日常文本问答、记事本、简单查询。
      - **开发版（Dev）**：可使用项目切换、代码查看与受限工具。
      - **完全版（Full）**：具备终端 Shell 执行与宿主机全权限。
-3. **双层安全防护网**：
-   - **System One 决策层**：语义层深度扫描注入与恶意意图，阻断高危行为；
-   - **系统级命令守卫**：对底层 `rm -rf /`、磁盘覆写、系统重启等高危指令进行物理级阻断；`--dangerously-skip-permissions` 仅对受信任的最高管理员生效。
+3. **S1 三级全链路安全防护网（L1 / L2 / L3）**：
+   - **L1 入口决策 (`gateway`)**：语义与 HMDM 数学引擎联合扫描注入与越权意图，结合工作区边界契约阻断未授权越界访问；
+   - **L2 双向决策 (`sentry`)**：在回复与语音下发前执行敏感凭证扫描与原位脱敏，防止 API Token、私钥或密码意外泄露；
+   - **L3 全流程决策 (`copilot`)**：在工具执行期实时审计高危 Shell 操作并弹出飞书交互审批卡片（支持单次放行或本轮授权，自动接入续跑），对 `rm -rf /`、磁盘覆写等毁灭性指令物理级阻断；`--dangerously-skip-permissions` 仅对受信任的最高管理员生效。
 4. **防刷限流（Rate Limiting）**：
    - 普通授权用户每分钟最多发送 5 条消息，每日上限 100 次工具执行（管理员不限）。
 
@@ -269,19 +278,23 @@ ANTIGRAVITY_BIN=
 ANTIGRAVITY_HOME=
 # 默认公共工作区根目录 (默认: ~)
 WORKSPACE_ROOT=/home/ubuntu
-# 默认大模型 (如: gemini-3.7-flash-low / gemini-3.8-flash-high / claude-sonnet-4-6)
-DEFAULT_MODEL=gemini-3.8-flash-high
+# 默认大模型 (如: gemini-4-hydrogen-high / gemini-3.8-flash-high / claude-sonnet-5-5-high)
+DEFAULT_MODEL=gemini-4-hydrogen-high
 
 # ==========================================
-# 4. System One (TypeSafe Jev) 网关配置
+# 4. System One 决策网关配置
 # ==========================================
-# 平台 API 密钥 (留空则自动无缝降级为本地规则兜底，完全不影响系统速度)
+# 决策网关 API 密钥 (留空则自动无缝降级为纯本地 HMDM 数学规则引擎)
 TYPESAFE_API_KEY=
 # 是否启用决策网关
 TYPESAFE_ENABLED=true
-# 默认使用的 Jev 决策模型
+# 决策安全级别: gateway (L1入口决策) | sentry (L2双向决策) | copilot (L3全流程决策)
+TYPESAFE_TIER=gateway
+# 是否开启自适应思考深度自动调度 (Low / Medium / High / XHigh)
+TYPESAFE_AUTO_MODE=true
+# 默认使用的决策模型 (如阿里云百炼 decision-model-preview、jev-latest 或其他自定义模型)
 TYPESAFE_MODEL=jev-latest
-# 服务基础接口地址
+# 决策网关 Base URL (支持阿里云百炼、TypeSafe 或自建兼容端点)
 TYPESAFE_BASE_URL=https://api.typesafe.ai
 
 # ==========================================
