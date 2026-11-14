@@ -346,10 +346,10 @@ def format_duration(seconds: int) -> str:
     return "".join(parts)
 
 
-def get_reset_duration_for_model(quota_data: Optional[dict], model_name: str = "") -> Optional[str]:
-    """Calculate soonest reset duration string for the given model from quota data."""
+def _find_target_quota_groups(quota_data: Optional[dict], model_name: str = "") -> list:
+    """Resolve matching quota groups for the given model name."""
     if not quota_data or "response" not in quota_data or "groups" not in quota_data["response"]:
-        return None
+        return []
 
     from config import DEFAULT_MODEL
     effective_model = model_name
@@ -361,6 +361,8 @@ def get_reset_duration_for_model(quota_data: Optional[dict], model_name: str = "
 
     target_groups = []
     for g in groups:
+        if not isinstance(g, dict):
+            continue
         d_name = g.get("displayName", "").lower()
         desc = g.get("description", "").lower()
         if "argon" in model_lower:
@@ -372,6 +374,17 @@ def get_reset_duration_for_model(quota_data: Optional[dict], model_name: str = "
         elif any(k in model_lower for k in ["claude", "gpt", "3p"]):
             if any(k in d_name or k in desc for k in ["claude", "gpt", "3p"]):
                 target_groups.append(g)
+
+    return target_groups
+
+
+def get_reset_duration_for_model(quota_data: Optional[dict], model_name: str = "") -> Optional[str]:
+    """Calculate soonest reset duration string for the given model from quota data."""
+    if not quota_data or "response" not in quota_data or "groups" not in quota_data["response"]:
+        return None
+
+    groups = quota_data["response"].get("groups", [])
+    target_groups = _find_target_quota_groups(quota_data, model_name)
 
     if not target_groups:
         # Default to Gemini group if not specifically requested Claude/GPT
@@ -454,6 +467,25 @@ def check_latest_agy_log_for_quota_error(max_lines: int = 50) -> Optional[str]:
     return None
 
 
+async def is_model_quota_healthy(model_name: str = "", min_fraction: float = 0.01) -> Optional[bool]:
+    """Return True if all quota buckets for model_name are above min_fraction, False if exhausted, None if unknown."""
+    try:
+        quota_data = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(None, fetch_quota),
+            timeout=5.0,
+        )
+        target_groups = _find_target_quota_groups(quota_data, model_name)
+        if not target_groups:
+            return None
+        buckets = [b for g in target_groups for b in g.get("buckets", []) if isinstance(b, dict)]
+        if not buckets:
+            return None
+        return all(float(b.get("remainingFraction", 1.0)) > min_fraction for b in buckets)
+    except Exception as e:
+        log.warning(f"[quota] is_model_quota_healthy error for {model_name}: {e}")
+        return None
+
+
 async def detect_and_format_quota_error(raw_text: str = "", model: str = "") -> Optional[str]:
     """Detect if quota is exhausted and format standard Antigravity message.
     Returns: '⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h50m17s.'
@@ -473,29 +505,12 @@ async def detect_and_format_quota_error(raw_text: str = "", model: str = "") -> 
     # If still not detected or no duration, check live quota API
     if not quota_detected:
         try:
-            from config import DEFAULT_MODEL
-            effective_model = model
-            if not effective_model or effective_model in ("Default", "默认"):
-                effective_model = DEFAULT_MODEL
             quota_data = await asyncio.get_running_loop().run_in_executor(None, fetch_quota)
-            if quota_data and "response" in quota_data and "groups" in quota_data["response"]:
-                groups = quota_data["response"].get("groups", [])
-                model_lower = (effective_model or "").lower()
-                for g in groups:
-                    d_name = g.get("displayName", "").lower()
-                    desc = g.get("description", "").lower()
-                    match_group = False
-                    if "argon" in model_lower and ("argon" in d_name or "argon" in desc):
-                        match_group = True
-                    elif "gemini" in model_lower and "argon" not in model_lower and ("gemini" in d_name or "gemini" in desc) and "argon" not in d_name:
-                        match_group = True
-                    elif any(k in model_lower for k in ["claude", "gpt", "3p"]) and any(k in d_name or k in desc for k in ["claude", "gpt", "3p"]):
-                        match_group = True
-                    if match_group:
-                        for b in g.get("buckets", []):
-                            if b.get("remainingFraction", 1.0) <= 0.0:
-                                quota_detected = True
-                                break
+            for g in _find_target_quota_groups(quota_data, model):
+                for b in g.get("buckets", []):
+                    if b.get("remainingFraction", 1.0) <= 0.0:
+                        quota_detected = True
+                        break
         except Exception as e:
             log.warning(f"[quota] API check error: {e}")
 

@@ -2021,15 +2021,33 @@ async def execute_antigravity(
                 or final_reply == "Sorry, I couldn't generate a response."
                 or (is_error and is_quota_error(f"{stream_error_msg}\n{stderr_text}"))
             ):
-                quota_err_reply = await detect_and_format_quota_error(combined_err_text, model=session_data.get("model", ""))
-                if quota_err_reply:
-                    is_quota_exhausted = True
-                    final_reply = quota_err_reply
-                elif not final_reply or final_reply == "Sorry, I couldn't generate a response.":
-                    system_err_reply = detect_and_format_agent_system_error(combined_err_text)
-                    if system_err_reply:
-                        final_reply = system_err_reply
-                        is_error = True
+                active_model_name = session_data.get("model", "")
+                raw_quota_err_text = f"{stream_error_msg}\n{stderr_text}"
+                stale_quota_artifact = False
+                if final_reply and final_reply != "Sorry, I couldn't generate a response." and is_quota_error(raw_quota_err_text):
+                    cleaned_candidate = extract_final_chinese_response(final_reply)
+                    cleaned_candidate = _RE_TASK_PLAN_PAIR.sub("", cleaned_candidate or "").strip()
+                    if len(cleaned_candidate) >= 40:
+                        from utils.quota import is_model_quota_healthy
+                        if await is_model_quota_healthy(active_model_name) is True:
+                            stale_quota_artifact = True
+                            log.warning(
+                                f"[Executor] Ignoring stale quota error for model={active_model_name} "
+                                f"(substantial reply len={len(cleaned_candidate)} chars and live model quota is healthy)."
+                            )
+                            is_error = False
+                            session_data["last_execution_error"] = False
+
+                if not stale_quota_artifact:
+                    quota_err_reply = await detect_and_format_quota_error(combined_err_text, model=active_model_name)
+                    if quota_err_reply:
+                        is_quota_exhausted = True
+                        final_reply = quota_err_reply
+                    elif not final_reply or final_reply == "Sorry, I couldn't generate a response.":
+                        system_err_reply = detect_and_format_agent_system_error(combined_err_text)
+                        if system_err_reply:
+                            final_reply = system_err_reply
+                            is_error = True
 
             # 若提取最终回答失败且出现流式异常/进程非正常退出（如 OAuth 401 瞬时过期、API 抖动连接断开、进程崩溃），
             # 且非配额用尽、非 60m 硬超时，且在允许重试范围内：

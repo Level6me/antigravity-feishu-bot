@@ -231,6 +231,39 @@ class TestQuotaDiagnosisOrder(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(kwargs.get("is_error"))
         self.assertIn("is_quota_error()", reply_text)
 
+    async def test_stale_quota_error_after_full_reply_on_healthy_model_is_ignored(self):
+        """When a healthy-quota model emits a full answer but agy returns stale quota error from prior turn, preserve the answer."""
+        full_answer = (
+            "在 Gemini 4 Hydrogen 模型中，High 与 xHigh 对应推理深度的档位差异。"
+            "日常复杂编码优先使用 High 即可，仅遇到极高难度难题时再切换至 xHigh。"
+        )
+        events = [
+            {
+                "event": "step_update",
+                "step_update": {
+                    "step_type": "agent_response",
+                    "text_delta": full_answer,
+                },
+            },
+            {
+                "event": "result",
+                "result": {
+                    "status": "ERROR",
+                    "error": "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 155h41m51s.",
+                },
+            },
+        ]
+        with patch("utils.quota.is_model_quota_healthy", AsyncMock(return_value=True)):
+            is_err, cards, eval_mock, quota_mock = await self._run_case(events)
+        self.assertFalse(is_err)
+        eval_mock.assert_not_awaited()
+        quota_mock.assert_not_awaited()
+        reply_text, kwargs = cards[0]
+        self.assertFalse(kwargs.get("is_quota"))
+        self.assertFalse(kwargs.get("is_error"))
+        self.assertIn("Gemini 4 Hydrogen", reply_text)
+        self.assertNotIn("Individual quota reached", reply_text)
+
 
 if __name__ == "__main__":
     unittest.main()
