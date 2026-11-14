@@ -24,37 +24,31 @@ from config import (
 )
 from utils.auth import is_admin, has_scope, SCOPE_PROJECT, SCOPE_SHELL
 from math_decision_model import snapshot_process_group_pids
+from utils.model_tiers import (
+    split_model_id_suffix,
+    get_effort_rank,
+    has_embedded_effort_suffix,
+)
 from logger import log
 import app_state
 
 _TERMINAL_TURN_EVENTS = {"result", "error", "turn_error", "cancelled", "fatal", "process_exit", "read_error"}
-_EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-xhigh", "-max")
+_ALLOWED_EFFORTS = ("minimal", "fast", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def _extract_model_family(model_name: str) -> str:
     """Return base model family name with adaptive effort suffix stripped."""
-    m = (model_name or "").strip().lower()
-    for sfx in _EFFORT_SUFFIXES:
-        if m.endswith(sfx):
-            return m[:-len(sfx)]
-    return m
+    stem, _, _ = split_model_id_suffix(model_name)
+    return stem
 
 
 def _extract_model_tier_rank(model_name: str, effort: str = "medium") -> int:
-    """Return numeric reasoning tier rank (1=low, 2=medium, 3=high) from model suffix or effort."""
-    m = (model_name or "").strip().lower()
-    if m.endswith(("-high", "-xhigh", "-max")):
-        return 3
-    if m.endswith("-low"):
-        return 1
-    if m.endswith("-medium"):
-        return 2
-    eff = (effort or "medium").strip().lower()
-    if eff in ("high", "xhigh", "max"):
-        return 3
-    if eff == "low":
-        return 1
-    return 2
+    """Return numeric reasoning tier rank from model suffix or effort (e.g. 20=low, 40=medium, 60=high, 80=xhigh)."""
+    _, _, rank = split_model_id_suffix(model_name)
+    if rank is not None:
+        return rank
+    eff_rank = get_effort_rank(effort or "medium")
+    return eff_rank if eff_rank is not None else 40
 
 class TurnEventStream:
     """A thread-safe, non-cancellable stream of parsed JSON events for a single dialogue turn.
@@ -114,7 +108,7 @@ class PersistentSession:
     def __init__(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = "", effort: str = "medium", sandbox_enabled: bool = False):
         self.chat_id = chat_id
         self.model = model
-        self.effort = effort if effort in ("low", "medium", "high") else "medium"
+        self.effort = effort if effort in _ALLOWED_EFFORTS else "medium"
         self.sandbox_enabled = sandbox_enabled
         self.project_dir = project_dir
         self.process: Optional[asyncio.subprocess.Process] = None
@@ -169,8 +163,8 @@ class PersistentSession:
             "--print-timeout", "60m"
         ]
 
-        # 仅当模型名称未自带 -low/-medium/-high 等固定 effort 后缀时，才附加 --effort，杜绝 agy 参数冲突报错
-        if not any(self.model.endswith(f"-{e}") for e in ["low", "medium", "high", "xhigh", "max"]):
+        # 仅当模型名称未自带固定 effort 后缀时，才附加 --effort，杜绝 agy 参数冲突报错
+        if not has_embedded_effort_suffix(self.model):
             if self.effort:
                 cmd_args.extend(["--effort", self.effort])
 
@@ -353,7 +347,7 @@ class SessionPool:
         # 避免传入空串（新会话/clear后）与已有真实 UUID 的 sess 不匹配，导致每轮都重建进程
         conv_mismatch = bool(conversation_id and sess and sess.conversation_id and sess.conversation_id != conversation_id)
 
-        normalized_effort = effort if effort in ("low", "medium", "high") else "medium"
+        normalized_effort = effort if effort in _ALLOWED_EFFORTS else "medium"
         # Enforce CLI sandbox both when Co-Pilot mode is active AND when a non-admin user lacks SCOPE_SHELL
         real_chat_id = str(chat_id).split("cron_")[-1] if str(chat_id).startswith("cron_") else str(chat_id)
         user_lacks_shell = not is_admin(real_chat_id) and not has_scope(real_chat_id, SCOPE_SHELL)
@@ -367,7 +361,7 @@ class SessionPool:
             # 触发升档重建，避免复杂任务被锁死在低档位模型中陷入工具死循环。
             sess_rank = _extract_model_tier_rank(sess.model, sess.effort)
             target_rank = _extract_model_tier_rank(model, normalized_effort)
-            needs_high_upgrade = bool(target_rank >= 3 and sess_rank < 3)
+            needs_high_upgrade = bool(target_rank >= 60 and sess_rank < target_rank)
             if needs_high_upgrade:
                 log.info(
                     f"[SessionPool] Upgrading warm session for {chat_id} from "

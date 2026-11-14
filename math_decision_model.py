@@ -18,7 +18,7 @@ import time
 from typing import Dict, List, Literal, Optional, Set, Tuple
 
 DialogState = Literal["idle", "proposal_pending", "task_executing", "error_recovery"]
-EffortTier = Literal["Low", "Medium", "High"]
+EffortTier = Literal["Low", "Medium", "High", "XHigh"]
 SecurityLevel = Literal["L0", "L1", "L2", "L3"]
 IntentClass = Literal["chat", "standard_op", "deep_arch"]
 
@@ -254,7 +254,7 @@ class HybridMathDecisionEngine:
             st.consecutive_errors = 0
             if proposed_plan_or_question:
                 st.dialog_state = "proposal_pending"
-            elif st.last_needs_plan or st.last_tier in ("Medium", "High"):
+            elif st.last_needs_plan or st.last_tier in ("Medium", "High", "XHigh"):
                 st.dialog_state = "task_executing"
             else:
                 st.dialog_state = "idle"
@@ -469,17 +469,25 @@ class HybridMathDecisionEngine:
             c_star = 0.55 * expected_prior_c + 0.45 * psi_struct
 
         # Error recovery automatic boost
-        if state.dialog_state == "error_recovery" and state.consecutive_errors >= 1:
+        if state.dialog_state == "error_recovery" and state.consecutive_errors >= 2:
+            c_star = max(c_star, 1.50)
+        elif state.dialog_state == "error_recovery" and state.consecutive_errors >= 1:
             c_star = max(c_star, 1.40)
         elif fv.phi_confirm >= 0.8 and state.dialog_state in ("proposal_pending", "task_executing"):
             c_star = max(c_star, state.last_complexity, 1.10)
 
         c_star = round(min(2.0, max(0.0, c_star)), 3)
 
-        # Continuous Complexity -> EffortTier mapping
+        # Continuous Complexity -> EffortTier mapping (Low / Medium / High / XHigh)
         if c_star < 0.42 and final_post["chat"] >= 0.65 and fv.phi_imperative < 0.25 and fv.phi_tech_entity == 0.0:
             effort_tier: EffortTier = "Low"
             is_pure_qa = True
+        elif (
+            (c_star >= 1.66 and final_post["deep_arch"] >= 0.72 and fv.phi_multistep >= 0.45)
+            or (state.dialog_state == "error_recovery" and state.consecutive_errors >= 2 and c_star >= 1.45)
+        ):
+            effort_tier = "XHigh"
+            is_pure_qa = False
         elif c_star >= 1.32 or final_post["deep_arch"] >= 0.52:
             effort_tier = "High"
             is_pure_qa = False
@@ -488,13 +496,13 @@ class HybridMathDecisionEngine:
             is_pure_qa = False
 
         # Orthogonal Task Planning Probability P(Pi_t = 1)
-        # Decoupled from High tier: BOTH Medium and High operational tasks get a 3-4 step task plan!
+        # Decoupled from High tier: BOTH Medium, High, and XHigh operational tasks get a step task plan!
         p_plan = 1.0 - (final_post["chat"] * (1.0 - fv.phi_tech_entity) * (1.0 - fv.phi_imperative))
         if fv.phi_confirm >= 0.8 and state.dialog_state in ("proposal_pending", "task_executing"):
             p_plan = max(p_plan, 0.85)
         p_plan = round(min(1.0, max(0.0, p_plan)), 4)
 
-        needs_task_plan = bool(not is_pure_qa and (p_plan >= 0.38 or effort_tier in ("Medium", "High")))
+        needs_task_plan = bool(not is_pure_qa and (p_plan >= 0.38 or effort_tier in ("Medium", "High", "XHigh")))
 
         # Layer 4: Session-level EWMA / Hawkes Cumulative Risk Decay Model R_t
         now = time.time()

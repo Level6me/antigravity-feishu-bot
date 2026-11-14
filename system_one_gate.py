@@ -13,7 +13,7 @@ import re
 import time
 import asyncio
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import config
 from logger import log
@@ -652,7 +652,7 @@ def _enrich_with_hmdm(chat_id: str, user_text: str, dec: TypeSafeDecision) -> Ty
             chat_id, user_text, remote_jev_data=remote_payload
         )
         if dec.is_fallback and dec.intent == "general_chat":
-            is_op = not orth.is_pure_qa and (orth.needs_task_plan or orth.effort_tier in ("Medium", "High"))
+            is_op = not orth.is_pure_qa and (orth.needs_task_plan or orth.effort_tier in ("Medium", "High", "XHigh"))
             dec.complexity_score = orth.complexity_index
             dec.complexity_confidence = round(1.0 - orth.local_entropy * 0.4, 3)
             dec.is_operation = is_op
@@ -1157,12 +1157,13 @@ def get_typesafe_config_state() -> Dict[str, Any]:
 
 
 def evaluate_adaptive_tier(decision: TypeSafeDecision) -> str:
-    """Evaluate adaptive reasoning effort tier: Low | Medium | High based on semantic decision analysis.
+    """Evaluate adaptive reasoning effort tier: Low | Medium | High | XHigh based on semantic decision analysis.
     
     Routing policy:
     - Explicit casual chat and very simple non-operational questions -> Low
     - Simple operations and ordinary analysis -> Medium
     - Multi-step work or substantively complex terminal tasks -> High
+    - Ultra-complex architectural or multi-error recovery tasks -> XHigh
     """
     import config
     auto_enabled = getattr(config, "TYPESAFE_AUTO_MODE", True)
@@ -1175,12 +1176,12 @@ def evaluate_adaptive_tier(decision: TypeSafeDecision) -> str:
         return "Low"
 
     # Use calibrated HMDM continuous complexity & Bayesian pooling tier when available
-    if getattr(decision, "math_tier", "") in ("Low", "Medium", "High"):
+    if getattr(decision, "math_tier", "") in ("Low", "Medium", "High", "XHigh"):
         if decision.math_tier == "Low" and (decision.is_operation or decision.needs_terminal or decision.needs_task_plan):
             return "Medium"
         return decision.math_tier
 
-    # Low-confidence routing is also uncertain: avoid a costly High by default,
+    # Low-confidence routing is also uncertain: avoid a costly High/XHigh by default,
     # but do not classify it as simple chat.
     if decision.intent_confidence < 0.55:
         return "Medium"
@@ -1195,6 +1196,10 @@ def evaluate_adaptive_tier(decision: TypeSafeDecision) -> str:
     # Unknown fallback requests must not be downgraded to casual-chat Low.
     if decision.is_fallback:
         return "Medium"
+
+    # Ultra-complex multi-step terminal/architectural tasks escalate to XHigh
+    if decision.complexity_score >= 1.85 and decision.needs_terminal:
+        return "XHigh"
 
     # Deep multi-step work gets High. A terminal requirement by itself is not
     # enough: simple one-command tasks should stay Medium.
@@ -1223,58 +1228,26 @@ def evaluate_adaptive_tier(decision: TypeSafeDecision) -> str:
     return "Medium"
 
 
-def resolve_adaptive_model(base_model: str, adaptive_tier: str) -> str:
-    """Resolve model ID with adapted thinking depth within current model family.
-    
-    Guarantees:
-    - Stays strictly within current model family (never shifts across vendors, e.g. never switches to Claude).
-    - Adapts effort suffix (-low, -medium, -high) if the model family supports thinking tiers.
-    """
-    if not adaptive_tier or not base_model:
-        return base_model
-        
-    m = base_model.lower().strip()
-    tier = adaptive_tier.lower().strip()
-    if tier not in ("low", "medium", "high"):
-        return base_model
-
-    if "gpt-oss-120b" in m:
-        return "gpt-oss-120b-medium"
-
-    if "gemini-3.1-pro" in m:
-        target_tier = "low" if tier == "low" else "high"
-        return f"gemini-3.1-pro-{target_tier}"
-
-    for prefix in [
-        "gemini-4-argon",
-        "gemini-3.8-flash",
-        "gemini-3.7-flash",
-        "gemini-3.6-flash",
-        "claude-opus-5-5",
-        "claude-sonnet-5-5",
-    ]:
-        if prefix in m:
-            return f"{prefix}-{tier}"
-
-    # Generic fallback for any model ID that already carries a -(low|medium|high) tier suffix
-    if re.search(r"-(?:low|medium|high)$", m):
-        return re.sub(r"-(?:low|medium|high)$", f"-{tier}", m)
-
-    return base_model
+def resolve_adaptive_model(
+    base_model: str,
+    adaptive_tier: str,
+    complexity_score: Optional[float] = None,
+    available_models: Optional[List[str]] = None,
+) -> str:
+    """Resolve model ID with adapted thinking depth dynamically across 1, 2, 3, 4, or N tiers."""
+    from utils.model_tiers import resolve_adaptive_model_dynamic
+    return resolve_adaptive_model_dynamic(
+        base_model=base_model,
+        adaptive_tier=adaptive_tier,
+        complexity_score=complexity_score,
+        available_models=available_models,
+    )
 
 
 def infer_effort_from_model(model_name: str, fallback_effort: str = "medium") -> str:
-    """Infer the valid agy --effort value (low, medium, high) from model name or fallback."""
-    if not model_name:
-        return fallback_effort
-    m = model_name.lower().strip()
-    if m.endswith("-high"):
-        return "high"
-    elif m.endswith("-low"):
-        return "low"
-    elif m.endswith("-medium"):
-        return "medium"
-    return fallback_effort if fallback_effort in ("low", "medium", "high") else "medium"
+    """Infer normalized agy --effort value from model suffix or fallback."""
+    from utils.model_tiers import infer_effort_from_model_dynamic
+    return infer_effort_from_model_dynamic(model_name, fallback_effort=fallback_effort)
 def update_typesafe_env(
     api_key: Optional[str] = None,
     enabled: Optional[bool] = None,

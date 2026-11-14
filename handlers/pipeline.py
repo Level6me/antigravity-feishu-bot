@@ -375,7 +375,9 @@ async def _process_single_task(chat_id, task):
         )
         if getattr(config, "TYPESAFE_AUTO_MODE", True) and local_preview.effort_tier:
             base_m = session_data.get("base_model") or session_data.get("model", "Default")
-            prewarmed_model = resolve_adaptive_model(base_m, local_preview.effort_tier)
+            prewarmed_model = resolve_adaptive_model(
+                base_m, local_preview.effort_tier, complexity_score=local_preview.complexity_index
+            )
             prewarmed_effort = infer_effort_from_model(prewarmed_model, local_preview.effort_tier.lower())
     except Exception:
         pass
@@ -394,21 +396,25 @@ async def _process_single_task(chat_id, task):
         session_data["typesafe_adaptive_tier"] = adaptive_tier
         base_model = session_data.get("base_model") or session_data.get("model", "")
         session_data["base_model"] = base_model
-        session_data["model"] = resolve_adaptive_model(base_model, adaptive_tier)
-        session_data["reasoning_effort"] = adaptive_tier.lower()
+        session_data["model"] = resolve_adaptive_model(
+            base_model, adaptive_tier, complexity_score=decision.complexity_score
+        )
+        session_data["reasoning_effort"] = infer_effort_from_model(
+            session_data["model"], adaptive_tier.lower()
+        )
     else:
         session_data.pop("typesafe_adaptive_tier", None)
         if "base_model" in session_data:
             session_data["model"] = session_data["base_model"]
         
-        # 兼容处理：若用户显式指定了带档位的模型名（如 -high / -low / -medium），提取对应 effort，避免 CLI 参数冲突报错
+        # 兼容处理：若用户显式指定了带档位的模型名（如 -high / -low / -medium / -xhigh），提取对应 effort，避免 CLI 参数冲突报错
         cur_m = session_data.get("model", "")
         session_data["reasoning_effort"] = infer_effort_from_model(cur_m, session_data.get("reasoning_effort", "medium"))
 
     selected_model = session_data.get("model", "Default")
     selected_effort = (
-        adaptive_tier.lower()
-        if adaptive_tier in ("Low", "Medium", "High")
+        infer_effort_from_model(selected_model, adaptive_tier.lower())
+        if adaptive_tier in ("Low", "Medium", "High", "XHigh")
         else infer_effort_from_model(selected_model, session_data.get("reasoning_effort", "medium"))
     )
     session_data["reasoning_effort"] = selected_effort
