@@ -133,7 +133,7 @@ from logger import log
 from card_builder import CardBuilder
 from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT, BASE_DIR, GITEE_MIRROR_URL, get_global_memory_path
 from database import list_auth_sessions
-from utils.auth import SCOPE_TIERS, get_admin_chat_id, has_scope, is_admin, set_session_role
+from utils.auth import SCOPE_PROJECT, SCOPE_TIERS, get_admin_chat_id, has_scope, is_admin, set_session_role
 
 # --- Available Models Cache (In-Memory + Disk + Stale-While-Revalidate) ---
 _MODEL_CACHE = []
@@ -465,7 +465,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 
         elif pending_command == PendingCommand.CRON_ADD.value:
             raw_input = user_text.strip()
-            import re, time
             parts = [p.strip() for p in re.split(r'[|｜]', raw_input) if p.strip()]
             if len(parts) < 3:
                 reply_text = "❌ **格式无效！**\n\n请按规范发送 3 段数据，用竖线 `|` 隔开：\n`任务名称 | 触发规则(如 0 9 * * * 或 600s) | 执行 Prompt`\n\n例如：`定时检查存储 | 0 9 * * * | 检查树莓派 iSCSI 运行状态`"
@@ -553,7 +552,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 )
                 return True, user_text
 
-            import re
             parts = [p.strip() for p in re.split(r'[|｜]', raw_input) if p.strip()]
 
             if len(parts) < 2:
@@ -706,7 +704,6 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             try:
                 session_data.pop("_l3_authorize_all_turn", None)
                 session_data.pop("paused_l3_state", None)
-                from database import save_session_async
                 await save_session_async(chat_id, session_data)
             except Exception:
                 pass

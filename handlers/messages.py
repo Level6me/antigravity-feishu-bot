@@ -27,6 +27,16 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
         import traceback
         log.error(f"[FATAL ERROR in handle_message_async]: {e}")
         traceback.print_exc()
+        if message_id:
+            try:
+                loop = asyncio.get_running_loop()
+                err_name = type(e).__name__
+                await loop.run_in_executor(
+                    None,
+                    lambda: send_reply_sdk(message_id, f"❌ 消息/指令处理异常（`{err_name}`），请稍后重试或查看服务日志。"),
+                )
+            except Exception as reply_err:
+                log.warning(f"[handle_message_async] Failed to send fallback error reply: {reply_err}")
 
 
 async def _handle_message_async_internal(message_id, chat_id, message_type, content_raw):
