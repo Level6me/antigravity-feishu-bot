@@ -2393,30 +2393,42 @@ async def execute_antigravity(
                 session_data=session_data,
                 is_quota=is_quota_exhausted
             )
+            async def _send_full_text_fallback(label: str):
+                fallback_text = reply_text if reply_text else "(AI 回复卡片发送失败，请查看工作区获取完整内容)"
+                if message_id and str(message_id).startswith("om_"):
+                    from lark_client import send_reply_sdk
+                    await _feishu_call(
+                        lambda: send_reply_sdk(message_id, fallback_text),
+                        label=label
+                    )
+                else:
+                    from lark_client import send_text_to_chat_sdk
+                    await _feishu_call(
+                        lambda: send_text_to_chat_sdk(chat_id, fallback_text),
+                        label=label
+                    )
+
             if bot_reply_msg_id:
                 patch_ok = await _feishu_call(
                     lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card),
                     label="final-card patch"
                 )
                 if patch_ok is None:
-                    from lark_client import send_reply_sdk
-                    fallback_text = reply_text[:2000] if reply_text else "(AI 回复卡片发送失败，请查看工作区获取完整内容)"
-                    await _feishu_call(
-                        lambda: send_reply_sdk(message_id, fallback_text),
-                        label="final-card text fallback"
-                    )
+                    await _send_full_text_fallback("final-card text fallback")
             else:
                 if message_id and str(message_id).startswith("om_"):
-                    await _feishu_call(
+                    sent_ok = await _feishu_call(
                         lambda: send_interactive_card_sdk(message_id, final_card),
                         label="final-card send"
                     )
                 else:
                     from lark_client import send_card_to_chat_sdk
-                    await _feishu_call(
+                    sent_ok = await _feishu_call(
                         lambda: send_card_to_chat_sdk(chat_id, final_card),
                         label="final-card send to chat"
                     )
+                if not sent_ok:
+                    await _send_full_text_fallback("final-card send text fallback")
 
             # 本轮会话任务已顺利完成并输出最终答复，自动回收本轮全量高危指令授权
             if session_data.pop("_l3_authorize_all_turn", None):

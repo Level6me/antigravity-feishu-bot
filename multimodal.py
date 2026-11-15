@@ -23,6 +23,35 @@ async def extract_and_upload_resources_async(text, message_id, api_client, addit
     )
 
 
+_FEISHU_IMAGE_KEY_RE = re.compile(r"^img_(?:v\d+_)?[A-Za-z0-9_-]{8,}$")
+_CODE_SPAN_OR_FENCE_RE = re.compile(r"```[\s\S]*?```|`[^`\n]+`")
+
+
+def _strip_markdown_code(text):
+    """Remove fenced code blocks and inline code spans before scanning links."""
+    return _CODE_SPAN_OR_FENCE_RE.sub("", text or "")
+
+
+def _is_plausible_local_target(target):
+    """Exclude remote URLs, Feishu image keys, and bare placeholder words like `url`."""
+    if not target:
+        return False
+    t = target.strip()
+    if not t or t.startswith(("http://", "https://")) or _FEISHU_IMAGE_KEY_RE.match(t):
+        return False
+    return ("/" in t) or ("\\" in t) or ("." in t)
+
+
+def _extract_local_image_paths(text):
+    """Extract plausible local image paths outside Markdown code blocks/spans."""
+    cleaned = _strip_markdown_code(text)
+    return [
+        img.strip()
+        for img in re.findall(r'!\[.*?\]\((?:file://)?([^)]+)\)', cleaned)
+        if _is_plausible_local_target(img)
+    ]
+
+
 def extract_and_upload_resources(text, message_id, api_client, additional_safe_dirs=None, chat_id=None):
     """
     Scans `text` for image and file references and automatically uploads
@@ -31,14 +60,12 @@ def extract_and_upload_resources(text, message_id, api_client, additional_safe_d
     if not text:
         return
 
-    images = [
-        img for img in re.findall(r'!\[.*?\]\((?:file://)?([^)]+)\)', text)
-        if not img.startswith(('http://', 'https://'))
-    ]
+    cleaned_text = _strip_markdown_code(text)
+    images = _extract_local_image_paths(cleaned_text)
     raw_files = [
         (label.strip(), f.strip())
-        for label, f in re.findall(r'(?<!!)\[(.*?)\]\((?:file://)?([^)]+)\)', text)
-        if not f.startswith(('http://', 'https://'))
+        for label, f in re.findall(r'(?<!!)\[(.*?)\]\((?:file://)?([^)]+)\)', cleaned_text)
+        if _is_plausible_local_target(f)
     ]
 
     workspace_dir = os.path.dirname(os.path.abspath(__file__))
@@ -94,11 +121,7 @@ def extract_and_upload_resources(text, message_id, api_client, additional_safe_d
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     md_content = f.read()
-                    imgs = [
-                        img for img in re.findall(r'!\[.*?\]\((?:file://)?([^)]+)\)', md_content)
-                        if not img.startswith(('http://', 'https://'))
-                    ]
-                    images.extend(imgs)
+                    images.extend(_extract_local_image_paths(md_content))
             except Exception as e:
                 log.error(f"[Multimodal] Error scanning md file: {e}")
 

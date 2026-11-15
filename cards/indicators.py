@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime
 
-from cards.common import create_footer
+from cards.common import create_footer, sanitize_feishu_markdown
 
 def _guess_intent(text):
     if not text:
@@ -64,7 +64,7 @@ def build_typing_indicator(downloaded_file_name=None, download_success=True, use
         "elements": [
             {
                 "tag": "markdown",
-                "content": content
+                "content": sanitize_feishu_markdown(content)
             },
             create_footer()
         ]
@@ -604,7 +604,7 @@ def build_planned_steps_indicator(
         "elements": [
             {
                 "tag": "markdown",
-                "content": content
+                "content": sanitize_feishu_markdown(content)
             },
             create_footer()
         ]
@@ -724,7 +724,7 @@ def build_tool_indicator(
         "elements": [
             {
                 "tag": "markdown",
-                "content": content
+                "content": sanitize_feishu_markdown(content)
             },
             create_footer()
         ]
@@ -741,7 +741,7 @@ def build_download_indicator(file_name, media_type="文件"):
         "elements": [
             {
                 "tag": "markdown",
-                "content": f"正在为您下载并解析多媒体资源：**{file_name}**\n\n大文件（如视频、PDF）可能需要数秒至一分钟，请稍候..."
+                "content": sanitize_feishu_markdown(f"正在为您下载并解析多媒体资源：**{file_name}**\n\n大文件（如视频、PDF）可能需要数秒至一分钟，请稍候...")
             },
             create_footer()
         ]
@@ -777,7 +777,7 @@ def build_streaming_indicator(
     if len(display_text) > max_streaming_chars:
         display_text = "... (前文已自动隐藏) ...\n\n" + display_text[-max_streaming_chars:]
         
-    full_content = status_bar + display_text + " ▌"
+    full_content = sanitize_feishu_markdown(status_bar + display_text + " ▌")
     
     return {
         "config": {"wide_screen_mode": True},

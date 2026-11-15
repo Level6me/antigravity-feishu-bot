@@ -12,7 +12,19 @@ from lark_oapi.api.im.v1 import (
 from lark_oapi.api.contact.v3 import GetUserRequest
 from config import APP_ID, APP_SECRET
 from logger import log
-from utils import with_retry
+from utils import with_retry, NonRetryableError
+
+
+def _is_non_retryable_card_error(code, msg: str) -> bool:
+    """Return True for deterministic Feishu card payload/schema validation errors."""
+    msg_str = str(msg or "")
+    msg_lower = msg_str.lower()
+    return (
+        code == 230099
+        or "11310" in msg_str
+        or "the card contains images" in msg_lower
+        or "invalid card" in msg_lower
+    )
 
 api_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).timeout(10.0).build()
 upload_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).timeout(120.0).build()
@@ -77,18 +89,23 @@ def split_text_into_chunks(text, max_chunk_size=20000):
     return chunks
 
 
+def _build_paginated_text_chunks(text, max_chunk_size=20000):
+    """Split long text into bounded chunks with page headers when paginated."""
+    if not text:
+        return []
+    if len(text) <= max_chunk_size:
+        return [text]
+    raw_chunks = split_text_into_chunks(text, max_chunk_size)
+    total = len(raw_chunks)
+    return [f"📄 **[第 {idx + 1}/{total} 页]**\n\n{c}" for idx, c in enumerate(raw_chunks)]
+
+
 @with_retry(max_retries=1)
 def send_reply_sdk(message_id, reply_text):
     if not reply_text:
         return
-        
-    max_text_chars = 20000
-    if len(reply_text) <= max_text_chars:
-        chunks = [reply_text]
-    else:
-        raw_chunks = split_text_into_chunks(reply_text, max_text_chars)
-        total = len(raw_chunks)
-        chunks = [f"📄 **[第 {idx+1}/{total} 页]**\n\n{c}" for idx, c in enumerate(raw_chunks)]
+
+    chunks = _build_paginated_text_chunks(reply_text, 20000)
 
     for chunk in chunks:
         req = ReplyMessageRequest.builder() \
@@ -131,6 +148,8 @@ def patch_interactive_card_sdk(message_id, card_content):
     resp = api_client.im.v1.message.patch(req)
     if resp.code != 0:
         log.error(f"[patch_interactive_card_sdk] Failed (code {resp.code}): {resp.msg}")
+        if _is_non_retryable_card_error(resp.code, resp.msg):
+            raise NonRetryableError(f"Feishu Patch API non-retryable error code {resp.code}: {resp.msg}")
         raise Exception(f"Feishu Patch API error code {resp.code}: {resp.msg}")
     return True
 
@@ -200,22 +219,24 @@ def send_card_to_chat_sdk(chat_id, card_content):
 
 @with_retry(max_retries=1)
 def send_text_to_chat_sdk(chat_id, text):
-    """Send a plain text message as a NEW message to a chat."""
-    if text and len(text) > 28000:
-        text = text[:28000] + "\n\n（内容过长已截断）"
-    req = CreateMessageRequest.builder() \
-        .receive_id_type("chat_id") \
-        .request_body(CreateMessageRequestBody.builder()
-            .receive_id(chat_id)
-            .msg_type("text")
-            .content(json.dumps({"text": text}))
-            .build()) \
-        .build()
-    resp = api_client.im.v1.message.create(req)
-    if resp.code != 0:
-        log.error(f"[send_text_to_chat_sdk] Failed: {resp.msg}")
-        return False
-    return True
+    """Send a plain text message (paginated if >20k chars) as NEW message(s) to a chat."""
+    if not text:
+        return True
+    all_ok = True
+    for chunk in _build_paginated_text_chunks(text, 20000):
+        req = CreateMessageRequest.builder() \
+            .receive_id_type("chat_id") \
+            .request_body(CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("text")
+                .content(json.dumps({"text": chunk}))
+                .build()) \
+            .build()
+        resp = api_client.im.v1.message.create(req)
+        if resp.code != 0:
+            log.error(f"[send_text_to_chat_sdk] Failed: {resp.msg}")
+            all_ok = False
+    return all_ok
 
 
 def get_chat_name_sdk(chat_id):

@@ -6,7 +6,7 @@ from datetime import datetime
 from utils import get_context_usage_stats
 from utils.quota import is_quota_error
 
-from cards.common import create_footer
+from cards.common import create_footer, sanitize_feishu_markdown
 
 # 飞书卡片/消息体有 ~30KB 上限，markdown 字段预留安全余量
 MAX_MARKDOWN_CHARS = 25000
@@ -17,7 +17,7 @@ def build_ai_response(reply_text, choice_card_data=None, current_model="Default"
     
     # 1. Main Text
     if reply_text:
-        content = reply_text
+        content = sanitize_feishu_markdown(reply_text)
         if len(content) > MAX_MARKDOWN_CHARS:
             content = content[:MAX_MARKDOWN_CHARS] + TRUNCATION_NOTICE
         if is_streaming:
@@ -212,7 +212,7 @@ def build_budget_pause_card(
     elements = [
         {
             "tag": "markdown",
-            "content": (
+            "content": sanitize_feishu_markdown(
                 f"⏸️ **任务阶段性截停保护（已自动重试 1 次仍超出预算）**\n"
                 f"📊 **阶段进度**：`{block_bar}` **{pct}%** · 已执行 {len(completed_steps)} 步 · 耗时 {time_str}\n\n"
                 f"- **当前指令**：`{short_q}`\n"
@@ -227,7 +227,7 @@ def build_budget_pause_card(
         for i, st in enumerate(planned_steps[:6], 1):
             done_mark = "✅" if i <= max(1, min(len(planned_steps) - 1, len(completed_steps) // 3)) else "⏳"
             plan_lines.append(f"{done_mark} {i}. {st}")
-        elements.append({"tag": "markdown", "content": "\n".join(plan_lines)})
+        elements.append({"tag": "markdown", "content": sanitize_feishu_markdown("\n".join(plan_lines))})
 
     if completed_steps:
         from cards.indicators import _collapse_consecutive_steps, format_step_item
@@ -239,12 +239,12 @@ def build_budget_pause_card(
         elements.append(
             {
                 "tag": "markdown",
-                "content": "**🔧 最近已完成操作轨迹**：\n" + "\n".join(step_lines),
+                "content": sanitize_feishu_markdown("**🔧 最近已完成操作轨迹**：\n" + "\n".join(step_lines)),
             }
         )
 
     if partial_reply and partial_reply.strip():
-        preview = partial_reply.strip()
+        preview = sanitize_feishu_markdown(partial_reply.strip())
         if len(preview) > 800:
             preview = preview[:800] + "..."
         elements.append(

@@ -5,6 +5,10 @@ from functools import wraps
 from logger import log
 from config import get_brain_dir, get_transcript_path
 
+class NonRetryableError(Exception):
+    """Raised for deterministic client/payload errors that must not be retried."""
+
+
 def with_retry(max_retries=3, initial_delay=1.0, backoff_factor=2.0, retryable_exceptions=None):
     """
     Exponential backoff retry decorator for synchronous functions.
@@ -24,6 +28,8 @@ def with_retry(max_retries=3, initial_delay=1.0, backoff_factor=2.0, retryable_e
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
+                except NonRetryableError:
+                    raise
                 except retryable as e:
                     if attempt == max_retries:
                         log.error(f"[Retry] Function {func.__name__} failed after {max_retries} retries. Error: {e}")

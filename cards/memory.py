@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime
 
-from cards.common import create_footer
+from cards.common import create_footer, sanitize_feishu_markdown
 
 def build_memory_card(memories, project_memory_summary=None):
     elements = []
@@ -53,7 +53,7 @@ def build_memory_card(memories, project_memory_summary=None):
             )
         })
         if capsule_md:
-            preview_md = capsule_md
+            preview_md = sanitize_feishu_markdown(capsule_md)
             if len(preview_md) > 1500:
                 preview_md = preview_md[:1500] + "\n_(...更多内容保存在 PROJECT_STATE.md)_"
             elements.append({
@@ -83,7 +83,7 @@ def build_memory_card(memories, project_memory_summary=None):
                     "elements": [
                         {
                             "tag": "markdown",
-                            "content": f"🔹 {m}"
+                            "content": f"🔹 {sanitize_feishu_markdown(str(m))}"
                         }
                     ]
                 },
@@ -165,7 +165,7 @@ def build_note_list_card(notes):
                         "elements": [
                             {
                                 "tag": "markdown",
-                                "content": md_content
+                                "content": sanitize_feishu_markdown(md_content)
                             }
                         ]
                     },
@@ -252,7 +252,7 @@ def build_global_memory_card(memories):
                 content = str(mem)
             elements.append({
                 "tag": "markdown",
-                "content": f"**🕒 {time_str}**\n{content}"
+                "content": sanitize_feishu_markdown(f"**🕒 {time_str}**\n{content}")
             })
             if idx < len(recent_memories) - 1:
                 elements.append({
