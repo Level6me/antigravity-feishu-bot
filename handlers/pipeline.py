@@ -80,7 +80,8 @@ CREDENTIAL_SENSITIVE_PATTERN = re.compile(
 )
 
 BROAD_QUERY_PATTERN = re.compile(
-    r'(?:所有服务器|全部服务器|服务器列表|备忘录|每台服务器|所有主机|全部主机|密码本|服务器密码|列出凭证|所有凭证|凭证列表)',
+    r'(?:所有服务器|全部服务器|服务器列表|备忘录|每台服务器|所有主机|全部主机|密码本|服务器密码|列出凭证|所有凭证|凭证列表|'
+    r'所有笔记|全部笔记|笔记列表|笔记(?:里|中|内容|里面|写了|记录)|/notes?\b|随身记|记事本)',
     re.IGNORECASE
 )
 
@@ -129,6 +130,46 @@ def extract_note_identifiers(note: str) -> list:
         identifiers.add("ghp_")
 
     return [i for i in identifiers if i]
+
+
+def _build_turn_notes_block(
+    raw_notes: list,
+    query: str,
+    context: str,
+    already_injected_static: bool,
+    is_lightweight_chat: bool = False,
+    action_type: str = "",
+) -> str:
+    """Build the `/notes` prompt block for this turn without dropping regular notes on follow-up turns."""
+    if not raw_notes:
+        return ""
+
+    if is_lightweight_chat and action_type == "casual_greeting" and not BROAD_QUERY_PATTERN.search(query or ""):
+        return ""
+
+    relevant_notes = filter_relevant_notes(raw_notes, query, context=context)
+    if not relevant_notes:
+        return ""
+
+    if not already_injected_static and not is_lightweight_chat:
+        notes_block = "\n".join(f"- {note}" for note in relevant_notes)
+        return f"[User's Permanent Notes / 备忘录]\n{notes_block}\n\n"
+
+    # Follow-up & lightweight turns retain non-sensitive permanent notes (preventing loss after compaction
+    # or mid-conversation `/note add`) alongside JIT-matched credential notes, with a size guard.
+    selected = []
+    non_sensitive_chars = 0
+    for note in relevant_notes:
+        if CREDENTIAL_SENSITIVE_PATTERN.search(note):
+            selected.append(note)
+        elif non_sensitive_chars + len(note) <= 1500:
+            selected.append(note)
+            non_sensitive_chars += len(note)
+
+    if not selected:
+        return ""
+    notes_block = "\n".join(f"- {note}" for note in selected)
+    return f"[User's Relevant Notes]\n{notes_block}\n"
 
 
 def filter_relevant_notes(notes: list, query: str, context: str = "") -> list:
@@ -686,6 +727,16 @@ async def _process_single_task(chat_id, task):
                 "[Voice Interaction Directive / 语音交互规范]\n"
                 "用户正在通过飞书原生语音与你对话，请遵循口语化表达，语言自然亲切、凝练生动。\n\n"
             )
+        notes_section = _build_turn_notes_block(
+            session_data.get("notes", []),
+            user_text,
+            recent_context,
+            already_injected_static=True,
+            is_lightweight_chat=True,
+            action_type=getattr(decision, "action_type", ""),
+        )
+        if notes_section:
+            system_instruction += notes_section
     else:
         active_conv_id = session_data.get("conversation", "")
         already_injected_static = bool(
@@ -805,19 +856,16 @@ async def _process_single_task(chat_id, task):
         except Exception as e:
             log.warning(f"[Pipeline] Memory recall injection failed: {e}")
 
-        # 注入用户备忘录 Notes (JIT 按需挂载：常规本地代码开发杜绝敏感服务器凭证注入)
-        raw_notes = session_data.get("notes", [])
-        if raw_notes:
-            relevant_notes = filter_relevant_notes(raw_notes, user_text, context=recent_context)
-            if relevant_notes and not already_injected_static:
-                notes_block = "\n".join([f"- {note}" for note in relevant_notes])
-                system_instruction += f"[User's Permanent Notes / 备忘录]\n{notes_block}\n\n"
-            elif relevant_notes and already_injected_static:
-                # 后续轮次仅当命中敏感凭证按需挂载时才补充注入
-                sensitive_notes = [n for n in relevant_notes if CREDENTIAL_SENSITIVE_PATTERN.search(n)]
-                if sensitive_notes:
-                    notes_block = "\n".join([f"- {note}" for note in sensitive_notes])
-                    system_instruction += f"[User's Relevant Notes]\n{notes_block}\n"
+        # 注入用户备忘录 Notes (常规非敏感笔记多轮常驻防遗忘；高危服务器凭证维持 JIT 按需挂载)
+        notes_section = _build_turn_notes_block(
+            session_data.get("notes", []),
+            user_text,
+            recent_context,
+            already_injected_static=already_injected_static,
+            is_lightweight_chat=False,
+        )
+        if notes_section:
+            system_instruction += notes_section
 
         # 注入 System One 自适应思考模式指令 (Adaptive Reasoning Effort: Low / Medium / High)
         adaptive_effort = session_data.get("typesafe_adaptive_tier")
