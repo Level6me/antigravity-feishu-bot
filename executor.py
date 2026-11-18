@@ -2166,19 +2166,9 @@ async def execute_antigravity(
                     log.error(f"Failed to process turn transcript post-actions: {e}")
             
             if not is_quota_exhausted and reply_text:
-                active_project = session_data.get("project")
-                ws_root = session_data.get("workspace_root")
-                allowed_dirs = [active_project, ws_root]
-                
-                await _feishu_call(
-                    lambda: extract_and_upload_resources(reply_text, message_id, api_client, allowed_dirs, chat_id=chat_id),
-                    timeout=120.0,
-                    label="extract_and_upload_resources"
-                )
-                
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
-                
+
                 is_error = False
 
             if not reply_text:
@@ -2382,6 +2372,27 @@ async def execute_antigravity(
                     loop.run_in_executor(None, _sync_record_mem)
                 except Exception as mem_err:
                     log.warning(f"[Executor] Post-turn memory distillation warning: {mem_err}")
+
+            if not is_error and not is_quota_exhausted and not typesafe_blocked_info and reply_text:
+                active_project = session_data.get("project")
+                ws_root = session_data.get("workspace_root")
+                allowed_dirs = [active_project, ws_root]
+                allow_home_deliverables = is_admin(chat_id)
+                upload_summary = await _feishu_call(
+                    lambda: extract_and_upload_resources(
+                        reply_text,
+                        message_id,
+                        api_client,
+                        allowed_dirs,
+                        chat_id=chat_id,
+                        allow_home_deliverables=allow_home_deliverables,
+                    ),
+                    timeout=120.0,
+                    label="extract_and_upload_resources"
+                )
+                if isinstance(upload_summary, dict) and upload_summary.get("failed"):
+                    fail_notes = [f"- `{os.path.basename(p)}`: {reason}" for p, reason in upload_summary["failed"][:5]]
+                    reply_text += "\n\n> ⚠️ **部分文件未能通过飞书 API 自动发送**：\n" + "\n".join(fail_notes)
 
             final_card = CardBuilder.build_ai_response(
                 reply_text, 

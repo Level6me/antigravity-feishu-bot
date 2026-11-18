@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database import get_db
 from lark_client import send_local_file_to_chat
+from multimodal import is_sensitive_upload_path, MAX_FILE_UPLOAD_BYTES
 
 
 def resolve_default_chat_id():
@@ -42,17 +43,25 @@ def send_file(file_path, chat_id=None, caption=None):
     """发送本地文件到会话；chat_id 省略时自动定位最近活跃会话。
     返回 (ok, message)。
     """
-    if not os.path.isfile(file_path):
-        return False, f"文件不存在: {file_path}"
+    abs_path = os.path.abspath(os.path.expanduser(file_path))
+    if not os.path.isfile(abs_path):
+        return False, f"文件不存在或不是普通文件: {abs_path}"
+    if is_sensitive_upload_path(abs_path):
+        return False, f"出于安全策略禁止发送敏感/凭证文件: {abs_path}"
+    file_size = os.path.getsize(abs_path)
+    if file_size <= 0:
+        return False, f"文件为空 (0 字节)，飞书不支持上传空文件: {abs_path}"
+    if file_size > MAX_FILE_UPLOAD_BYTES:
+        return False, f"文件超过飞书 30MB 单文件上限 ({file_size / (1024 * 1024):.1f} MB): {abs_path}"
 
     chat_id = chat_id or resolve_default_chat_id()
     if not chat_id:
         return False, "未找到目标会话，请显式传入 chat_id"
 
-    ok = send_local_file_to_chat(chat_id, file_path, caption=caption)
+    ok = send_local_file_to_chat(chat_id, abs_path, caption=caption)
     if ok:
-        return True, f"✅ 已通过 Lark API 成功发送文件: {file_path} -> {chat_id}"
-    return False, f"❌ 发送失败: {file_path} -> {chat_id}"
+        return True, f"✅ 已通过 Lark API 成功发送文件: {abs_path} -> {chat_id}"
+    return False, f"❌ 发送失败: {abs_path} -> {chat_id}"
 
 
 def main():

@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import re
 
@@ -751,10 +752,14 @@ async def _process_single_task(chat_id, task):
         t_mins = max(1, int(scope_info.get("max_seconds", 600)) // 60)
         boundary_dir = scope_info.get("boundary_directive", "")
 
+        send_script_path = os.path.join(config.BASE_DIR, "send_to_feishu.py")
+        python_bin = sys.executable or "python3"
+
         if already_injected_static:
-            # 同会话后续轮次：采用超精简契约头 (<180B)，消除 76% 重复头部引发的上下文滚雪球膨胀与压缩触发
+            # 同会话后续轮次：采用超精简契约头 (<280B)，消除重复头部引发的上下文滚雪球膨胀与压缩触发
             system_instruction = (
                 f"[S1 scope={t_scope} tier={adaptive_tier or 'Medium'} budget={t_steps}步/{t_mins}m | Proj: {current_proj} | 仅用简体中文回复，禁输出思考过程；命令必加timeout；禁重启main.py；禁明文打印密钥]\n"
+                f"[Feishu File Rule: 主动发文件运行 `{python_bin} {send_script_path} \"<绝对路径>\" {chat_id}` 或用 `📎 [文件名](/绝对路径)`；普通代码引用勿加 📎/📄]\n"
             )
             if boundary_dir:
                 system_instruction += f"[{boundary_dir}]\n"
@@ -776,8 +781,9 @@ async def _process_single_task(chat_id, task):
 
             system_instruction += (
                 "[System Feishu Resource Delivery / 飞书文件传送规范]\n"
-                "1. 【统一使用飞书官方推送】：向用户提供文件时，请在最终回复中直接以标准 Markdown 链接输出该文件的本地绝对路径（例如 `[导出报告.xlsx](/path/to/file.xlsx)` 或 `📄 [文档.md](/path/to/doc.md)`），系统后台会自动拦截该路径并调用飞书官方 API 原生推送到当前会话供用户点击下载。严禁在脚本中私自 curl/webhook 传文件。\n"
-                "2. 【命令行主动发送】：在终端脚本中如需主动传送文件，可直接运行 `python3 send_to_feishu.py <文件路径>`。\n\n"
+                "1. 【区分「普通代码引用」与「主动发送文件」】：总结中提及编辑/查看的代码、配置或文档路径时，仅使用普通 Markdown 链接（如 `[app.py](file:///path/to/app.py)` 或 `[app.py](file:///path/to/app.py#L10-L20)`），**切勿**加 `📎`/`📄` 附件标记，系统不会将普通代码引用当作附件发送。\n"
+                f"2. 【命令行主动发送（最推荐）】：确需向飞书发送文件（用户要求发送文件，或需推送报告/压缩包/导出物/音视频供下载）时，直接运行 `{python_bin} {send_script_path} \"<文件绝对路径>\" {chat_id}`（在任何项目目录下均可直接执行，严禁自行 curl/webhook 传文件）。\n"
+                "3. 【回复文本标记推送】：若未通过命令行发送而需后台自动推送，请使用带附件标记的链接 `📎 [文件名](/绝对路径/文件名)` 或 `📄 [文件名](/绝对路径/文件名)`（勿加 `#L行号`）。\n\n"
             )
 
             if task.get("message_type") == "audio" or task.get("is_voice_message"):

@@ -182,6 +182,7 @@ _BOILERPLATE_BLOCK_PATTERNS = [
     re.compile(r"^\[System Rule:[\s\S]*?Output ONLY your final answer directly in Simplified Chinese\.\]\s*", re.MULTILINE),
     re.compile(r"^\[Role:[^\n]*\]\s*", re.MULTILINE),
     re.compile(r"^\[System Feishu Resource Delivery / 飞书文件传送规范\]\n(?:.*?\n)*?\n", re.MULTILINE),
+    re.compile(r"^\[Feishu File Rule:[^\n]*\]\s*", re.MULTILINE),
     re.compile(r"^\[Voice Interaction[^\n]*\]\n(?:.*?\n)*?\n?", re.MULTILINE),
     re.compile(r"^\[System Active Project Context\]\n(?:.*?\n)*?\n", re.MULTILINE),
     re.compile(r"^\[Active Project:[^\n]*\]\s*", re.MULTILINE),
