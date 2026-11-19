@@ -23,6 +23,7 @@ from logger import log
 import app_state
 from handlers.messages import _handle_message_async_internal
 from handlers.auth_actions import handle_auth_card_action
+from handlers.mcp_actions import handle_mcp_card_action
 from utils.auth import SCOPE_PROJECT, get_role, has_scope, is_admin
 
 # Compatibility aliases for extracted body
@@ -35,7 +36,8 @@ chat_workers = app_state.chat_workers
 def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
     log.info(f"Card action received: {data.event.action.value}")
     
-    action_value = data.event.action.value
+    action_value = data.event.action.value or {}
+    form_value = getattr(data.event.action, "form_value", None) or {}
     chat_id = data.event.context.open_chat_id
     card_message_id = data.event.context.open_message_id
     
@@ -1498,6 +1500,11 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 )
             asyncio.run_coroutine_threadsafe(do_clear_ts_key(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已清除 API Key，恢复降级兜底模式"}})
+
+    # Interactive MCP management panel actions (read/write permissions checked inside handler)
+    mcp_resp = handle_mcp_card_action(action_value, chat_id, card_message_id, form_value=form_value)
+    if mcp_resp is not None:
+        return mcp_resp
 
     # Dispatch to plugin manager
     action_name = action_value.get("action", "")

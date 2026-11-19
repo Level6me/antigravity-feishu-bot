@@ -1254,10 +1254,87 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         )
         return True, user_text
 
-    elif first_word in ("/mcp", "/agyplugin"):
+    elif first_word == "/mcp":
         import shlex
-        is_mcp = (first_word == "/mcp")
-        sub_root = "mcp" if is_mcp else "plugin"
+        from utils.mcp_manager import list_mcp_servers, run_raw_mcp_cli
+
+        raw_args = user_text[len(first_word):].strip()
+        try:
+            parsed_args = shlex.split(raw_args) if raw_args else ["list"]
+        except ValueError as ve:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"❌ 参数解析失败：{ve}")
+            )
+            return True, user_text
+
+        sub_action = parsed_args[0].lower()
+        allowed_subs = {"list", "panel", "add", "remove", "enable", "disable", "help"}
+        if sub_action not in allowed_subs:
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: send_reply_sdk(
+                    message_id,
+                    f"❌ 不支持的子命令 `{sub_action}`，允许：`list | panel | add | remove | enable | disable | help`",
+                ),
+            )
+            return True, user_text
+
+        proj = str(session_data.get("project") or "").strip()
+        ws_dir = proj if (proj and proj not in ("默认", "Default") and os.path.isdir(proj)) else os.getcwd()
+        admin_flag = is_admin(chat_id)
+
+        # Open interactive panel directly for `/mcp`, `/mcp list`, `/mcp panel`, or bare `/mcp add`
+        if sub_action in ("list", "panel") or (sub_action == "add" and len(parsed_args) == 1):
+            target_tab = "add" if sub_action == "add" else "list"
+            servers, err = await list_mcp_servers()
+            card = CardBuilder.build_mcp_panel_card(
+                servers,
+                active_tab=target_tab,
+                is_admin_user=admin_flag,
+                workspace_dir=ws_dir,
+                error_msg=err or "",
+            )
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_interactive_card_sdk(message_id, card)
+            )
+            return True, user_text
+
+        if sub_action == "help":
+            ok, out_text = await run_raw_mcp_cli(parsed_args)
+            icon = "ℹ️" if ok else "⚠️"
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"{icon} **MCP 命令行帮助**\n\n```\n{out_text[:2500]}\n```")
+            )
+            return True, user_text
+
+        if not admin_flag:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"🔒 `/mcp {sub_action}` 修改操作仅管理员可用。")
+            )
+            return True, user_text
+
+        ok, msg = await run_raw_mcp_cli(parsed_args)
+        servers, list_err = await list_mcp_servers()
+        notice_text = msg[:300] if msg else (f"已执行 `/mcp {sub_action}`" if ok else f"`/mcp {sub_action}` 执行失败")
+        card = CardBuilder.build_mcp_panel_card(
+            servers,
+            active_tab="list",
+            notice=notice_text,
+            notice_level="success" if ok else "error",
+            needs_session_reload=ok,
+            is_admin_user=admin_flag,
+            workspace_dir=ws_dir,
+            error_msg=list_err or "",
+        )
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: send_interactive_card_sdk(message_id, card)
+        )
+        return True, user_text
+
+    elif first_word == "/agyplugin":
+        import shlex
+        is_mcp = False
+        sub_root = "plugin"
         raw_args = user_text[len(first_word):].strip()
         try:
             parsed_args = shlex.split(raw_args) if raw_args else ["list"]
