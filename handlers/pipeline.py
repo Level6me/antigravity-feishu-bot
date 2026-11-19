@@ -816,7 +816,7 @@ async def _process_single_task(chat_id, task):
         if already_injected_static:
             # 同会话后续轮次：采用超精简契约头 (<280B)，消除重复头部引发的上下文滚雪球膨胀与压缩触发
             system_instruction = (
-                f"[S1 scope={t_scope} tier={adaptive_tier or 'Medium'} budget={t_steps}步/{t_mins}m | Proj: {current_proj} | 仅用简体中文回复，禁输出思考过程；命令必加timeout；禁重启main.py；禁明文打印密钥]\n"
+                f"[S1 scope={t_scope} tier={adaptive_tier or 'Medium'} budget={t_steps}步/{t_mins}m | Proj: {current_proj} | 仅用简体中文回复，禁输出思考过程；后台任务等待时亦禁用英文过渡语；命令必加timeout；禁重启main.py；禁明文打印密钥]\n"
                 f"[Feishu File Rule: 主动发文件运行 `{python_bin} {send_script_path} \"<绝对路径>\" {chat_id}` 或用 `📎 [文件名](/绝对路径)`；普通代码引用勿加 📎/📄]\n"
             )
             if boundary_dir:
@@ -854,7 +854,7 @@ async def _process_single_task(chat_id, task):
                 system_instruction = (
                     "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
                     "Any English text in the response must be limited to code syntax or technical names only. "
-                    "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles. "
+                    "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles (including English waiting placeholders like 'I am waiting for...'). "
                     "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
                 )
 

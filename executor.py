@@ -609,14 +609,14 @@ def parse_transcript_turn(transcript_path, initial_size=0):
         finished_tasks = set()
         for event in turn_lines:
             content = event.get("content") or ""
-            if "Tool is running as a background task with task id:" in content or "task id:" in content:
-                for m in re.finditer(r'task id:\s*([^\s\n]+)', content):
+            if "Tool is running as a background task with task id:" in content or "task id:" in content.lower():
+                for m in re.finditer(r'task id:\s*["\']?([^\s\n"\'<>]+)', content, re.IGNORECASE):
                     started_tasks.add(m.group(1).strip())
-            if 'Task id "' in content and "finished with result" in content:
-                for m in re.finditer(r'Task id\s*["\']([^"\']+)["\']\s+finished with result', content):
+            if "finished with result" in content.lower() and "task id" in content.lower():
+                for m in re.finditer(r'Task id\s*["\']([^"\']+)["\']\s+finished with result', content, re.IGNORECASE):
                     finished_tasks.add(m.group(1).strip())
-            elif 'Task id "' in content and ("completed" in content or "failed" in content or "cancelled" in content):
-                for m in re.finditer(r'Task id\s*["\']([^"\']+)["\']\s+(?:completed|failed|cancelled)', content):
+            elif "task id" in content.lower() and any(k in content.lower() for k in ("completed", "failed", "cancelled")):
+                for m in re.finditer(r'Task id\s*["\']([^"\']+)["\']\s+(?:completed|failed|cancelled)', content, re.IGNORECASE):
                     finished_tasks.add(m.group(1).strip())
 
         pending_tasks = started_tasks - finished_tasks
@@ -1123,9 +1123,9 @@ async def execute_antigravity(
             async def _acp_permission_notifier(target_chat_id: str, perm_token: str, params: dict) -> bool:
                 try:
                     perm_card = CardBuilder.build_acp_permission_card(perm_token, params)
-                    from lark_client import send_interactive_card_to_chat_sdk
+                    from lark_client import send_card_to_chat_sdk
                     mid = await _feishu_call(
-                        lambda: send_interactive_card_to_chat_sdk(target_chat_id, perm_card),
+                        lambda: send_card_to_chat_sdk(target_chat_id, perm_card),
                         label="acp permission card",
                     )
                     return bool(mid)
@@ -1135,16 +1135,18 @@ async def execute_antigravity(
 
             async def _acp_async_update_cb(target_chat_id: str, async_text: str):
                 try:
-                    if not async_text.strip():
+                    cleaned_async = extract_final_chinese_response(async_text or "").strip()
+                    if not cleaned_async:
                         return
-                    from lark_client import send_interactive_card_to_chat_sdk
+                    from lark_client import send_card_to_chat_sdk
                     bg_card = CardBuilder.build_ai_response(
-                        f"🔔 **[后台任务 / Subagent 异步更新]**\n\n{async_text}",
-                        user_query="后台任务异步回调",
-                        think_seconds=0,
+                        f"🔔 **[后台任务 / Subagent 异步更新]**\n\n{cleaned_async}",
+                        current_model=safe_model,
+                        current_project=cwd_dir or "默认",
+                        session_data=session_data,
                     )
                     await _feishu_call(
-                        lambda: send_interactive_card_to_chat_sdk(target_chat_id, bg_card),
+                        lambda: send_card_to_chat_sdk(target_chat_id, bg_card),
                         label="acp async update card",
                     )
                 except Exception as ae:
@@ -1346,6 +1348,13 @@ async def execute_antigravity(
             current_tool_call_id = ""
             completed_tool_call_ids = set()
             has_received_thought_chunk = False
+            _BG_WAIT_ACTION_LABEL = "正在等待后台任务完成..."
+            waiting_for_bg_tasks = False
+            bg_wait_pending_ids = set()
+            bg_wait_last_tx_poll = 0.0
+            bg_wait_post_event_seen = False
+            bg_wait_last_msg_at = 0.0
+            bg_wait_tx_final_reply = None
             typesafe_tool_audits = []
             typesafe_blocked_info = None
             evaluated_tool_calls = set()
@@ -1442,6 +1451,8 @@ async def execute_antigravity(
                                         initial_transcript_size = os.path.getsize(path)
                     elif event_type == "thought":
                         has_received_thought_chunk = True
+                        if waiting_for_bg_tasks:
+                            bg_wait_post_event_seen = True
                     elif event_type == "plan_update":
                         entries = ev.get("entries") or []
                         if isinstance(entries, list) and entries and not task_explicit_plan_locked:
@@ -1479,6 +1490,9 @@ async def execute_antigravity(
                         if step_t == "agent_response":
                             delta = step_up.get("text_delta")
                             if delta:
+                                if waiting_for_bg_tasks:
+                                    bg_wait_post_event_seen = True
+                                    bg_wait_last_msg_at = now
                                 accumulated_text += delta
                                 current_turn_text += delta
                                 parsed_steps = CardBuilder.parse_task_plan(accumulated_text)
@@ -1500,17 +1514,20 @@ async def execute_antigravity(
                                     await sess.close()
                                     should_break = True
                                     break
-                            if current_tool_action:
+                            if current_tool_action and not (waiting_for_bg_tasks and bg_wait_pending_ids):
                                 if current_tool_call_id:
                                     completed_tool_call_ids.add(current_tool_call_id)
-                                completed_tool_steps.append(current_tool_action)
-                                task_completed_tool_steps = list(completed_tool_steps)
+                                if current_tool_action != _BG_WAIT_ACTION_LABEL:
+                                    completed_tool_steps.append(current_tool_action)
+                                    task_completed_tool_steps = list(completed_tool_steps)
                                 current_tool_action = ""
                                 current_tool_call_id = ""
                                 stream_action = ""
                                 current_tool_name = ""
                                 tool_in_flight_start_time = None
                         elif step_t == "tool":
+                            if waiting_for_bg_tasks:
+                                bg_wait_post_event_seen = True
                             t_state = str(step_up.get("state", "ACTIVE") or "ACTIVE").upper()
                             t_name = step_up.get("tool_name") or step_up.get("name") or ""
                             t_info = step_up.get("tool_info", {})
@@ -1627,8 +1644,9 @@ async def execute_antigravity(
                                     if current_tool_action and act != current_tool_action and not same_call_refinement:
                                         if current_tool_call_id:
                                             completed_tool_call_ids.add(current_tool_call_id)
-                                        completed_tool_steps.append(current_tool_action)
-                                        task_completed_tool_steps = list(completed_tool_steps)
+                                        if current_tool_action != _BG_WAIT_ACTION_LABEL:
+                                            completed_tool_steps.append(current_tool_action)
+                                            task_completed_tool_steps = list(completed_tool_steps)
                                     current_tool_action = act
                                     current_tool_call_id = raw_tool_call_id
                                     stream_action = act
@@ -1738,21 +1756,70 @@ async def execute_antigravity(
                             "updated_at": time.time(),
                         }
                     elif event_type == "result":
-                        if current_tool_action:
-                            if current_tool_action not in completed_tool_steps:
-                                completed_tool_steps.append(current_tool_action)
-                            current_tool_action = ""
-                        if planned_steps:
-                            current_plan_idx = len(planned_steps) - 1
                         res_obj = ev.get("result", {})
-                        if isinstance(res_obj, dict):
-                            if res_obj.get("status") == "SUCCESS":
-                                stream_result_response = res_obj.get("response")
-                                stream_is_done = True
-                                log.info(f"[Executor] Model turn completed via stream result event.")
-                            else:
-                                stream_error_msg = str(res_obj.get("error") or res_obj.get("message") or "")
-                                log.warning(f"[Executor] Model turn finished with status: {res_obj.get('status')}, error: {stream_error_msg}")
+                        if isinstance(res_obj, dict) and res_obj.get("status") == "SUCCESS":
+                            # 检测是否仍有后台任务在运行（例如 run_command 超 10s 转后台后模型交出轮次，
+                            # agy acp 会提前返回 end_turn；此时严禁把“正在等待...”当作最终答复！）
+                            pending_from_acp = set(res_obj.get("pending_bg_tasks") or [])
+                            pending_from_tx = set()
+                            tx_for_bg = target_transcript_path
+                            if not tx_for_bg:
+                                eff_cid = conv_id or session_data.get("conversation") or getattr(sess, "conversation_id", "")
+                                if eff_cid:
+                                    cand_tx = get_transcript_path(eff_cid)
+                                    if os.path.exists(cand_tx):
+                                        tx_for_bg = cand_tx
+                                        target_transcript_path = cand_tx
+                                if not tx_for_bg:
+                                    tx_for_bg = await loop.run_in_executor(None, get_latest_transcript_file)
+                                    if tx_for_bg:
+                                        target_transcript_path = tx_for_bg
+                            if tx_for_bg and os.path.exists(tx_for_bg):
+                                _, pending_from_tx, _ = await loop.run_in_executor(
+                                    None, lambda: parse_transcript_turn(tx_for_bg, initial_transcript_size)
+                                )
+                            active_pending_bg = pending_from_acp | pending_from_tx
+                            if active_pending_bg:
+                                waiting_for_bg_tasks = True
+                                bg_wait_pending_ids = set(active_pending_bg)
+                                bg_wait_last_tx_poll = now
+                                bg_wait_post_event_seen = False
+                                bg_wait_last_msg_at = 0.0
+                                if hasattr(turn_stream, "resume_for_background_tasks"):
+                                    turn_stream.resume_for_background_tasks()
+                                # 丢弃交出轮次时的过渡等待语（如 "I am waiting for..."），保留步骤进度卡片继续等待后台唤醒
+                                current_turn_text = ""
+                                accumulated_text = ""
+                                cached_raw_stream_buf = ""
+                                cached_clean_partial = ""
+                                if not current_tool_action:
+                                    current_tool_action = last_tool_action or _BG_WAIT_ACTION_LABEL
+                                stream_action = current_tool_action
+                                if tool_in_flight_start_time is None:
+                                    tool_in_flight_start_time = now
+                                last_progress_time = now
+                                log.info(
+                                    f"[Executor] Deferring ACP turn completion for chat {chat_id}: "
+                                    f"{len(active_pending_bg)} background task(s) still running ({sorted(active_pending_bg)[:3]})"
+                                )
+                                continue
+
+                            if current_tool_action:
+                                if current_tool_action != _BG_WAIT_ACTION_LABEL and current_tool_action not in completed_tool_steps:
+                                    completed_tool_steps.append(current_tool_action)
+                                current_tool_action = ""
+                            if planned_steps:
+                                current_plan_idx = len(planned_steps) - 1
+                            stream_result_response = res_obj.get("response")
+                            stream_is_done = True
+                            log.info(f"[Executor] Model turn completed via stream result event.")
+                        elif isinstance(res_obj, dict):
+                            if current_tool_action:
+                                if current_tool_action != _BG_WAIT_ACTION_LABEL and current_tool_action not in completed_tool_steps:
+                                    completed_tool_steps.append(current_tool_action)
+                                current_tool_action = ""
+                            stream_error_msg = str(res_obj.get("error") or res_obj.get("message") or "")
+                            log.warning(f"[Executor] Model turn finished with status: {res_obj.get('status')}, error: {stream_error_msg}")
                         else:
                             log.warning(f"[Executor] Model turn finished with non-dict result: {res_obj}")
                         should_break = True
@@ -1774,6 +1841,77 @@ async def execute_antigravity(
 
                 if should_break or stream_is_done:
                     break
+
+                # 若处于 ACP 后台任务续等模式：定时轮询 transcript.jsonl 与会话后台任务集合，
+                # 待所有后台任务完成且模型输出最终非工具答复后，无缝收敛主卡片！
+                if waiting_for_bg_tasks and (now - bg_wait_last_tx_poll >= 0.45):
+                    bg_wait_last_tx_poll = now
+                    tx_for_bg = target_transcript_path
+                    if not tx_for_bg:
+                        eff_cid = conv_id or session_data.get("conversation") or getattr(sess, "conversation_id", "")
+                        if eff_cid:
+                            cand_tx = get_transcript_path(eff_cid)
+                            if os.path.exists(cand_tx):
+                                tx_for_bg = cand_tx
+                                target_transcript_path = cand_tx
+                    if tx_for_bg and os.path.exists(tx_for_bg):
+                        try:
+                            bg_turn_lines, bg_pending_now, bg_tx_done = await loop.run_in_executor(
+                                None, lambda: parse_transcript_turn(tx_for_bg, initial_transcript_size)
+                            )
+                            bg_wait_pending_ids = set(bg_pending_now)
+                            if bg_pending_now:
+                                last_progress_time = now
+                            elif bg_tx_done:
+                                # 短暂排空管道中可能尚未读出的尾部流式文本
+                                await asyncio.sleep(0.15)
+                                if hasattr(turn_stream, "drain_all"):
+                                    for tail_ev in turn_stream.drain_all():
+                                        if tail_ev.get("event") == "message" and tail_ev.get("content"):
+                                            accumulated_text += tail_ev["content"]
+                                            current_turn_text += tail_ev["content"]
+                                bg_tx_final = extract_final_response_from_turn_lines(bg_turn_lines)
+                                if bg_tx_final or current_turn_text.strip():
+                                    bg_wait_tx_final_reply = bg_tx_final
+                                    stream_result_response = current_turn_text.strip() or bg_tx_final
+                                    if current_tool_action and current_tool_action != _BG_WAIT_ACTION_LABEL:
+                                        if current_tool_action not in completed_tool_steps:
+                                            completed_tool_steps.append(current_tool_action)
+                                    current_tool_action = ""
+                                    stream_action = ""
+                                    if planned_steps:
+                                        current_plan_idx = len(planned_steps) - 1
+                                    waiting_for_bg_tasks = False
+                                    stream_is_done = True
+                                    log.info(
+                                        f"[Executor] Deferred ACP background-task turn completed via transcript for chat {chat_id}."
+                                    )
+                                    break
+                        except Exception as bg_poll_err:
+                            log.debug(f"[Executor] Background-task transcript poll error: {bg_poll_err}")
+                    else:
+                        # 无本地 transcript 文件时的纯协议兜底（如单元测试或远端无落盘场景）
+                        sess_bg = getattr(sess, "_active_turn_pending_bg_tasks", None)
+                        if isinstance(sess_bg, set):
+                            bg_wait_pending_ids = set(sess_bg)
+                        if bg_wait_pending_ids:
+                            last_progress_time = now
+                        elif (
+                            bg_wait_post_event_seen
+                            and current_turn_text.strip()
+                            and not current_tool_action
+                            and bg_wait_last_msg_at > 0
+                            and (now - bg_wait_last_msg_at >= 0.8)
+                        ):
+                            stream_result_response = current_turn_text.strip()
+                            if planned_steps:
+                                current_plan_idx = len(planned_steps) - 1
+                            waiting_for_bg_tasks = False
+                            stream_is_done = True
+                            log.info(
+                                f"[Executor] Deferred ACP background-task turn completed via stream quiet window for chat {chat_id}."
+                            )
+                            break
 
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
@@ -1907,7 +2045,10 @@ async def execute_antigravity(
                 }
                 is_fast_tool = bool(current_tool_name in FAST_LOCAL_TOOLS or any(k in current_tool_action for k in ["查看", "读取", "搜索", "写入", "编辑"]))
                 tool_elapsed = (now - tool_in_flight_start_time) if tool_in_flight_start_time else 0
-                has_tool_in_flight = bool(current_tool_action or stream_action) and not is_fast_tool and (is_worker_active or tool_elapsed < 180)
+                has_tool_in_flight = (
+                    (waiting_for_bg_tasks and bool(bg_wait_pending_ids))
+                    or (bool(current_tool_action or stream_action) and not is_fast_tool and (is_worker_active or tool_elapsed < 180))
+                )
                 
                 # 若工具正在真实执行（例如编译、云端打包、测试运行），基准等待时长使用 TOOL_EXECUTION_TIMEOUT
                 THINK_STALL_TIMEOUT = getattr(config, "THINK_STALL_TIMEOUT", 120)
@@ -1973,7 +2114,7 @@ async def execute_antigravity(
                         cached_raw_stream_buf = active_stream_buf
                         cached_clean_partial = clean_partial
 
-                has_tool_in_flight = bool(current_tool_action or stream_action)
+                has_tool_in_flight = bool(current_tool_action or stream_action) or (waiting_for_bg_tasks and bool(bg_wait_pending_ids))
                 is_complex = bool(planned_steps or completed_tool_steps)
 
                 # 判定是否切换到打字机文本流式输出：
@@ -2246,6 +2387,10 @@ async def execute_antigravity(
             # 彻底杜绝将多步工具调用前序轮次的过渡推理（Thinking/Chatter）拼接到最终结果中！
             if typesafe_blocked_info:
                 pass
+            elif bg_wait_tx_final_reply and (
+                not current_turn_text.strip() or len(bg_wait_tx_final_reply) >= len(current_turn_text.strip())
+            ):
+                final_reply = bg_wait_tx_final_reply.strip()
             elif current_turn_text and current_turn_text.strip():
                 final_reply = current_turn_text.strip()
             elif stream_result_response and stream_result_response.strip():

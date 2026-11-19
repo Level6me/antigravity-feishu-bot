@@ -383,6 +383,268 @@ class TestP2AcpAndCommands(unittest.TestCase):
             f"Expected completed read_file step with filename, got: {all_completed}",
         )
 
+    def test_acp_extract_bg_task_transitions(self):
+        from acp_client import _extract_bg_task_transitions
+
+        started, finished = _extract_bg_task_transitions({
+            "sessionUpdate": "tool_call_update",
+            "rawOutput": {
+                "text": "Tool is running as a background task with task id: conv-1/task-42\nLogs: /tmp/a.log"
+            },
+        })
+        self.assertEqual(started, ["conv-1/task-42"])
+        self.assertEqual(finished, [])
+
+        started2, finished2 = _extract_bg_task_transitions({
+            "sessionUpdate": "tool_call_update",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": 'Task id "conv-1/task-42" finished with result: ok'}}
+            ],
+        })
+        self.assertEqual(started2, [])
+        self.assertEqual(finished2, ["conv-1/task-42"])
+
+    def test_executor_defers_completion_when_acp_background_task_pending(self):
+        """Regression test: ACP early end_turn while a background task runs must NOT emit 'I am waiting...' as final reply."""
+        from acp_client import AcpTurnEventStream, _acp_update_to_stream_event
+        from executor import execute_antigravity
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tx_path = os.path.join(tmpdir, "transcript.jsonl")
+            # Initial transcript lines for this turn (step 1: user input, step 2: backgrounded tool, step 3: waiting turn)
+            with open(tx_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"step_index": 1, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "content": "先提交吧"}) + "\n")
+                f.write(json.dumps({
+                    "step_index": 2,
+                    "source": "MODEL",
+                    "type": "GENERIC",
+                    "status": "RUNNING",
+                    "content": "Tool is running as a background task with task id: conv-bg/task-99",
+                }) + "\n")
+                f.write(json.dumps({
+                    "step_index": 3,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "I am waiting for the test verification and local commit command to finish.",
+                }) + "\n")
+
+            class FakeBgAcpSession:
+                transport_name = "acp"
+
+                def __init__(self):
+                    self.lock = asyncio.Lock()
+                    self.process = MagicMock(pid=os.getpid(), returncode=None)
+                    self.conversation_id = "conv-bg"
+                    self.model = "gemini-3.8-flash-low"
+                    self.effort = "low"
+                    self.agent_mode = "default"
+                    self._active_turn_pending_bg_tasks = {"conv-bg/task-99"}
+
+                def is_alive(self):
+                    return True
+
+                def get_recent_stderr(self):
+                    return ""
+
+                async def close(self):
+                    pass
+
+                async def send_prompt_and_stream(self, prompt_text):
+                    q = asyncio.Queue()
+                    cache = {}
+
+                    async def feeder():
+                        await q.put({"event": "init", "conversation_id": "conv-bg"})
+                        ev1 = _acp_update_to_stream_event({
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": "tc_bg_1",
+                            "title": "Run unittest and commit",
+                            "kind": "execute",
+                            "status": "in_progress",
+                            "rawInput": {"CommandLine": "timeout 30 python3 -m unittest"},
+                        }, tool_call_cache=cache)
+                        await q.put(ev1)
+                        await asyncio.sleep(0.05)
+                        await q.put({
+                            "event": "message",
+                            "role": "assistant",
+                            "content": "I am waiting for the test verification and local commit command to finish.",
+                        })
+                        # ACP prematurely ends the prompt turn while task-99 is still running
+                        await q.put({
+                            "event": "result",
+                            "result": {
+                                "status": "SUCCESS",
+                                "response": "I am waiting for the test verification and local commit command to finish.",
+                                "stopReason": "end_turn",
+                                "pending_bg_tasks": ["conv-bg/task-99"],
+                            },
+                        })
+                        # Simulate background task finishing 0.35s later and waking up the agent
+                        await asyncio.sleep(0.35)
+                        self._active_turn_pending_bg_tasks.clear()
+                        await q.put({
+                            "event": "message",
+                            "role": "assistant",
+                            "content": "已完成本地代码提交与回归测试校验。",
+                        })
+                        with open(tx_path, "a", encoding="utf-8") as af:
+                            af.write(json.dumps({
+                                "step_index": 4,
+                                "source": "SYSTEM",
+                                "type": "SYSTEM_MESSAGE",
+                                "status": "DONE",
+                                "content": 'Task id "conv-bg/task-99" finished with result: OK',
+                            }) + "\n")
+                            af.write(json.dumps({
+                                "step_index": 5,
+                                "source": "MODEL",
+                                "type": "PLANNER_RESPONSE",
+                                "status": "DONE",
+                                "content": "已完成本地代码提交与回归测试校验。",
+                            }) + "\n")
+
+                    asyncio.create_task(feeder())
+                    return AcpTurnEventStream(q)
+
+            fake_sess = FakeBgAcpSession()
+            final_cards = []
+            session_data = {
+                "model": "gemini-3.8-flash-low",
+                "reasoning_effort": "low",
+                "project": ROOT_DIR,
+                "conversation": "",
+                "transport": "acp",
+            }
+
+            async def run():
+                with patch("session_pool.session_pool.get_or_create", return_value=fake_sess), \
+                     patch("session_pool.session_pool.sync_live_session_config", AsyncMock()), \
+                     patch("session_pool.session_pool.update_conversation_id"), \
+                     patch("executor.get_transcript_path", return_value=tx_path), \
+                     patch("executor.allow_execution", return_value=True), \
+                     patch("executor.is_admin", return_value=True), \
+                     patch("executor.save_session_async", AsyncMock()), \
+                     patch("executor.send_interactive_card_sdk", return_value="om_bg_card"), \
+                     patch("executor.patch_interactive_card_sdk", side_effect=lambda mid, c: final_cards.append(c) or True):
+                    return await execute_antigravity(
+                        chat_id="oc_test_bg_defer",
+                        user_text="先提交吧",
+                        message_id="om_bg_user",
+                        bot_reply_msg_id="om_bg_card",
+                        session_data=session_data,
+                        is_new_conversation=True,
+                        system_instruction="",
+                        final_prompt="先提交吧",
+                        downloaded_file_name=None,
+                        download_success=False,
+                        running_processes={},
+                    )
+
+            is_err = asyncio.run(run())
+            self.assertFalse(is_err)
+            self.assertGreater(len(final_cards), 0)
+            last_card_json = json.dumps(final_cards[-1], ensure_ascii=False)
+            self.assertIn("已完成本地代码提交与回归测试校验", last_card_json)
+            self.assertNotIn("I am waiting for", last_card_json)
+
+    def test_acp_callbacks_use_valid_lark_sdk_and_card_builder(self):
+        """Regression test: ACP async update & permission callbacks must call send_card_to_chat_sdk without ImportError/TypeError."""
+        from acp_client import AcpTurnEventStream
+        from executor import execute_antigravity
+
+        captured_callbacks = {}
+        sent_cards = []
+
+        class FakeMinimalAcpSession:
+            transport_name = "acp"
+
+            def __init__(self):
+                self.lock = asyncio.Lock()
+                self.process = MagicMock(pid=os.getpid(), returncode=None)
+                self.conversation_id = "conv-cb"
+                self.model = "gemini-3.8-flash-low"
+                self.effort = "low"
+                self.agent_mode = "default"
+                self._active_turn_pending_bg_tasks = set()
+
+            def is_alive(self):
+                return True
+
+            def get_recent_stderr(self):
+                return ""
+
+            async def close(self):
+                pass
+
+            async def send_prompt_and_stream(self, prompt_text):
+                q = asyncio.Queue()
+                await q.put({"event": "init", "conversation_id": "conv-cb"})
+                await q.put({
+                    "event": "result",
+                    "result": {"status": "SUCCESS", "response": "ok", "stopReason": "end_turn"},
+                })
+                return AcpTurnEventStream(q)
+
+        fake_sess = FakeMinimalAcpSession()
+
+        def fake_get_or_create(*args, **kwargs):
+            captured_callbacks["permission_notifier"] = kwargs.get("permission_notifier")
+            captured_callbacks["async_update_callback"] = kwargs.get("async_update_callback")
+            return fake_sess
+
+        session_data = {
+            "model": "gemini-3.8-flash-low",
+            "reasoning_effort": "low",
+            "project": ROOT_DIR,
+            "conversation": "",
+            "transport": "acp",
+        }
+
+        async def run():
+            with patch("session_pool.session_pool.get_or_create", side_effect=fake_get_or_create), \
+                 patch("session_pool.session_pool.sync_live_session_config", AsyncMock()), \
+                 patch("session_pool.session_pool.update_conversation_id"), \
+                 patch("executor.allow_execution", return_value=True), \
+                 patch("executor.is_admin", return_value=True), \
+                 patch("executor.save_session_async", AsyncMock()), \
+                 patch("executor.send_interactive_card_sdk", return_value="om_cb_card"), \
+                 patch("executor.patch_interactive_card_sdk", return_value=True), \
+                 patch("lark_client.send_card_to_chat_sdk", side_effect=lambda cid, card: sent_cards.append((cid, card)) or True):
+                await execute_antigravity(
+                    chat_id="oc_test_cb",
+                    user_text="测试回调",
+                    message_id="om_cb_user",
+                    bot_reply_msg_id="om_cb_card",
+                    session_data=session_data,
+                    is_new_conversation=True,
+                    system_instruction="",
+                    final_prompt="测试回调",
+                    downloaded_file_name=None,
+                    download_success=False,
+                    running_processes={},
+                )
+                self.assertIsNotNone(captured_callbacks.get("permission_notifier"))
+                self.assertIsNotNone(captured_callbacks.get("async_update_callback"))
+                perm_ok = await captured_callbacks["permission_notifier"](
+                    "oc_test_cb",
+                    "tok_123",
+                    {"toolCall": {"title": "Run shell"}, "options": [{"optionId": "allow_once", "name": "允许"}]},
+                )
+                self.assertTrue(perm_ok)
+                await captured_callbacks["async_update_callback"](
+                    "oc_test_cb",
+                    "后台任务已完成并通过全部测试。",
+                )
+
+        asyncio.run(run())
+        self.assertEqual(len(sent_cards), 2)
+        self.assertEqual(sent_cards[0][0], "oc_test_cb")
+        self.assertEqual(sent_cards[1][0], "oc_test_cb")
+        async_card_json = json.dumps(sent_cards[1][1], ensure_ascii=False)
+        self.assertIn("后台任务已完成并通过全部测试", async_card_json)
+
     def test_real_agy_acp_handshake_set_model_and_mode(self):
         """Real smoke test against local `agy 1.5.12` ACP stdio server."""
         import config

@@ -233,6 +233,48 @@ def _infer_acp_tool_name(raw_name: str, title: str, kind: str, params: Dict[str,
     return ""
 
 
+_BG_TASK_STARTED_RE = re.compile(
+    r'Tool is running as a background task with task id:\s*["\']?([^\s\n"\'<>]+)',
+    re.IGNORECASE,
+)
+_BG_TASK_FINISHED_RE = re.compile(
+    r'Task id\s*["\']([^"\']+)["\']\s+(?:finished with result|completed|failed|cancelled)',
+    re.IGNORECASE,
+)
+
+
+def _collect_acp_text_fragments(value: Any) -> List[str]:
+    """Recursively collect plain text strings from ACP rawOutput / content structures."""
+    out: List[str] = []
+    if isinstance(value, str):
+        if value:
+            out.append(value)
+    elif isinstance(value, dict):
+        for k in ("text", "output", "stdout", "stderr", "message", "content"):
+            if k in value and value[k] is not None:
+                out.extend(_collect_acp_text_fragments(value[k]))
+    elif isinstance(value, list):
+        for item in value:
+            out.extend(_collect_acp_text_fragments(item))
+    return out
+
+
+def _extract_bg_task_transitions(update: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """Extract (started_task_ids, finished_task_ids) from an ACP tool_call_update payload."""
+    if not isinstance(update, dict):
+        return [], []
+    fragments: List[str] = []
+    for key in ("rawOutput", "content", "output"):
+        if key in update and update[key] is not None:
+            fragments.extend(_collect_acp_text_fragments(update[key]))
+    if not fragments:
+        return [], []
+    joined = "\n".join(fragments)
+    started = [m.group(1).strip() for m in _BG_TASK_STARTED_RE.finditer(joined) if m.group(1).strip()]
+    finished = [m.group(1).strip() for m in _BG_TASK_FINISHED_RE.finditer(joined) if m.group(1).strip()]
+    return started, finished
+
+
 def _acp_update_to_stream_event(
     update: Dict[str, Any],
     tool_call_cache: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -372,6 +414,10 @@ class AcpTurnEventStream:
                 break
         return events
 
+    def resume_for_background_tasks(self):
+        """Keep consuming `session/update` events after `end_turn` while background tasks finish."""
+        self.is_done = False
+
     async def aclose(self):
         self.is_done = True
         if self._cleanup_cb:
@@ -423,6 +469,7 @@ class AcpPersistentSession:
         self._active_prompt_rpc_id: Optional[int] = None
         self._active_turn_text_chunks: List[str] = []
         self._active_turn_tool_calls: Dict[str, Dict[str, Any]] = {}
+        self._active_turn_pending_bg_tasks: set = set()
         self._idle_text_chunks: List[str] = []
         self._idle_flush_task: Optional[asyncio.Task] = None
         self.agent_capabilities: Dict[str, Any] = {}
@@ -699,6 +746,7 @@ class AcpPersistentSession:
         self._active_turn_queue = queue
         self._active_turn_text_chunks = []
         self._active_turn_tool_calls = {}
+        self._active_turn_pending_bg_tasks = set()
         self._in_turn = True
 
         # Emit synthetic `init` event so executor immediately persists conversation_id
@@ -725,6 +773,7 @@ class AcpPersistentSession:
                 self._active_turn_queue = None
                 self._active_prompt_rpc_id = None
                 self._active_turn_tool_calls.clear()
+                self._active_turn_pending_bg_tasks.clear()
                 self._in_turn = False
 
         return AcpTurnEventStream(queue, cleanup_cb=_cleanup)
@@ -876,6 +925,12 @@ class AcpPersistentSession:
                         "size": update.get("size", 0),
                         "updated_at": time.time(),
                     }
+                if update.get("sessionUpdate") in ("tool_call", "tool_call_update"):
+                    bg_started, bg_finished = _extract_bg_task_transitions(update)
+                    for tid in bg_started:
+                        self._active_turn_pending_bg_tasks.add(tid)
+                    for tid in bg_finished:
+                        self._active_turn_pending_bg_tasks.discard(tid)
                 stream_ev = _acp_update_to_stream_event(update, tool_call_cache=self._active_turn_tool_calls)
                 if not stream_ev:
                     return
@@ -896,10 +951,10 @@ class AcpPersistentSession:
             rpc_id = msg["id"]
             if rpc_id == self._active_prompt_rpc_id and self._active_turn_queue is not None:
                 q = self._active_turn_queue
-                self._active_turn_queue = None
                 self._active_prompt_rpc_id = None
-                self._in_turn = False
                 if "error" in msg and msg["error"]:
+                    self._active_turn_queue = None
+                    self._in_turn = False
                     err = msg["error"]
                     err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
                     await q.put({
@@ -913,8 +968,12 @@ class AcpPersistentSession:
                     final_text = "".join(self._active_turn_text_chunks)
                     stop_reason = res.get("stopReason", "end_turn")
                     if stop_reason == "cancelled":
+                        self._active_turn_queue = None
+                        self._in_turn = False
                         await q.put({"event": "cancelled", "message": "Turn cancelled"})
                     else:
+                        # Keep `_active_turn_queue` attached until `turn_stream.aclose()` so
+                        # if executor detects pending background tasks, no wake-up notifications are lost.
                         await q.put({
                             "event": "result",
                             "result": {
@@ -922,6 +981,7 @@ class AcpPersistentSession:
                                 "response": final_text,
                                 "stopReason": stop_reason,
                                 "usage": res.get("usage") or {},
+                                "pending_bg_tasks": sorted(self._active_turn_pending_bg_tasks),
                             },
                         })
                 return
