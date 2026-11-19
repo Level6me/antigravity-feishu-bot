@@ -1124,7 +1124,10 @@ async def execute_antigravity(
                 try:
                     perm_card = CardBuilder.build_acp_permission_card(perm_token, params)
                     from lark_client import send_interactive_card_to_chat_sdk
-                    mid = await _feishu_call(send_interactive_card_to_chat_sdk, target_chat_id, perm_card)
+                    mid = await _feishu_call(
+                        lambda: send_interactive_card_to_chat_sdk(target_chat_id, perm_card),
+                        label="acp permission card",
+                    )
                     return bool(mid)
                 except Exception as pe:
                     log.warning(f"[Executor] Failed to send ACP permission card: {pe}")
@@ -1140,7 +1143,10 @@ async def execute_antigravity(
                         user_query="后台任务异步回调",
                         think_seconds=0,
                     )
-                    await _feishu_call(send_interactive_card_to_chat_sdk, target_chat_id, bg_card)
+                    await _feishu_call(
+                        lambda: send_interactive_card_to_chat_sdk(target_chat_id, bg_card),
+                        label="acp async update card",
+                    )
                 except Exception as ae:
                     log.warning(f"[Executor] Failed to push ACP async update: {ae}")
 
@@ -1337,6 +1343,9 @@ async def execute_antigravity(
             completed_tool_steps = list(task_completed_tool_steps)
             current_tool_action = ""
             current_tool_name = ""
+            current_tool_call_id = ""
+            completed_tool_call_ids = set()
+            has_received_thought_chunk = False
             typesafe_tool_audits = []
             typesafe_blocked_info = None
             evaluated_tool_calls = set()
@@ -1431,9 +1440,42 @@ async def execute_antigravity(
                                     target_transcript_path = path
                                     if initial_transcript_size == 0:
                                         initial_transcript_size = os.path.getsize(path)
-                    elif event_type == "step_update":
-                        step_up = ev.get("step_update", {})
-                        step_t = step_up.get("step_type")
+                    elif event_type == "thought":
+                        has_received_thought_chunk = True
+                    elif event_type == "plan_update":
+                        entries = ev.get("entries") or []
+                        if isinstance(entries, list) and entries and not task_explicit_plan_locked:
+                            acp_steps = [
+                                str(item.get("content") or "").strip()
+                                for item in entries
+                                if isinstance(item, dict) and str(item.get("content") or "").strip()
+                            ]
+                            if acp_steps:
+                                planned_steps = acp_steps[:8]
+                                active_idx = 0
+                                for idx_e, item in enumerate(entries[:8]):
+                                    if isinstance(item, dict) and (item.get("status") or "").lower() in ("in_progress", "active"):
+                                        active_idx = idx_e
+                                        break
+                                    if isinstance(item, dict) and (item.get("status") or "").lower() in ("completed", "done"):
+                                        active_idx = min(len(planned_steps) - 1, idx_e + 1)
+                                current_plan_idx = max(current_plan_idx, min(active_idx, len(planned_steps) - 1))
+                                task_planned_steps = list(planned_steps)
+                                task_plan_idx = current_plan_idx
+                    elif event_type in ("step_update", "message"):
+                        if event_type == "message":
+                            step_up = {"step_type": "agent_response", "text_delta": ev.get("content") or ""}
+                            step_t = "agent_response"
+                        else:
+                            step_up = ev.get("step_update", {})
+                            step_t = step_up.get("step_type")
+                            if not step_t and (
+                                step_up.get("tool_name")
+                                or step_up.get("name")
+                                or step_up.get("call_id")
+                                or step_up.get("action")
+                            ):
+                                step_t = "tool"
                         if step_t == "agent_response":
                             delta = step_up.get("text_delta")
                             if delta:
@@ -1459,14 +1501,17 @@ async def execute_antigravity(
                                     should_break = True
                                     break
                             if current_tool_action:
+                                if current_tool_call_id:
+                                    completed_tool_call_ids.add(current_tool_call_id)
                                 completed_tool_steps.append(current_tool_action)
                                 task_completed_tool_steps = list(completed_tool_steps)
                                 current_tool_action = ""
+                                current_tool_call_id = ""
                                 stream_action = ""
                                 current_tool_name = ""
                                 tool_in_flight_start_time = None
                         elif step_t == "tool":
-                            t_state = step_up.get("state", "ACTIVE")
+                            t_state = str(step_up.get("state", "ACTIVE") or "ACTIVE").upper()
                             t_name = step_up.get("tool_name") or step_up.get("name") or ""
                             t_info = step_up.get("tool_info", {})
                             if not isinstance(t_info, dict):
@@ -1474,7 +1519,9 @@ async def execute_antigravity(
                             t_params = t_info.get("parameters") or t_info.get("args") or step_up.get("parameters") or step_up.get("args") or {}
                             if not isinstance(t_params, dict):
                                 t_params = {}
-                            act = format_tool_action(t_name, t_params)
+                            raw_act = step_up.get("action") or ""
+                            raw_tool_call_id = str(step_up.get("call_id") or step_up.get("tool_call_id") or "")
+                            act = format_tool_action(t_name, t_params, raw_action=raw_act)
 
                             # Isolate turn buffer: any text emitted BEFORE a tool invocation is transitional pre-tool thinking/commentary,
                             # so clear current_turn_text so only post-tool final conclusion text is delivered as final_reply!
@@ -1514,64 +1561,76 @@ async def execute_antigravity(
                             raw_query_param = (t_params.get("query") or t_params.get("Query") or "").strip()
                             candidate_raw_sig = raw_cmd_param or (f"{raw_path_param}{raw_range_param}" if raw_path_param else "") or raw_query_param
 
-                            if t_state == "DONE":
-                                total_tool_invocations += 1
-                                effective_raw_sig = (
-                                    f"{t_name}:{hashlib.sha1(candidate_raw_sig.encode('utf-8', errors='ignore')).hexdigest()}"
-                                    if candidate_raw_sig
-                                    else current_tool_raw_sig
-                                )
-                                if effective_raw_sig:
-                                    recent_tool_signatures.append(effective_raw_sig)
-                                else:
-                                    # When neither ACTIVE nor DONE provided raw command/path parameters,
-                                    # append a unique step sentinel so generic UI labels (e.g. "正在执行 Python 脚本")
-                                    # NEVER falsely collide and trigger the stagnation watchdog!
-                                    recent_tool_signatures.append(f"{t_name}:step_{total_tool_invocations}")
-                                done_act = act or current_tool_action
-                                if done_act:
-                                    completed_tool_steps.append(done_act)
-                                    task_completed_tool_steps = list(completed_tool_steps)
-                                    if planned_steps:
-                                        current_plan_idx = CardBuilder.match_step_index(
-                                            planned_steps, current_plan_idx, done_act, len(completed_tool_steps)
-                                        )
-                                        task_plan_idx = max(task_plan_idx, current_plan_idx)
-                                current_tool_action = ""
-                                current_tool_raw_sig = ""
-                                stream_action = ""
-                                current_tool_name = ""
-                                tool_in_flight_start_time = None
-
-                                # Budget & Stagnation Watchdog check on tool completion:
-                                # Only trigger repeated-command stagnation if >= 4 consecutive tool calls share the EXACT same raw parameter SHA1 hash!
-                                if (
-                                    len(recent_tool_signatures) >= 4
-                                    and len(set(recent_tool_signatures[-4:])) == 1
-                                    and effective_raw_sig
-                                ):
-                                    budget_intercepted = True
-                                    disp_act = (done_act or act or t_name)[:40]
-                                    budget_exceeded_reason = f"连续 4 次重复执行完全相同的底层命令/参数 ({disp_act})，触发防原地打转看门狗"
-                                elif total_tool_invocations >= max_turn_steps:
-                                    budget_intercepted = True
-                                    budget_exceeded_reason = (
-                                        f"单轮工具调用步数已达范围契约上限 ({total_tool_invocations}/{max_turn_steps} 步, "
-                                        f"范围: {scope_info.get('scope_label') or scope_info.get('scope', 'modify')})"
+                            if t_state in ("DONE", "ERROR", "FAILED", "CANCELLED"):
+                                already_counted = bool(raw_tool_call_id and raw_tool_call_id in completed_tool_call_ids)
+                                if not already_counted:
+                                    if raw_tool_call_id:
+                                        completed_tool_call_ids.add(raw_tool_call_id)
+                                    total_tool_invocations += 1
+                                    effective_raw_sig = (
+                                        f"{t_name}:{hashlib.sha1(candidate_raw_sig.encode('utf-8', errors='ignore')).hexdigest()}"
+                                        if candidate_raw_sig
+                                        else current_tool_raw_sig
                                     )
-                                if budget_intercepted:
-                                    log.warning(f"[BudgetWatchdog] Intercepting turn on attempt {attempt} for chat {chat_id}: {budget_exceeded_reason}")
-                                    await sess.close()
-                                    should_break = True
-                                    break
+                                    if effective_raw_sig:
+                                        recent_tool_signatures.append(effective_raw_sig)
+                                    else:
+                                        # When neither ACTIVE nor DONE provided raw command/path parameters,
+                                        # append a unique step sentinel so generic UI labels (e.g. "正在执行 Python 脚本")
+                                        # NEVER falsely collide and trigger the stagnation watchdog!
+                                        recent_tool_signatures.append(f"{t_name}:step_{total_tool_invocations}")
+                                    done_act = act or current_tool_action
+                                    if done_act:
+                                        completed_tool_steps.append(done_act)
+                                        task_completed_tool_steps = list(completed_tool_steps)
+                                        if planned_steps:
+                                            current_plan_idx = CardBuilder.match_step_index(
+                                                planned_steps, current_plan_idx, done_act, len(completed_tool_steps)
+                                            )
+                                            task_plan_idx = max(task_plan_idx, current_plan_idx)
+                                    if not raw_tool_call_id or raw_tool_call_id == current_tool_call_id:
+                                        current_tool_action = ""
+                                        current_tool_call_id = ""
+                                        current_tool_raw_sig = ""
+                                        stream_action = ""
+                                        current_tool_name = ""
+                                        tool_in_flight_start_time = None
+
+                                    # Budget & Stagnation Watchdog check on tool completion:
+                                    # Only trigger repeated-command stagnation if >= 4 consecutive tool calls share the EXACT same raw parameter SHA1 hash!
+                                    if (
+                                        len(recent_tool_signatures) >= 4
+                                        and len(set(recent_tool_signatures[-4:])) == 1
+                                        and effective_raw_sig
+                                    ):
+                                        budget_intercepted = True
+                                        disp_act = (done_act or act or t_name)[:40]
+                                        budget_exceeded_reason = f"连续 4 次重复执行完全相同的底层命令/参数 ({disp_act})，触发防原地打转看门狗"
+                                    elif total_tool_invocations >= max_turn_steps:
+                                        budget_intercepted = True
+                                        budget_exceeded_reason = (
+                                            f"单轮工具调用步数已达范围契约上限 ({total_tool_invocations}/{max_turn_steps} 步, "
+                                            f"范围: {scope_info.get('scope_label') or scope_info.get('scope', 'modify')})"
+                                        )
+                                    if budget_intercepted:
+                                        log.warning(f"[BudgetWatchdog] Intercepting turn on attempt {attempt} for chat {chat_id}: {budget_exceeded_reason}")
+                                        await sess.close()
+                                        should_break = True
+                                        break
                             else:
                                 if candidate_raw_sig:
                                     current_tool_raw_sig = f"{t_name}:{hashlib.sha1(candidate_raw_sig.encode('utf-8', errors='ignore')).hexdigest()}"
                                 if act:
-                                    if current_tool_action and act != current_tool_action:
+                                    same_call_refinement = bool(
+                                        raw_tool_call_id and current_tool_call_id and raw_tool_call_id == current_tool_call_id
+                                    )
+                                    if current_tool_action and act != current_tool_action and not same_call_refinement:
+                                        if current_tool_call_id:
+                                            completed_tool_call_ids.add(current_tool_call_id)
                                         completed_tool_steps.append(current_tool_action)
                                         task_completed_tool_steps = list(completed_tool_steps)
                                     current_tool_action = act
+                                    current_tool_call_id = raw_tool_call_id
                                     stream_action = act
                                     last_tool_action = act
                                     current_tool_name = t_name
@@ -1727,6 +1786,7 @@ async def execute_antigravity(
                 if (
                     not sidecar_probe_launched
                     and not accumulated_text.strip()
+                    and not has_received_thought_chunk
                     and not completed_tool_steps
                     and not current_tool_action
                     and attempt_elapsed_seconds >= probe_delay_s

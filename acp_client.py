@@ -134,7 +134,109 @@ def _map_acp_tool_state(status: str) -> str:
     return "RUNNING"
 
 
-def _acp_update_to_stream_event(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+_ACP_KIND_TO_TOOL_NAME = {
+    "execute": "run_command",
+    "read": "read_file",
+    "edit": "edit_file",
+    "delete": "edit_file",
+    "move": "edit_file",
+    "search": "grep_search",
+    "fetch": "read_url_content",
+}
+
+_KNOWN_TOOL_NAMES = (
+    "run_command",
+    "read_file",
+    "view_file",
+    "edit_file",
+    "replace_file_content",
+    "write_file",
+    "write_to_file",
+    "grep_search",
+    "find_by_name",
+    "list_dir",
+    "search_web",
+    "read_url_content",
+    "invoke_subagent",
+    "manage_subagents",
+    "define_subagent",
+    "send_message",
+    "manage_task",
+    "run_workflow",
+    "swarm",
+    "schedule",
+    "ask_question",
+    "grep",
+    "glob",
+)
+
+
+def _extract_acp_params(raw_input: Any, args: Any) -> Dict[str, Any]:
+    if isinstance(raw_input, dict):
+        return dict(raw_input)
+    if isinstance(raw_input, str) and raw_input.strip().startswith("{"):
+        try:
+            parsed = json.loads(raw_input)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    if isinstance(args, dict):
+        return dict(args)
+    return {}
+
+
+def _infer_acp_tool_name(raw_name: str, title: str, kind: str, params: Dict[str, Any]) -> str:
+    name = (raw_name or "").strip()
+    if name:
+        return name
+
+    # 1. Infer from structured rawInput / args keys
+    if isinstance(params, dict) and params:
+        if any(k in params for k in ("CommandLine", "command", "cmd")):
+            return "run_command"
+        if any(k in params for k in ("Target", "Replacement", "TargetContent", "ReplacementContent")):
+            return "edit_file"
+        if any(k in params for k in ("Content", "CodeContent")) and any(
+            k in params for k in ("Path", "path", "TargetFile")
+        ):
+            return "write_file"
+        if "questions" in params:
+            return "ask_question"
+        if "CronExpression" in params or "DurationSeconds" in params:
+            return "schedule"
+        if "TypeName" in params and "Prompt" in params:
+            return "invoke_subagent"
+        if any(k in params for k in ("Query", "query")):
+            title_l = (title or "").lower()
+            if (kind or "").lower() == "fetch" or "web" in title_l or "search_web" in title_l:
+                return "search_web"
+            return "grep_search"
+        if any(k in params for k in ("Pattern", "pattern")):
+            return "find_by_name"
+        if any(k in params for k in ("Path", "path", "AbsolutePath")):
+            if (kind or "").lower() == "edit":
+                return "edit_file"
+            return "read_file"
+
+    # 2. Match known canonical tool name embedded in ACP title
+    title_l = (title or "").strip().lower()
+    if title_l:
+        for known in _KNOWN_TOOL_NAMES:
+            if title_l == known or title_l.startswith(known + " ") or title_l.startswith(known + ":"):
+                return known
+
+    # 3. Fallback to ACP standard ToolKind mapping
+    mapped = _ACP_KIND_TO_TOOL_NAME.get((kind or "").strip().lower(), "")
+    if mapped:
+        return mapped
+    return ""
+
+
+def _acp_update_to_stream_event(
+    update: Dict[str, Any],
+    tool_call_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
     """Convert an ACP `session/update` payload into the bot's unified stream event schema."""
     if not isinstance(update, dict):
         return None
@@ -156,20 +258,66 @@ def _acp_update_to_stream_event(update: Dict[str, Any]) -> Optional[Dict[str, An
         return None
 
     if u_type in ("tool_call", "tool_call_update"):
-        tool_name = update.get("name") or ""
-        raw_input = update.get("rawInput")
-        params = raw_input if isinstance(raw_input, dict) else (update.get("args") if isinstance(update.get("args"), dict) else {})
+        call_id = str(update.get("toolCallId") or "")
+        cached = (tool_call_cache.get(call_id) or {}) if (tool_call_cache is not None and call_id) else {}
+
+        raw_name = update.get("name") or cached.get("tool_name") or ""
+        title = update.get("title") or cached.get("action") or ""
+        kind = update.get("kind") or cached.get("kind") or ""
+
+        params = dict(cached.get("parameters") or {})
+        new_params = _extract_acp_params(update.get("rawInput"), update.get("args"))
+        if new_params:
+            params.update(new_params)
+
+        locations = update.get("locations") or cached.get("locations") or []
+        if isinstance(locations, list) and locations and not any(
+            params.get(k) for k in ("Path", "path", "TargetFile", "AbsolutePath")
+        ):
+            first_loc = locations[0]
+            if isinstance(first_loc, dict) and first_loc.get("path"):
+                params["Path"] = first_loc["path"]
+
+        tool_name = _infer_acp_tool_name(raw_name, title, kind, params)
+        action_title = title or tool_name
+        raw_status = update.get("status")
+        if raw_status:
+            mapped_state = _map_acp_tool_state(raw_status)
+        else:
+            mapped_state = cached.get("state") or "RUNNING"
+
+        if tool_call_cache is not None and call_id:
+            if mapped_state in ("DONE", "ERROR"):
+                tool_call_cache.pop(call_id, None)
+            else:
+                tool_call_cache[call_id] = {
+                    "tool_name": tool_name,
+                    "action": action_title,
+                    "kind": kind,
+                    "parameters": params,
+                    "locations": locations,
+                    "state": mapped_state,
+                }
+
         return {
             "event": "step_update",
             "step_update": {
+                "step_type": "tool",
                 "tool_name": tool_name,
                 "parameters": params,
-                "action": update.get("title") or tool_name,
-                "state": _map_acp_tool_state(update.get("status", "in_progress")),
-                "call_id": update.get("toolCallId") or "",
-                "kind": update.get("kind") or "",
+                "tool_info": {"parameters": params},
+                "action": action_title,
+                "state": mapped_state,
+                "call_id": call_id,
+                "kind": kind,
             },
         }
+
+    if u_type == "plan":
+        entries = update.get("entries") or []
+        if isinstance(entries, list) and entries:
+            return {"event": "plan_update", "entries": entries}
+        return None
 
     if u_type == "usage_update":
         return {
@@ -274,6 +422,7 @@ class AcpPersistentSession:
         self._active_turn_queue: Optional[asyncio.Queue] = None
         self._active_prompt_rpc_id: Optional[int] = None
         self._active_turn_text_chunks: List[str] = []
+        self._active_turn_tool_calls: Dict[str, Dict[str, Any]] = {}
         self._idle_text_chunks: List[str] = []
         self._idle_flush_task: Optional[asyncio.Task] = None
         self.agent_capabilities: Dict[str, Any] = {}
@@ -549,6 +698,7 @@ class AcpPersistentSession:
         queue: asyncio.Queue = asyncio.Queue()
         self._active_turn_queue = queue
         self._active_turn_text_chunks = []
+        self._active_turn_tool_calls = {}
         self._in_turn = True
 
         # Emit synthetic `init` event so executor immediately persists conversation_id
@@ -574,6 +724,7 @@ class AcpPersistentSession:
             if self._active_turn_queue is queue:
                 self._active_turn_queue = None
                 self._active_prompt_rpc_id = None
+                self._active_turn_tool_calls.clear()
                 self._in_turn = False
 
         return AcpTurnEventStream(queue, cleanup_cb=_cleanup)
@@ -725,7 +876,7 @@ class AcpPersistentSession:
                         "size": update.get("size", 0),
                         "updated_at": time.time(),
                     }
-                stream_ev = _acp_update_to_stream_event(update)
+                stream_ev = _acp_update_to_stream_event(update, tool_call_cache=self._active_turn_tool_calls)
                 if not stream_ev:
                     return
                 if self._active_turn_queue is not None:

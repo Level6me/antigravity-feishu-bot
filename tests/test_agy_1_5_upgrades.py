@@ -126,7 +126,40 @@ class TestP2AcpAndCommands(unittest.TestCase):
             "rawInput": {"CommandLine": "timeout 30 pytest -q " + "x" * 600},
         })
         self.assertEqual(ev_tool["event"], "step_update")
+        self.assertEqual(ev_tool["step_update"]["step_type"], "tool")
+        self.assertEqual(ev_tool["step_update"]["state"], "RUNNING")
         self.assertGreater(len(ev_tool["step_update"]["parameters"]["CommandLine"]), 600)
+
+        # Standard ACP tool_call without `name` (only kind/title/locations/rawInput) + minimal tool_call_update completion
+        cache = {}
+        ev_read = _acp_update_to_stream_event(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_read_1",
+                "title": "Read file",
+                "kind": "read",
+                "status": "in_progress",
+                "locations": [{"path": "/tmp/demo_app.py", "line": 1}],
+            },
+            tool_call_cache=cache,
+        )
+        self.assertEqual(ev_read["step_update"]["step_type"], "tool")
+        self.assertEqual(ev_read["step_update"]["tool_name"], "read_file")
+        self.assertEqual(ev_read["step_update"]["parameters"]["Path"], "/tmp/demo_app.py")
+
+        ev_read_done = _acp_update_to_stream_event(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_read_1",
+                "status": "completed",
+            },
+            tool_call_cache=cache,
+        )
+        self.assertEqual(ev_read_done["step_update"]["step_type"], "tool")
+        self.assertEqual(ev_read_done["step_update"]["state"], "DONE")
+        self.assertEqual(ev_read_done["step_update"]["tool_name"], "read_file")
+        self.assertEqual(ev_read_done["step_update"]["parameters"]["Path"], "/tmp/demo_app.py")
+        self.assertNotIn("call_read_1", cache)
 
         # Multimodal image block attachment from /tmp
         with tempfile.NamedTemporaryFile(dir="/tmp", suffix=".png", delete=False) as tf:
@@ -209,6 +242,146 @@ class TestP2AcpAndCommands(unittest.TestCase):
 
         asyncio.run(run())
         self.assertEqual(len(replies), 4)
+
+    def test_executor_renders_steps_and_task_plan_for_acp_stream(self):
+        """Regression test: ACP message + tool_call/tool_call_update must render step cards, not stay stuck on thinking."""
+        from acp_client import AcpTurnEventStream, _acp_update_to_stream_event
+        from card_builder import CardBuilder
+        from executor import execute_antigravity
+
+        tool_indicator_calls = []
+        orig_build_tool = CardBuilder.build_tool_indicator
+
+        def spy_build_tool(*args, **kwargs):
+            tool_indicator_calls.append((args, kwargs))
+            return orig_build_tool(*args, **kwargs)
+
+        class FakeAcpSession:
+            transport_name = "acp"
+
+            def __init__(self):
+                self.lock = asyncio.Lock()
+                self.process = MagicMock(pid=os.getpid(), returncode=None)
+                self.conversation_id = "conv-acp-steps"
+                self.model = "gemini-3.8-flash-low"
+                self.effort = "low"
+                self.agent_mode = "default"
+
+            def is_alive(self):
+                return True
+
+            def get_recent_stderr(self):
+                return ""
+
+            async def close(self):
+                pass
+
+            async def send_prompt_and_stream(self, prompt_text):
+                q = asyncio.Queue()
+                cache = {}
+                raw_updates = [
+                    {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "thinking..."}},
+                    {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {
+                            "type": "text",
+                            "text": "[TASK_PLAN] 检查代码差异 | 修复事件映射 | 验证步骤展示 [/TASK_PLAN]\n",
+                        },
+                    },
+                    {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tc_1",
+                        "title": "Read acp_client.py",
+                        "kind": "read",
+                        "status": "in_progress",
+                        "locations": [{"path": os.path.join(ROOT_DIR, "acp_client.py")}],
+                    },
+                    {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tc_1",
+                        "status": "completed",
+                    },
+                    {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tc_2",
+                        "title": "Run git status",
+                        "kind": "execute",
+                        "status": "in_progress",
+                        "rawInput": {"CommandLine": "timeout 15 git status"},
+                    },
+                    {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tc_2",
+                        "status": "completed",
+                    },
+                    {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "已完成根因定位与修复。"},
+                    },
+                ]
+
+                async def feeder():
+                    await q.put({"event": "init", "conversation_id": "conv-acp-steps"})
+                    for upd in raw_updates:
+                        ev = _acp_update_to_stream_event(upd, tool_call_cache=cache)
+                        if ev:
+                            await q.put(ev)
+                        await asyncio.sleep(0.06)
+                    await q.put({
+                        "event": "result",
+                        "result": {"status": "SUCCESS", "response": "已完成根因定位与修复。"},
+                    })
+
+                asyncio.create_task(feeder())
+                return AcpTurnEventStream(q)
+
+        fake_sess = FakeAcpSession()
+        patched_cards = []
+        session_data = {
+            "model": "gemini-3.8-flash-low",
+            "reasoning_effort": "low",
+            "project": ROOT_DIR,
+            "conversation": "",
+            "transport": "acp",
+        }
+
+        async def run():
+            with patch("session_pool.session_pool.get_or_create", return_value=fake_sess), \
+                 patch("session_pool.session_pool.sync_live_session_config", AsyncMock()), \
+                 patch("session_pool.session_pool.update_conversation_id"), \
+                 patch("executor.allow_execution", return_value=True), \
+                 patch("executor.is_admin", return_value=True), \
+                 patch("executor.save_session_async", AsyncMock()), \
+                 patch("executor.send_interactive_card_sdk", return_value="om_card_1"), \
+                 patch("executor.patch_interactive_card_sdk", side_effect=lambda mid, c: patched_cards.append(c) or True), \
+                 patch("executor.CardBuilder.build_tool_indicator", side_effect=spy_build_tool):
+                return await execute_antigravity(
+                    chat_id="oc_test_acp_steps",
+                    user_text="排查并修复步骤不显示的问题",
+                    message_id="om_user_1",
+                    bot_reply_msg_id="om_card_1",
+                    session_data=session_data,
+                    is_new_conversation=True,
+                    system_instruction="",
+                    final_prompt="排查并修复步骤不显示的问题",
+                    downloaded_file_name=None,
+                    download_success=False,
+                    running_processes={},
+                )
+
+        is_err = asyncio.run(run())
+        self.assertFalse(is_err)
+        self.assertGreater(len(tool_indicator_calls), 0, "ACP tool events must render build_tool_indicator cards")
+        all_planned = [kw.get("planned_steps") for _, kw in tool_indicator_calls if kw.get("planned_steps")]
+        self.assertTrue(
+            any(ps == ["检查代码差异", "修复事件映射", "验证步骤展示"] for ps in all_planned),
+            f"Expected parsed [TASK_PLAN] steps in tool indicator, got: {all_planned}",
+        )
+        all_completed = [kw.get("completed_steps") for _, kw in tool_indicator_calls if kw.get("completed_steps")]
+        self.assertTrue(
+            any(any("acp_client.py" in s for s in cs) for cs in all_completed),
+            f"Expected completed read_file step with filename, got: {all_completed}",
+        )
 
     def test_real_agy_acp_handshake_set_model_and_mode(self):
         """Real smoke test against local `agy 1.5.12` ACP stdio server."""
