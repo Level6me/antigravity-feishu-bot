@@ -470,6 +470,7 @@ class AcpPersistentSession:
         self._active_turn_text_chunks: List[str] = []
         self._active_turn_tool_calls: Dict[str, Dict[str, Any]] = {}
         self._active_turn_pending_bg_tasks: set = set()
+        self._queued_steer_rpc_ids: Dict[int, str] = {}
         self._idle_text_chunks: List[str] = []
         self._idle_flush_task: Optional[asyncio.Task] = None
         self.agent_capabilities: Dict[str, Any] = {}
@@ -698,11 +699,13 @@ class AcpPersistentSession:
             return False
 
     async def steer(self, steering_text: str) -> bool:
-        """Steer a currently running ACP turn without cancelling/restarting the session."""
+        """Queue a follow-up ACP prompt on the active session (executes right after the current turn finishes)."""
         if not self.is_turn_running() or not self.conversation_id or not (steering_text or "").strip():
             return False
         rpc_id = self._next_rpc_id
         self._next_rpc_id += 1
+        preview = steering_text.strip()[:120]
+        self._queued_steer_rpc_ids[rpc_id] = preview
         try:
             blocks = build_acp_prompt_blocks(steering_text)
             await self._send_json({
@@ -711,10 +714,11 @@ class AcpPersistentSession:
                 "method": "session/prompt",
                 "params": {"sessionId": self.conversation_id, "prompt": blocks},
             })
-            log.info(f"[ACP] Sent mid-turn steering prompt to {self.chat_id} (len={len(steering_text)})")
+            log.info(f"[ACP] Queued follow-up prompt (rpc_id={rpc_id}) on {self.chat_id} (len={len(steering_text)})")
             return True
         except Exception as e:
-            log.warning(f"[ACP] Mid-turn steering failed for {self.chat_id}: {e}")
+            self._queued_steer_rpc_ids.pop(rpc_id, None)
+            log.warning(f"[ACP] Failed to queue follow-up prompt for {self.chat_id}: {e}")
             return False
 
     async def cancel_active_turn(self):
@@ -986,6 +990,35 @@ class AcpPersistentSession:
                         })
                 return
 
+            if rpc_id in self._queued_steer_rpc_ids:
+                steer_preview = self._queued_steer_rpc_ids.pop(rpc_id, "")
+                if "error" in msg and msg["error"]:
+                    err = msg["error"]
+                    err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                    log.warning(
+                        f"[ACP] Queued follow-up prompt (rpc_id={rpc_id}) failed for {self.chat_id}: {err_msg}"
+                    )
+                    if self._async_update_callback and self._active_turn_queue is None:
+                        try:
+                            asyncio.create_task(
+                                self._async_update_callback(
+                                    self.chat_id,
+                                    f"⚠️ 排队追加指令执行失败（{steer_preview[:60]}）：{err_msg}",
+                                )
+                            )
+                        except Exception:
+                            pass
+                else:
+                    res = msg.get("result") or {}
+                    if isinstance(res.get("usage"), dict):
+                        self.last_usage.update(res["usage"])
+                    stop_reason = res.get("stopReason", "end_turn")
+                    log.info(
+                        f"[ACP] Queued follow-up prompt (rpc_id={rpc_id}) completed for {self.chat_id} "
+                        f"(stopReason={stop_reason})"
+                    )
+                return
+
             fut = self._pending_rpc.get(rpc_id)
             if fut and not fut.done():
                 if "error" in msg and msg["error"]:
@@ -1060,6 +1093,7 @@ class AcpPersistentSession:
     async def close(self):
         self._closing = True
         self._in_turn = False
+        self._queued_steer_rpc_ids.clear()
         async with self._start_lock:
             if self.is_alive() and self.conversation_id:
                 try:

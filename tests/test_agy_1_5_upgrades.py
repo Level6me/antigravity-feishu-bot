@@ -75,13 +75,57 @@ class TestP1Upgrades(unittest.TestCase):
     def test_hooks_install_isolated_to_workspace_by_default(self):
         from hooks.agy_hooks import ensure_agy_hooks_installed
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = ensure_agy_hooks_installed(workspace_dir=tmpdir, global_install=False)
+            path = ensure_agy_hooks_installed(workspace_dir=tmpdir, global_install=False, cleanup_global=False)
             self.assertEqual(path, os.path.join(tmpdir, ".agents", "hooks.json"))
             self.assertTrue(os.path.isfile(path))
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.assertIn("PreInvocation", data["hooks"])
             self.assertIn("PreToolUse", data["hooks"])
+
+    def test_hooks_install_cleans_legacy_global_entries_preserving_custom_hooks(self):
+        from hooks.agy_hooks import ensure_agy_hooks_installed
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws_dir = os.path.join(tmpdir, "ws")
+            os.makedirs(ws_dir, exist_ok=True)
+            fake_global = os.path.join(tmpdir, "global_hooks.json")
+            custom_entry = {
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": "echo custom_user_hook", "timeout": 3}],
+            }
+            legacy_bot_entry = {
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": "python3 /opt/old/hooks/agy_hooks.py", "timeout": 5}],
+            }
+            with open(fake_global, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"hooks": {"PreInvocation": [legacy_bot_entry], "PreToolUse": [custom_entry, legacy_bot_entry]}},
+                    f,
+                )
+
+            ws_hooks_path = ensure_agy_hooks_installed(
+                workspace_dir=ws_dir,
+                global_install=False,
+                cleanup_global=True,
+                global_hooks_path=fake_global,
+            )
+            self.assertTrue(os.path.isfile(ws_hooks_path))
+            self.assertTrue(os.path.isfile(fake_global))
+            with open(fake_global, "r", encoding="utf-8") as f:
+                cleaned = json.load(f)
+            self.assertNotIn("PreInvocation", cleaned["hooks"])
+            self.assertEqual(cleaned["hooks"]["PreToolUse"], [custom_entry])
+
+            # If only legacy bot entries exist, file should be removed cleanly
+            with open(fake_global, "w", encoding="utf-8") as f:
+                json.dump({"hooks": {"PreToolUse": [legacy_bot_entry]}}, f)
+            ensure_agy_hooks_installed(
+                workspace_dir=ws_dir,
+                global_install=False,
+                cleanup_global=True,
+                global_hooks_path=fake_global,
+            )
+            self.assertFalse(os.path.exists(fake_global))
 
     def test_native_core_rule_exists(self):
         rule_path = os.path.join(ROOT_DIR, ".agents", "rules", "feishu-bot-core.md")
@@ -98,6 +142,66 @@ class TestP1Upgrades(unittest.TestCase):
             _extract_json_payload('some header\n{"result":{"response":"{\\"score\\":9}"}}'),
             {"score": 9},
         )
+
+    def test_structured_agy_fallback_only_when_s1_disabled(self):
+        import config
+        import system_one_gate
+        from utils import structured_agy
+
+        # Verify structured_agy no longer hardcodes `--mode plan`
+        src_path = os.path.join(ROOT_DIR, "utils", "structured_agy.py")
+        with open(src_path, "r", encoding="utf-8") as f:
+            src_text = f.read()
+        self.assertNotIn('"--mode", "plan"', src_text)
+
+        async def run():
+            mock_structured = AsyncMock(return_value={
+                "is_dangerous": False,
+                "action_type": "execute_task",
+                "is_operation": True,
+                "needs_terminal": True,
+                "execution_complexity": 1.6,
+            })
+
+            # 1. S1 enabled -> structured_agy MUST NOT be called (even if no API key configured)
+            with patch.object(config, "TYPESAFE_ENABLED", True), \
+                 patch.object(config, "STRUCTURED_AGY_FALLBACK", True), \
+                 patch("system_one_gate.get_typesafe_client", return_value=None), \
+                 patch("utils.structured_agy.run_structured_prompt", mock_structured):
+                dec_s1_on = await system_one_gate.evaluate_message_gate(
+                    "帮我对比 Redis 和 Kafka 在高并发下的优劣并修改配置",
+                    chat_id="oc_test_s1_on",
+                )
+            self.assertEqual(mock_structured.await_count, 0)
+            self.assertTrue(dec_s1_on.is_fallback)
+
+            # 2. S1 disabled + STRUCTURED_AGY_FALLBACK=True -> structured_agy MUST be used
+            mock_structured.reset_mock()
+            with patch.object(config, "TYPESAFE_ENABLED", False), \
+                 patch.object(config, "STRUCTURED_AGY_FALLBACK", True), \
+                 patch("utils.structured_agy.run_structured_prompt", mock_structured):
+                dec_s1_off = await system_one_gate.evaluate_message_gate(
+                    "帮我对比 Redis 和 Kafka 在高并发下的优劣并修改配置",
+                    chat_id="oc_test_s1_off",
+                )
+            self.assertEqual(mock_structured.await_count, 1)
+            self.assertEqual(dec_s1_off.intent, "code_agent")
+            self.assertTrue(dec_s1_off.needs_terminal)
+            self.assertIn("structured_agy", dec_s1_off.fallback_reason or "")
+
+            # 3. S1 disabled + STRUCTURED_AGY_FALLBACK=False -> heuristic only
+            mock_structured.reset_mock()
+            with patch.object(config, "TYPESAFE_ENABLED", False), \
+                 patch.object(config, "STRUCTURED_AGY_FALLBACK", False), \
+                 patch("utils.structured_agy.run_structured_prompt", mock_structured):
+                dec_no_fb = await system_one_gate.evaluate_message_gate(
+                    "帮我对比 Redis 和 Kafka 在高并发下的优劣并修改配置",
+                    chat_id="oc_test_s1_off_no_fb",
+                )
+            self.assertEqual(mock_structured.await_count, 0)
+            self.assertNotIn("structured_agy", dec_no_fb.fallback_reason or "")
+
+        asyncio.run(run())
 
 
 class TestP2AcpAndCommands(unittest.TestCase):
@@ -644,6 +748,63 @@ class TestP2AcpAndCommands(unittest.TestCase):
         self.assertEqual(sent_cards[1][0], "oc_test_cb")
         async_card_json = json.dumps(sent_cards[1][1], ensure_ascii=False)
         self.assertIn("后台任务已完成并通过全部测试", async_card_json)
+
+    def test_acp_steer_tracks_rpc_id_and_handles_responses(self):
+        from acp_client import AcpPersistentSession
+
+        async_updates = []
+
+        async def async_cb(cid, text):
+            async_updates.append((cid, text))
+
+        sess = AcpPersistentSession(
+            chat_id="oc_steer_test",
+            model="gemini-3.8-flash-low",
+            async_update_callback=async_cb,
+        )
+        sess.process = MagicMock(returncode=None)
+        sess.conversation_id = "conv-steer-1"
+        sess._in_turn = True
+
+        sent_payloads = []
+
+        async def fake_send(payload):
+            sent_payloads.append(payload)
+
+        sess._send_json = fake_send
+
+        async def run():
+            ok1 = await sess.steer("补充一条排队指令")
+            self.assertTrue(ok1)
+            self.assertEqual(len(sent_payloads), 1)
+            rpc_id_1 = sent_payloads[0]["id"]
+            self.assertIn(rpc_id_1, sess._queued_steer_rpc_ids)
+
+            # Normal completion clears tracked rpc_id and updates usage
+            await sess._dispatch_incoming_message({
+                "jsonrpc": "2.0",
+                "id": rpc_id_1,
+                "result": {"stopReason": "end_turn", "usage": {"used": 123}},
+            })
+            self.assertNotIn(rpc_id_1, sess._queued_steer_rpc_ids)
+            self.assertEqual(sess.last_usage.get("used"), 123)
+
+            # Error response while idle notifies async callback
+            ok2 = await sess.steer("失败的排队指令")
+            self.assertTrue(ok2)
+            rpc_id_2 = sent_payloads[1]["id"]
+            sess._active_turn_queue = None
+            await sess._dispatch_incoming_message({
+                "jsonrpc": "2.0",
+                "id": rpc_id_2,
+                "error": {"code": -32000, "message": "queue rejected"},
+            })
+            await asyncio.sleep(0.02)
+            self.assertNotIn(rpc_id_2, sess._queued_steer_rpc_ids)
+            self.assertEqual(len(async_updates), 1)
+            self.assertIn("排队追加指令执行失败", async_updates[0][1])
+
+        asyncio.run(run())
 
     def test_real_agy_acp_handshake_set_model_and_mode(self):
         """Real smoke test against local `agy 1.5.12` ACP stdio server."""

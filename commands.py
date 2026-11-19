@@ -1205,14 +1205,14 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         steer_text = user_text[len(first_word):].strip()
         if not steer_text:
             await asyncio.get_running_loop().run_in_executor(
-                None, lambda: send_reply_sdk(message_id, "用法：`/steer <转向指令>` — 向正在执行的 ACP 任务实时插话转向，无需 `/stop`。")
+                None, lambda: send_reply_sdk(message_id, "用法：`/steer <追加指令>` — 向正在执行的 ACP 会话排队追加下一轮指令（会在当前回合结束后自动执行，无需 `/stop`；如需立即中断请用 `/stop`）。")
             )
             return True, user_text
         from session_pool import session_pool
         active_sess = session_pool.get_active_session(chat_id)
         if active_sess and getattr(active_sess, "transport_name", "") == "acp" and active_sess.is_turn_running():
             ok = await active_sess.steer(steer_text)
-            reply_msg = f"🧭 已将实时转向指令注入当前运行中的 ACP 任务：\n> {steer_text[:200]}" if ok else "❌ 转向指令发送失败，请稍后重试或使用 `/stop`。"
+            reply_msg = f"🧭 已将追加指令排入当前 ACP 会话队列（将在当前回合结束后自动继续执行）：\n> {steer_text[:200]}" if ok else "❌ 排队追加指令发送失败，请稍后重试或使用 `/stop`。"
         else:
             reply_msg = "ℹ️ 当前没有运行中的 ACP 任务（若处于 `stream-json` 传输或空闲状态，直接发送消息即可）。"
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_msg))

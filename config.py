@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     use_session_settings_isolation: bool = Field(default=True, alias="USE_SESSION_SETTINGS_ISOLATION")
     use_native_rules_slim_prompt: bool = Field(default=True, alias="USE_NATIVE_RULES_SLIM_PROMPT")
     sync_global_hooks_json: bool = Field(default=False, alias="SYNC_GLOBAL_HOOKS_JSON")
+    structured_agy_fallback: bool = Field(default=True, alias="STRUCTURED_AGY_FALLBACK")
+    structured_agy_model: str = Field(default="", alias="STRUCTURED_AGY_MODEL")
 
     # Native voice reply settings
     tts_voice: str = Field(default="zh-CN-XiaoxiaoNeural", alias="TTS_VOICE")
@@ -89,6 +91,8 @@ DEFAULT_AGENT_MODE = (settings.default_agent_mode or "auto").strip().lower()
 USE_SESSION_SETTINGS_ISOLATION = settings.use_session_settings_isolation
 USE_NATIVE_RULES_SLIM_PROMPT = settings.use_native_rules_slim_prompt
 SYNC_GLOBAL_HOOKS_JSON = settings.sync_global_hooks_json
+STRUCTURED_AGY_FALLBACK = settings.structured_agy_fallback
+STRUCTURED_AGY_MODEL = (settings.structured_agy_model or "").strip()
 APP_SECRET = settings.feishu_app_secret or settings.app_secret
 TTS_VOICE = settings.tts_voice or "zh-CN-XiaoxiaoNeural"
 ENABLE_VOICE_REPLY = settings.enable_voice_reply

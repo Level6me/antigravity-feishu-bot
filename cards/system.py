@@ -257,7 +257,7 @@ def build_help_card():
             "tag": "markdown",
             "content": (
                 "⚡ **系统管理、ACP 与原生生态：**\n"
-                "• `/steer <纠正内容>` : 在 ACP 长任务运行中实时转向/插话，无需 `/stop`\n"
+                "• `/steer <追加内容>` : 向运行中的 ACP 会话排队追加指令（当前回合结束后自动续跑，无需 `/stop`）\n"
                 "• `/transport [acp|stream-json]` : 查看或切换会话传输引擎（默认 ACP）\n"
                 "• `/mcp [list|enable|disable|remove|add ...]` : 管理 `agy` 原生 MCP 服务\n"
                 "• `/agyplugin [list|validate|install|enable|disable|uninstall ...]` : 管理 `agy` 原生插件\n"

@@ -151,17 +151,72 @@ def handle_hook_payload(payload: Dict[str, Any], custom_root: Optional[str] = No
     return {"continue": True}
 
 
+def _is_bot_hook_entry(item: Any) -> bool:
+    return bool(
+        isinstance(item, dict)
+        and any("agy_hooks.py" in str(h.get("command", "")) for h in (item.get("hooks") or []) if isinstance(h, dict))
+    )
+
+
+def cleanup_legacy_global_hooks(global_hooks_path: Optional[str] = None) -> bool:
+    """Remove legacy `agy_hooks.py` entries from `~/.gemini/config/hooks.json` without touching user hooks.
+
+    Prevents duplicate hook execution (global + workspace `.agents/hooks.json`) and avoids
+    polluting standalone terminal `agy` sessions after upgrading from older bot versions.
+    """
+    target_path = global_hooks_path or os.path.expanduser("~/.gemini/config/hooks.json")
+    if not os.path.isfile(target_path):
+        return False
+    try:
+        with open(target_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False
+        hooks_map = data.get("hooks")
+        if not isinstance(hooks_map, dict):
+            return False
+
+        changed = False
+        for ev_name in list(hooks_map.keys()):
+            ev_list = hooks_map.get(ev_name)
+            if not isinstance(ev_list, list):
+                continue
+            filtered = [item for item in ev_list if not _is_bot_hook_entry(item)]
+            if len(filtered) != len(ev_list):
+                changed = True
+                if filtered:
+                    hooks_map[ev_name] = filtered
+                else:
+                    hooks_map.pop(ev_name, None)
+
+        if not changed:
+            return False
+
+        remaining_top_keys = [k for k in data.keys() if k != "hooks"]
+        if not hooks_map and not remaining_top_keys:
+            os.remove(target_path)
+        else:
+            with open(target_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 def ensure_agy_hooks_installed(
     bot_root: Optional[str] = None,
     workspace_dir: Optional[str] = None,
     global_install: Optional[bool] = None,
+    cleanup_global: bool = True,
+    global_hooks_path: Optional[str] = None,
 ) -> str:
     """Register `agy_hooks.py` for PreInvocation and PreToolUse.
 
     To avoid polluting the user's standalone terminal `agy` sessions, defaults to installing
     workspace-scoped `<workspace>/.agents/hooks.json` when `workspace_dir` is provided
-    (or `bot_root` when `SYNC_GLOBAL_HOOKS_JSON` is False). Set `global_install=True` (or
-    `SYNC_GLOBAL_HOOKS_JSON=true`) to also write `~/.gemini/config/hooks.json`.
+    (or `bot_root` when `SYNC_GLOBAL_HOOKS_JSON` is False), and automatically cleans up any
+    legacy `agy_hooks.py` entries left in `~/.gemini/config/hooks.json`. Set `global_install=True`
+    (or `SYNC_GLOBAL_HOOKS_JSON=true`) to also write `~/.gemini/config/hooks.json`.
     """
     root = bot_root or ROOT_DIR
     hook_script = os.path.abspath(os.path.join(root, "hooks", "agy_hooks.py"))
@@ -209,19 +264,16 @@ def ensure_agy_hooks_installed(
         if not isinstance(ev_list, list):
             ev_list = []
         # Remove any outdated agy_hooks.py entries and add current
-        ev_list = [
-            item
-            for item in ev_list
-            if not (
-                isinstance(item, dict)
-                and any("agy_hooks.py" in str(h.get("command", "")) for h in (item.get("hooks") or []) if isinstance(h, dict))
-            )
-        ]
+        ev_list = [item for item in ev_list if not _is_bot_hook_entry(item)]
         ev_list.append(desired_entry)
         hooks_map[ev_name] = ev_list
 
     with open(hooks_json_path, "w", encoding="utf-8") as f:
         json.dump(existing, f, ensure_ascii=False, indent=2)
+
+    if not global_install and cleanup_global:
+        cleanup_legacy_global_hooks(global_hooks_path=global_hooks_path)
+
     return hooks_json_path
 
 

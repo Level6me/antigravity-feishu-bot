@@ -38,8 +38,11 @@ archive_debug/
 *.gif
 *.ogg
 
-# Local agent customizations
-.agents/
+# Local agent customizations (ignore dynamic hooks.json, keep shared core rules tracked)
+.agents/*
+!.agents/rules/
+.agents/rules/*
+!.agents/rules/feishu-bot-core.md
 .env
 
 # Database and backups

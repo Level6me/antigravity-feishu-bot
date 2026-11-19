@@ -121,7 +121,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 from session_pool import session_pool
                 active_sess = session_pool.get_active_session(c_id)
                 if active_sess and getattr(active_sess, "transport_name", "") == "acp" and active_sess.is_turn_running():
-                    steer_hint = "\n💡 提示：当前会话运行在 ACP 引擎下，如需对正在执行的任务实时插话转向，可直接发送 `/steer <纠正指令>`。"
+                    steer_hint = "\n💡 提示：当前会话运行在 ACP 引擎下，如需在当前回合结束后自动续接补充指令，也可发送 `/steer <追加指令>`（不会立即中断当前步骤，立即打断请用 `/stop`）。"
             except Exception:
                 pass
             warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {qsize + 1} 个任务)...{steer_hint}"

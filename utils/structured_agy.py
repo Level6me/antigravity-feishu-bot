@@ -107,7 +107,6 @@ async def run_structured_prompt(
         "--output-format", "json",
         "--json-schema", schema_arg,
         "--disable-slash-commands",
-        "--mode", "plan",
         "--print-timeout", f"{max(5, int(timeout_seconds))}s",
     ]
     from utils.model_tiers import has_embedded_effort_suffix
