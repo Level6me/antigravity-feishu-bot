@@ -616,7 +616,10 @@ async def _process_single_task(chat_id, task):
             app_state._agy_hooks_ensured = True
 
         relay_res = check_and_prepare_session_relay(
-            chat_id, session_data, project_dir=session_data.get("project", "默认")
+            chat_id,
+            session_data,
+            project_dir=session_data.get("project", "默认"),
+            current_model=selected_model,
         )
         if relay_res.get("relayed"):
             relay_handoff_context = relay_res.get("handoff_context", "")
@@ -738,6 +741,9 @@ async def _process_single_task(chat_id, task):
         )
         if notes_section:
             system_instruction += notes_section
+        if relay_handoff_context:
+            system_instruction += f"{relay_handoff_context.strip()}\n\n"
+            session_data.pop("_relay_handoff_context", None)
     else:
         active_conv_id = session_data.get("conversation", "")
         already_injected_static = bool(

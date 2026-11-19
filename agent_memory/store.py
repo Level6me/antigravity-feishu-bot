@@ -37,6 +37,16 @@ MAX_CAPSULE_CHARS = 6000
 # Proactive session relay threshold (number of CHECKPOINT compactions in a single conversation)
 DEFAULT_RELAY_CHECKPOINT_THRESHOLD = 3
 
+# Model capacity / server overload (HTTP 503) detection for seamless model-switch session relay
+_CAPACITY_ERROR_RE = re.compile(
+    r"(?:no capacity available for model|unavailable\s*\(code\s*503\)|experiencing high traffic right now|overloaded_error|model is overloaded)",
+    re.IGNORECASE,
+)
+_CAPACITY_ERROR_MODEL_RE = re.compile(
+    r"no capacity available for model\s+([A-Za-z0-9_.\-]+)",
+    re.IGNORECASE,
+)
+
 
 def get_memory_root(custom_root: Optional[str] = None) -> str:
     """Return `<BOT_ROOT>/data/agent_memory` (or `AGENT_MEMORY_DIR` env override)."""
@@ -1370,6 +1380,300 @@ def get_compaction_state(conv_id: str, custom_root: Optional[str] = None) -> Opt
 
 
 # ============================================================================
+# Capacity-Error Health Check & Recent Turn Extraction (503 异常轨迹检测与上下文提取)
+# ============================================================================
+
+def inspect_conversation_capacity_health(
+    transcript_path: Optional[str],
+    min_byte_offset: int = 0,
+) -> Dict[str, Any]:
+    """Inspect a transcript.jsonl file for trailing HTTP 503 / model capacity errors.
+
+    Counts consecutive capacity `ERROR_MESSAGE` steps that occurred AFTER the last
+    non-empty `PLANNER_RESPONSE` (or since `min_byte_offset` when polling live).
+    A subsequent successful `PLANNER_RESPONSE` resets `trailing_capacity_errors` to 0.
+    """
+    result: Dict[str, Any] = {
+        "exists": False,
+        "trailing_capacity_errors": 0,
+        "total_capacity_errors": 0,
+        "has_any_planner_reply": False,
+        "failed_models": [],
+        "last_error_text": "",
+        "is_capacity_tainted": False,
+    }
+    if not transcript_path or not os.path.exists(transcript_path):
+        return result
+
+    result["exists"] = True
+    try:
+        file_size = os.path.getsize(transcript_path)
+        start_pos = max(0, int(min_byte_offset or 0))
+        if start_pos == 0 and file_size > 262144:
+            # For very large transcripts, scanning the last 256KB is sufficient for trailing health
+            start_pos = file_size - 262144
+        with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
+            if start_pos > 0:
+                f.seek(start_pos)
+                if min_byte_offset == 0:
+                    f.readline()  # discard partial first line after seek
+            lines = f.readlines()
+    except Exception as e:
+        log.warning(f"[AgentMemory] Failed to inspect capacity health of {transcript_path}: {e}")
+        return result
+
+    trailing_errors = 0
+    total_errors = 0
+    has_reply = False
+    failed_models: List[str] = []
+    last_err = ""
+
+    for raw_line in lines:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            obj = json.loads(raw_line)
+        except Exception:
+            continue
+        step_type = obj.get("type", "")
+        if step_type == "PLANNER_RESPONSE":
+            content = str(obj.get("content") or "").strip()
+            t_calls = obj.get("tool_calls") or []
+            if content or t_calls:
+                has_reply = True
+                trailing_errors = 0
+                failed_models.clear()
+        elif step_type == "ERROR_MESSAGE":
+            err_text = str(obj.get("error") or obj.get("content") or "").strip()
+            if err_text and _CAPACITY_ERROR_RE.search(err_text):
+                total_errors += 1
+                trailing_errors += 1
+                last_err = err_text
+                m = _CAPACITY_ERROR_MODEL_RE.search(err_text)
+                if m:
+                    model_id = m.group(1).strip()
+                    if model_id and model_id not in failed_models:
+                        failed_models.append(model_id)
+
+    result["trailing_capacity_errors"] = trailing_errors
+    result["total_capacity_errors"] = total_errors
+    result["has_any_planner_reply"] = has_reply
+    result["failed_models"] = failed_models
+    result["last_error_text"] = last_err
+    result["is_capacity_tainted"] = trailing_errors >= 1
+    return result
+
+
+def extract_recent_conversation_turns(
+    transcript_path: Optional[str],
+    max_turns: int = 6,
+    max_chars: int = 2400,
+) -> str:
+    """Extract the most recent clean Q&A turns from a conversation transcript.jsonl.
+
+    Preserves actual dialogue continuity (user requests + assistant replies) across a
+    seamless model-switch session relay without carrying over poisoned 503 error steps.
+    """
+    if not transcript_path or not os.path.exists(transcript_path):
+        return ""
+
+    turns: List[Tuple[str, str]] = []
+    current_req = ""
+    current_reply = ""
+
+    def _flush():
+        nonlocal current_req, current_reply
+        if current_req and current_reply:
+            turns.append((current_req, current_reply))
+        current_req = ""
+        current_reply = ""
+
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw_line in f:
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    obj = json.loads(raw_line)
+                except Exception:
+                    continue
+                step_type = obj.get("type", "")
+                content = str(obj.get("content") or "")
+                if step_type == "USER_INPUT":
+                    _flush()
+                    cleaned = strip_injected_prompt_headers(content)
+                    if cleaned:
+                        current_req = cleaned
+                elif step_type == "PLANNER_RESPONSE" and content.strip():
+                    clean_resp = re.sub(
+                        r"\[TASK_PLAN\].*?\[/TASK_PLAN\]\s*", "", content, flags=re.DOTALL
+                    ).strip()
+                    if (
+                        clean_resp
+                        and not clean_resp.startswith('Task "')
+                        and "completed with exit code" not in clean_resp[:80]
+                        and not _CORRUPTED_CHECKPOINT_PATTERNS.search(clean_resp)
+                    ):
+                        current_reply = clean_resp
+        _flush()
+    except Exception as e:
+        log.warning(f"[AgentMemory] Failed to extract recent turns from {transcript_path}: {e}")
+        return ""
+
+    if not turns:
+        return ""
+
+    recent = turns[-max_turns:]
+    formatted: List[str] = []
+    used_chars = 0
+    for q_text, a_text in reversed(recent):
+        q_clean = re.sub(r"\s+", " ", q_text).strip()[:220]
+        a_clean = re.sub(r"\s+", " ", a_text).strip()[:360]
+        entry = f"- 用户：{q_clean}\n  助手：{a_clean}"
+        if used_chars + len(entry) > max_chars and formatted:
+            break
+        formatted.append(entry)
+        used_chars += len(entry) + 1
+
+    formatted.reverse()
+    return "\n".join(formatted)
+
+
+def _build_session_relay_handoff(
+    conv_id: str,
+    proj: str,
+    relay_reason: str,
+    transcript_path: Optional[str] = None,
+    custom_root: Optional[str] = None,
+    include_recent_turns: bool = False,
+) -> Tuple[str, int]:
+    """Build a compact Relay Handoff Package combining recent Q&A turns + PROJECT_STATE.md."""
+    recent_turns_md = ""
+    recent_turns_count = 0
+    if include_recent_turns and transcript_path:
+        recent_turns_md = extract_recent_conversation_turns(transcript_path)
+        if recent_turns_md:
+            recent_turns_count = recent_turns_md.count("\n- 用户：") + (1 if recent_turns_md.startswith("- 用户：") else 0)
+
+    capsule_md = read_project_capsule(proj, custom_root=custom_root).strip()
+    parts = [
+        "[Session Relay Handoff / 跨会话无感接力记忆包]",
+        f"- 前序会话 ID: `{conv_id}` ({relay_reason})",
+        f"- 历史完整对话已归档至本地 FTS5 记忆库，可通过 `python3 {os.path.join(config.BASE_DIR, 'tools', 'memory_cli.py')} search \"<关键词>\"` 随时检索。",
+    ]
+    if recent_turns_md:
+        parts.append("")
+        parts.append("[近期对话上下文摘要 / Recent Conversation Turns]")
+        parts.append(recent_turns_md)
+    if capsule_md and "暂无活跃目标记录" not in capsule_md:
+        parts.append("")
+        parts.append(capsule_md[:2800 if recent_turns_md else 3600])
+    parts.append("[/Session Relay Handoff]")
+    return "\n".join(parts) + "\n", recent_turns_count
+
+
+def relay_conversation_for_model_switch(
+    chat_id: str,
+    session_data: Dict[str, Any],
+    new_model: str,
+    old_model: str = "",
+    project_dir: Optional[str] = None,
+    transcript_path_override: Optional[str] = None,
+    custom_root: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Seamlessly relay a 503/capacity-tainted conversation when the user switches models.
+
+    If the current conversation has trailing 503 capacity errors (or was marked
+    `_capacity_tainted_conv` by executor), this archives its clean dialogue history into
+    SQLite FTS5 + a Relay Handoff Package (including recent Q&A turns + PROJECT_STATE.md)
+    and resets `session_data["conversation"] = ""` so the new model starts on a clean
+    trajectory WITHOUT requiring the user to run `/clear`.
+
+    Healthy conversations with no capacity errors are left untouched (`relayed=False`).
+    """
+    conv_id = (session_data or {}).get("conversation", "")
+    if not conv_id:
+        # Clear any stale taint markers even if conversation is already empty
+        session_data.pop("_capacity_tainted_conv", None)
+        session_data.pop("_capacity_error_model", None)
+        session_data.pop("_capacity_error_at", None)
+        return {"relayed": False, "reason": "no_active_conversation"}
+
+    proj = project_dir or session_data.get("project") or "默认"
+    tx_path = transcript_path_override or config.get_transcript_path(conv_id)
+    cap_health = inspect_conversation_capacity_health(tx_path)
+    marked_tainted = bool(session_data.get("_capacity_tainted_conv") == conv_id)
+
+    if not force and not marked_tainted and not cap_health.get("is_capacity_tainted"):
+        return {
+            "relayed": False,
+            "conv_id": conv_id,
+            "reason": "conversation_healthy",
+        }
+
+    comp_info = inspect_and_backfill_transcript(
+        tx_path, project_dir=proj, chat_id=chat_id, conv_id=conv_id, custom_root=custom_root
+    )
+    failed_models = cap_health.get("failed_models") or []
+    err_model = (
+        session_data.get("_capacity_error_model")
+        or (failed_models[-1] if failed_models else "")
+        or old_model
+        or "原模型"
+    )
+    trailing_cnt = int(cap_health.get("trailing_capacity_errors", 0))
+    relay_reason = (
+        f"模型 {err_model} 触发 503 容量不足（尾部异常 {trailing_cnt} 次），"
+        f"切换至 {new_model} 自动无感接力"
+    )
+
+    lineage = list(session_data.get("conversation_lineage") or [])
+    lineage.append(
+        {
+            "conv_id": conv_id,
+            "project": proj,
+            "checkpoint_count": int(comp_info.get("checkpoint_count", 0)),
+            "total_steps": int(comp_info.get("total_steps", 0)),
+            "is_corrupted": False,
+            "reason": relay_reason,
+            "relayed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+    session_data["conversation_lineage"] = lineage[-20:]
+
+    handoff_pkg, preserved_turns = _build_session_relay_handoff(
+        conv_id=conv_id,
+        proj=proj,
+        relay_reason=relay_reason,
+        transcript_path=tx_path,
+        custom_root=custom_root,
+        include_recent_turns=True,
+    )
+    session_data["_relay_handoff_context"] = handoff_pkg
+    session_data["conversation"] = ""
+    session_data.pop("_sys_prompt_injected_conv", None)
+    session_data.pop("_capacity_tainted_conv", None)
+    session_data.pop("_capacity_error_model", None)
+    session_data.pop("_capacity_error_at", None)
+
+    log.info(
+        f"[AgentMemory] Capacity-switch auto-relay triggered for chat {chat_id}: "
+        f"old_conv={conv_id}, {err_model} -> {new_model}, trailing_503={trailing_cnt}, "
+        f"preserved_turns={preserved_turns}"
+    )
+    return {
+        "relayed": True,
+        "old_conv_id": conv_id,
+        "reason": relay_reason,
+        "preserved_turns": preserved_turns,
+        "handoff_context": handoff_pkg,
+    }
+
+
+# ============================================================================
 # Proactive Session Relay (无感会话接力)
 # ============================================================================
 
@@ -1380,9 +1684,11 @@ def check_and_prepare_session_relay(
     checkpoint_threshold: int = DEFAULT_RELAY_CHECKPOINT_THRESHOLD,
     transcript_path_override: Optional[str] = None,
     custom_root: Optional[str] = None,
+    current_model: str = "",
 ) -> Dict[str, Any]:
     """Check if the active conversation in `session_data` has reached the compaction threshold
-    (`checkpoint_count >= 3`) or suffered a corrupted `CHECKPOINT` summary.
+    (`checkpoint_count >= 3`), suffered a corrupted `CHECKPOINT` summary, or accumulated
+    trailing 503 model-capacity errors (especially after switching to another model).
 
     When triggered:
       1. Backfills all turns from the old conversation into SQLite FTS5 and `PROJECT_STATE.md`.
@@ -1404,7 +1710,28 @@ def check_and_prepare_session_relay(
     is_corrupted = bool(comp_info.get("is_corrupted", False))
     corruption_reason = comp_info.get("corruption_reason", "")
 
-    if cp_count < checkpoint_threshold and not is_corrupted:
+    # Also check for 503 capacity-tainted conversation trajectories (safety net when
+    # model was switched or a prior conversation accumulated repeated 503 errors)
+    cap_health = inspect_conversation_capacity_health(tx_path)
+    trailing_503 = int(cap_health.get("trailing_capacity_errors", 0))
+    failed_models = cap_health.get("failed_models") or []
+    active_model = (current_model or session_data.get("model") or "").strip()
+    marked_tainted = bool(session_data.get("_capacity_tainted_conv") == conv_id)
+    recorded_err_model = (session_data.get("_capacity_error_model") or "").strip()
+    model_changed_after_503 = bool(
+        active_model
+        and (
+            (recorded_err_model and active_model != recorded_err_model)
+            or (failed_models and active_model not in failed_models)
+        )
+    )
+    capacity_relay_needed = bool(
+        (marked_tainted and model_changed_after_503)
+        or (trailing_503 >= 1 and model_changed_after_503)
+        or (trailing_503 >= 8)
+    )
+
+    if cp_count < checkpoint_threshold and not is_corrupted and not capacity_relay_needed:
         return {
             "relayed": False,
             "conv_id": conv_id,
@@ -1412,11 +1739,13 @@ def check_and_prepare_session_relay(
             "is_corrupted": False,
         }
 
-    relay_reason = (
-        corruption_reason
-        if is_corrupted
-        else f"会话累计发生 {cp_count} 次上下文压缩 (达到 >= {checkpoint_threshold} 次主动接力阈值)"
-    )
+    if is_corrupted:
+        relay_reason = corruption_reason
+    elif capacity_relay_needed:
+        err_m = recorded_err_model or (failed_models[-1] if failed_models else "原模型")
+        relay_reason = f"会话尾部存在 {trailing_503} 次模型容量不足(503)异常 ({err_m})，自动无感接力至干净会话"
+    else:
+        relay_reason = f"会话累计发生 {cp_count} 次上下文压缩 (达到 >= {checkpoint_threshold} 次主动接力阈值)"
 
     lineage = list(session_data.get("conversation_lineage") or [])
     lineage.append(
@@ -1432,28 +1761,33 @@ def check_and_prepare_session_relay(
     )
     session_data["conversation_lineage"] = lineage[-20:]
 
-    # Build the Relay Handoff Context from PROJECT_STATE.md capsule
-    capsule_md = read_project_capsule(proj, custom_root=custom_root)
-    handoff_pkg = (
-        f"[Session Relay Handoff / 跨会话无感接力记忆包]\n"
-        f"- 前序会话 ID: `{conv_id}` ({relay_reason})\n"
-        f"- 历史完整对话已归档至本地 FTS5 记忆库，可通过 `python3 {os.path.join(config.BASE_DIR, 'tools', 'memory_cli.py')} search \"<关键词>\"` 随时检索。\n\n"
-        f"{capsule_md[:3600]}\n"
-        f"[/Session Relay Handoff]\n"
+    # Build the Relay Handoff Context (include recent Q&A turns for seamless continuity)
+    handoff_pkg, _ = _build_session_relay_handoff(
+        conv_id=conv_id,
+        proj=proj,
+        relay_reason=relay_reason,
+        transcript_path=tx_path,
+        custom_root=custom_root,
+        include_recent_turns=capacity_relay_needed,
     )
     session_data["_relay_handoff_context"] = handoff_pkg
     session_data["conversation"] = ""
     session_data.pop("_sys_prompt_injected_conv", None)
+    session_data.pop("_capacity_tainted_conv", None)
+    session_data.pop("_capacity_error_model", None)
+    session_data.pop("_capacity_error_at", None)
 
     log.info(
         f"[AgentMemory] Proactive Session Relay triggered for chat {chat_id}: "
-        f"old_conv={conv_id}, checkpoints={cp_count}, corrupted={is_corrupted}, reason={relay_reason}"
+        f"old_conv={conv_id}, checkpoints={cp_count}, corrupted={is_corrupted}, "
+        f"capacity_relay={capacity_relay_needed}, reason={relay_reason}"
     )
     return {
         "relayed": True,
         "old_conv_id": conv_id,
         "checkpoint_count": cp_count,
         "is_corrupted": is_corrupted,
+        "capacity_relayed": capacity_relay_needed,
         "reason": relay_reason,
         "handoff_context": handoff_pkg,
     }

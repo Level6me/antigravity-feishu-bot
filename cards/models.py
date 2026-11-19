@@ -101,7 +101,7 @@ def build_model_panel(available_models, current_model):
     }
 
 
-def build_model_switch_result_card(new_model, old_model):
+def build_model_switch_result_card(new_model, old_model, auto_relayed=False):
     model_lower = new_model.lower()
     if "gemini" in model_lower:
         icon, color = "💎", "blue"
@@ -111,11 +111,21 @@ def build_model_switch_result_card(new_model, old_model):
         icon, color = "⚡", "green"
     else:
         icon, color = "🔮", "grey"
-        
+
+    relay_note = (
+        "\n\n♻️ **已自动隔离此前 503 异常轨迹并无感接力历史上下文**（无需手动 `/clear`，直接继续对话即可）。"
+        if auto_relayed
+        else ""
+    )
+
     elements = [
         {
             "tag": "markdown",
-            "content": f"🎉 **模型切换成功！**\n\n{icon} 当前活跃模型已变更为：\n\n> **`{new_model}`**\n\n🔄 上一个模型：~~{old_model}~~\n\n*接下来的所有对话都将使用新模型进行响应。*"
+            "content": (
+                f"🎉 **模型切换成功！**\n\n{icon} 当前活跃模型已变更为：\n\n"
+                f"> **`{new_model}`**\n\n🔄 上一个模型：~~{old_model}~~"
+                f"{relay_note}\n\n*接下来的所有对话都将使用新模型进行响应。*"
+            ),
         },
         {"tag": "hr"},
         create_footer()

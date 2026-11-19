@@ -739,12 +739,36 @@ _GEMINI_SAFETY_BLOCK_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MODEL_CAPACITY_ERROR_RE = re.compile(
+    r"(?:no capacity available for model|unavailable\s*\(code\s*503\)|experiencing high traffic right now|overloaded_error|model is overloaded)",
+    re.IGNORECASE,
+)
+_MODEL_CAPACITY_MODEL_RE = re.compile(
+    r"no capacity available for model\s+([A-Za-z0-9_.\-]+)",
+    re.IGNORECASE,
+)
+
 
 def is_gemini_safety_filter_block(text: str = "") -> bool:
     """Return True if the response or error stream matches Gemini's content safety filter refusal."""
     if not text:
         return False
     return bool(_GEMINI_SAFETY_BLOCK_RE.search(str(text)))
+
+
+def is_model_capacity_error(text: str = "") -> bool:
+    """Return True if the error stream indicates server-side model capacity exhaustion (HTTP 503)."""
+    if not text:
+        return False
+    return bool(_MODEL_CAPACITY_ERROR_RE.search(str(text)))
+
+
+def extract_capacity_error_model(text: str = "") -> str:
+    """Extract the model ID from a 'No capacity available for model <id>' error string."""
+    if not text:
+        return ""
+    m = _MODEL_CAPACITY_MODEL_RE.search(str(text))
+    return m.group(1).strip() if m else ""
 
 
 def desensitize_hardware_engineering_text(text: str = "") -> str:
@@ -769,7 +793,7 @@ def desensitize_hardware_engineering_text(text: str = "") -> str:
     return s
 
 
-def detect_and_format_agent_system_error(raw_text: str = "") -> Optional[str]:
+def detect_and_format_agent_system_error(raw_text: str = "", model_name: str = "") -> Optional[str]:
     """Detect non-quota fatal Antigravity agent system errors and return a user-friendly explanation."""
     if not raw_text:
         return None
@@ -790,6 +814,19 @@ def detect_and_format_agent_system_error(raw_text: str = "") -> Optional[str]:
             "Q: 请选择下一步操作：\n"
             "- 🔄 以合规嵌入式工程表述继续执行任务\n"
             "- /model\n"
+            "[/CHOICE_CARD]"
+        )
+    if is_model_capacity_error(raw_text):
+        err_model = extract_capacity_error_model(raw_text) or model_name or "当前模型"
+        return (
+            "🚦 **[模型服务端算力拥堵 / HTTP 503 No Capacity]**\n\n"
+            f"当前模型 **`{err_model}`** 在服务端暂时没有空闲算力容量（并非你的个人配额耗尽）。\n\n"
+            "✅ **无需手动 `/clear`**：直接点击下方 **`/model`** 切换至其他可用模型（如 Gemini 4 Neon / Argon / Claude），"
+            "系统将自动隔离本次 503 异常轨迹并**无感接力保留近期对话上下文与项目记忆**，切换后直接继续对话即可。\n\n"
+            "[CHOICE_CARD]\n"
+            "Q: 请选择下一步操作：\n"
+            "- /model\n"
+            "- /quota\n"
             "[/CHOICE_CARD]"
         )
     return None
@@ -1152,6 +1189,8 @@ async def execute_antigravity(
             stream_action = ""
             stream_is_done = False
             is_quota_exhausted = False
+            is_capacity_error = False
+            last_capacity_poll_time = 0.0
 
             def get_latest_transcript_file():
                 if session_data.get("conversation"):
@@ -1561,6 +1600,41 @@ async def execute_antigravity(
 
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
+
+                # 快速 503 容量拥堵看门狗：若模型零输出且 transcript.jsonl 已连续出现 >= 3 次 503 无容量重试，
+                # 立即快速失败并提示换模型，避免白等 agy 内部 8 次退避重试（3~5 分钟）
+                if (
+                    not accumulated_text.strip()
+                    and not completed_tool_steps
+                    and not current_tool_action
+                    and attempt_elapsed_seconds >= 20
+                    and (now - last_capacity_poll_time >= 5.0)
+                ):
+                    last_capacity_poll_time = now
+                    try:
+                        poll_tx_path = target_transcript_path or await loop.run_in_executor(None, get_latest_transcript_file)
+                        if poll_tx_path:
+                            from agent_memory import inspect_conversation_capacity_health
+                            cap_live = await loop.run_in_executor(
+                                None,
+                                lambda: inspect_conversation_capacity_health(
+                                    poll_tx_path, min_byte_offset=initial_transcript_size
+                                ),
+                            )
+                            if int(cap_live.get("trailing_capacity_errors", 0)) >= 3:
+                                stream_error_msg = cap_live.get("last_error_text") or (
+                                    f"UNAVAILABLE (code 503): No capacity available for model {session_data.get('model', '')} on the server"
+                                )
+                                is_capacity_error = True
+                                log.warning(
+                                    f"[Executor] Fail-fast triggered for chat {chat_id}: "
+                                    f"{cap_live.get('trailing_capacity_errors')} consecutive 503 capacity errors "
+                                    f"in {attempt_elapsed_seconds}s ({stream_error_msg[:120]})"
+                                )
+                                await sess.close()
+                                break
+                    except Exception as cap_poll_err:
+                        log.debug(f"[Executor] Live capacity poll skipped: {cap_poll_err}")
 
                 # 进程树状态与心跳检测（仅在无事件静默 >= 2s 或存在在途工具时按需每 3 秒采集一次）
                 if now - last_cpu_check_time >= 3.0 and (stall_seconds >= 2 or current_tool_action or stream_action):
@@ -2039,22 +2113,51 @@ async def execute_antigravity(
                             session_data["last_execution_error"] = False
 
                 if not stale_quota_artifact:
-                    quota_err_reply = await detect_and_format_quota_error(combined_err_text, model=active_model_name)
-                    if quota_err_reply:
-                        is_quota_exhausted = True
-                        final_reply = quota_err_reply
-                    elif not final_reply or final_reply == "Sorry, I couldn't generate a response.":
-                        system_err_reply = detect_and_format_agent_system_error(combined_err_text)
-                        if system_err_reply:
-                            final_reply = system_err_reply
-                            is_error = True
+                    # 优先判定 503 服务端算力容量不足（非个人额度耗尽），标记受污染会话以便切换模型时自动无感接力
+                    if is_capacity_error or (
+                        (not final_reply or final_reply == "Sorry, I couldn't generate a response.")
+                        and is_model_capacity_error(combined_err_text)
+                    ):
+                        is_capacity_error = True
+                        is_error = True
+                        err_model = extract_capacity_error_model(combined_err_text) or active_model_name
+                        tainted_conv = session_data.get("conversation", "")
+                        if tainted_conv:
+                            session_data["_capacity_tainted_conv"] = tainted_conv
+                        if err_model:
+                            session_data["_capacity_error_model"] = err_model
+                        session_data["_capacity_error_at"] = time.time()
+                        session_data["last_execution_error"] = True
+                        try:
+                            await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                        except Exception:
+                            pass
+                        try:
+                            await sess.close()
+                        except Exception:
+                            pass
+                        final_reply = detect_and_format_agent_system_error(
+                            combined_err_text, model_name=err_model
+                        )
+                    else:
+                        quota_err_reply = await detect_and_format_quota_error(combined_err_text, model=active_model_name)
+                        if quota_err_reply:
+                            is_quota_exhausted = True
+                            final_reply = quota_err_reply
+                        elif not final_reply or final_reply == "Sorry, I couldn't generate a response.":
+                            system_err_reply = detect_and_format_agent_system_error(
+                                combined_err_text, model_name=active_model_name
+                            )
+                            if system_err_reply:
+                                final_reply = system_err_reply
+                                is_error = True
 
             # 若提取最终回答失败且出现流式异常/进程非正常退出（如 OAuth 401 瞬时过期、API 抖动连接断开、进程崩溃），
-            # 且非配额用尽、非 60m 硬超时，且在允许重试范围内：
+            # 且非配额用尽、非 503 模型容量不足、非 60m 硬超时，且在允许重试范围内：
             # 立即关闭可能持有过期凭证的温池进程，暂不向飞书推送报错卡片，直接返回 has_reply=False 触发 Attempt 2 自动重建重试！
             is_print_timeout = "print timeout" in combined_err_text.lower()
             has_abnormal_termination = (process.returncode != 0 and process.returncode is not None) or bool(stream_error_msg)
-            if not is_quota_exhausted and not final_reply and not is_print_timeout and has_abnormal_termination and attempt < 2:
+            if not is_quota_exhausted and not is_capacity_error and not final_reply and not is_print_timeout and has_abnormal_termination and attempt < 2:
                 log.warning(
                     f"[Executor] Attempt {attempt} failed without final response "
                     f"(returncode={process.returncode}, stream_error={stream_error_msg[:120]!r}). "
@@ -2064,18 +2167,21 @@ async def execute_antigravity(
                     await sess.close()
                 except Exception:
                     pass
-                return {"has_reply": False, "returncode": process.returncode or -1, "is_error": True, "is_quota_error": False}
+                return {"has_reply": False, "returncode": process.returncode or -1, "is_error": True, "is_quota_error": False, "is_capacity_error": False}
             
             reply_text = final_reply or accumulated_text.strip() or ""
             reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
             reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
-            if not is_quota_exhausted and not typesafe_blocked_info:
+            if not is_quota_exhausted and not is_capacity_error and not typesafe_blocked_info:
                 reply_text = extract_final_chinese_response(reply_text)
 
             # 若成功提取到模型有效回复，说明本轮核心任务/文本已正常生成交付，不可判定为执行失败或追加故障诊断
-            if reply_text and not is_quota_exhausted:
+            if reply_text and not is_quota_exhausted and not is_capacity_error:
                 is_error = False
                 session_data["last_execution_error"] = False
+                session_data.pop("_capacity_tainted_conv", None)
+                session_data.pop("_capacity_error_model", None)
+                session_data.pop("_capacity_error_at", None)
 
             from plugin_manager import plugin_manager
             reply_text = await plugin_manager.dispatch_after_ai(reply_text, chat_id, session_data)
@@ -2165,7 +2271,7 @@ async def execute_antigravity(
                 except Exception as e:
                     log.error(f"Failed to process turn transcript post-actions: {e}")
             
-            if not is_quota_exhausted and reply_text:
+            if not is_quota_exhausted and not is_capacity_error and reply_text:
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
 
@@ -2178,7 +2284,9 @@ async def execute_antigravity(
                     reply_text = quota_err_reply
                     is_quota_exhausted = True
                 else:
-                    system_err_reply = detect_and_format_agent_system_error(combined_err_text)
+                    system_err_reply = detect_and_format_agent_system_error(
+                        combined_err_text, model_name=session_data.get("model", "")
+                    )
                     if system_err_reply:
                         reply_text = system_err_reply
                     elif process.returncode in (-9, 137):
@@ -2188,10 +2296,12 @@ async def execute_antigravity(
                     else:
                         reply_text = stderr_text.strip() or "⚠️ 模型未返回任何有效回复，请重试或更换模型。"
                 is_error = True
-            elif is_quota_exhausted:
+            elif is_quota_exhausted or is_capacity_error:
                 is_error = True
             elif is_error:
-                system_err_reply = detect_and_format_agent_system_error(combined_err_text)
+                system_err_reply = detect_and_format_agent_system_error(
+                    combined_err_text, model_name=session_data.get("model", "")
+                )
                 if system_err_reply:
                     reply_text = system_err_reply
             else:
@@ -2207,18 +2317,21 @@ async def execute_antigravity(
                 stats.record_tokens(approx_tokens)
 
             choice_card_data = None
-            if not is_error:
+            if not is_error or is_capacity_error:
                 reply_text, choice_card_data = extract_choice_card_data(
                     reply_text,
                     transcript_path=transcript_path,
                     initial_transcript_size=initial_transcript_size
                 )
-                # Record whether this turn proposed a plan or asked a follow-up question for HMDM Markov state transition
-                tail_snippet = (reply_text or "")[-250:]
-                session_data["last_turn_proposed_plan"] = bool(
-                    choice_card_data
-                    or any(kw in tail_snippet for kw in ("是否", "请告知", "确认", "方案", "选择", "？", "?"))
-                )
+                if not is_error:
+                    # Record whether this turn proposed a plan or asked a follow-up question for HMDM Markov state transition
+                    tail_snippet = (reply_text or "")[-250:]
+                    session_data["last_turn_proposed_plan"] = bool(
+                        choice_card_data
+                        or any(kw in tail_snippet for kw in ("是否", "请告知", "确认", "方案", "选择", "？", "?"))
+                    )
+                else:
+                    session_data["last_turn_proposed_plan"] = False
             else:
                 session_data["last_turn_proposed_plan"] = False
 
@@ -2448,7 +2561,13 @@ async def execute_antigravity(
                 except Exception:
                     pass
 
-            return {"has_reply": bool(final_reply), "returncode": process.returncode, "is_error": is_error, "is_quota_error": is_quota_exhausted}
+            return {
+                "has_reply": bool(final_reply),
+                "returncode": process.returncode,
+                "is_error": is_error,
+                "is_quota_error": is_quota_exhausted,
+                "is_capacity_error": is_capacity_error,
+            }
 
         
         finally:
@@ -2475,7 +2594,7 @@ async def execute_antigravity(
     MAX_ATTEMPTS = 2
     for attempt in range(1, MAX_ATTEMPTS + 1):
         res = await _run_single_attempt(attempt)
-        if res.get("is_quota_error") or res["has_reply"] or res["returncode"] == 0 or attempt == MAX_ATTEMPTS:
+        if res.get("is_quota_error") or res.get("is_capacity_error") or res["has_reply"] or res["returncode"] == 0 or attempt == MAX_ATTEMPTS:
             return res["is_error"]
         log.warning(f"[Executor] Attempt {attempt}/{MAX_ATTEMPTS} failed/stalled without final response for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")
         await asyncio.sleep(1.0)

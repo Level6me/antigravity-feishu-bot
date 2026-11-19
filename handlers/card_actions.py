@@ -83,9 +83,30 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 from system_one_gate import infer_effort_from_model
                 effort_to_set = infer_effort_from_model(new_model, session_data.get("reasoning_effort", "medium"))
                 session_data["reasoning_effort"] = effort_to_set
-                await save_session_async(chat_id, session_data)
-                log.info(f"Switched model to {new_model} (effort={effort_to_set}) in chat {chat_id}")
+
+                auto_relayed = False
                 try:
+                    from agent_memory import relay_conversation_for_model_switch
+                    relay_res = relay_conversation_for_model_switch(
+                        chat_id=chat_id,
+                        session_data=session_data,
+                        new_model=new_model,
+                        old_model=old_model,
+                        project_dir=session_data.get("project", "默认"),
+                    )
+                    auto_relayed = bool(relay_res.get("relayed"))
+                except Exception as relay_err:
+                    log.warning(f"[switch_model] Capacity auto-relay check failed: {relay_err}")
+
+                await save_session_async(chat_id, session_data)
+                log.info(
+                    f"Switched model to {new_model} (effort={effort_to_set}, auto_relayed={auto_relayed}) in chat {chat_id}"
+                )
+                try:
+                    # If the previous worker is still stuck retrying a 503 capacity error, abort it cleanly
+                    if auto_relayed and chat_id in chat_workers and not chat_workers[chat_id].done():
+                        chat_workers[chat_id].cancel()
+                        chat_workers.pop(chat_id, None)
                     from session_pool import session_pool
                     await session_pool.reset_session(chat_id)
                     proj_val = session_data.get("project")
@@ -97,7 +118,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     ))
                 except Exception:
                     pass
-                res_card = CardBuilder.build_model_switch_result_card(new_model, old_model)
+                res_card = CardBuilder.build_model_switch_result_card(new_model, old_model, auto_relayed=auto_relayed)
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, res_card))
                 return res_card
 
