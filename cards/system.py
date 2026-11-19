@@ -133,6 +133,94 @@ def build_security_warning(blocked_command):
     }
 
 
+def build_acp_permission_card(perm_token: str, params: dict):
+    """Build Feishu interactive approval card for ACP `session/request_permission`."""
+    tool_call = params.get("toolCall") if isinstance(params.get("toolCall"), dict) else {}
+    title = str(tool_call.get("title") or params.get("title") or tool_call.get("name") or "工具执行权限请求")
+    kind = str(tool_call.get("kind") or "")
+    raw_input = tool_call.get("rawInput") or params.get("rawInput") or {}
+    if isinstance(raw_input, dict):
+        preview_items = []
+        for k, v in list(raw_input.items())[:5]:
+            v_str = str(v).replace("\n", " ")
+            if len(v_str) > 120:
+                v_str = v_str[:120] + "..."
+            preview_items.append(f"- `{k}`: `{v_str}`")
+        preview_md = "\n".join(preview_items) if preview_items else "_无额外参数_"
+    else:
+        preview_md = f"`{str(raw_input)[:200]}`"
+
+    options = params.get("options") or []
+    actions = []
+    for opt in options[:4]:
+        opt_id = str(opt.get("optionId") or "")
+        opt_name = str(opt.get("name") or opt_id or "确认")
+        opt_kind = str(opt.get("kind") or "").lower()
+        btn_type = "primary" if "allow" in opt_kind else ("danger" if "reject" in opt_kind else "default")
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": opt_name[:24]},
+            "type": btn_type,
+            "value": {
+                "action": "acp_permission_decision",
+                "perm_token": perm_token,
+                "option_id": opt_id,
+                "label": opt_name[:32],
+                "title": title[:60],
+            },
+        })
+
+    if not actions:
+        actions = [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "✅ 允许"},
+                "type": "primary",
+                "value": {"action": "acp_permission_decision", "perm_token": perm_token, "option_id": "allow", "label": "允许", "title": title[:60]},
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "❌ 拒绝"},
+                "type": "danger",
+                "value": {"action": "acp_permission_decision", "perm_token": perm_token, "option_id": "reject", "label": "拒绝", "title": title[:60]},
+            },
+        ]
+
+    header_sub = f" (`{kind}`)" if kind else ""
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange",
+            "title": {"content": "🔐 ACP 交互式权限审批", "tag": "plain_text"},
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": f"**待审批操作**：{title}{header_sub}\n\n**参数详情**：\n{preview_md}\n\n*请在 3 分钟内点击下方按钮做出决定，超时将自动安全拒绝。*",
+            },
+            {"tag": "action", "layout": "flow", "actions": actions},
+            create_footer(),
+        ],
+    }
+
+
+def build_acp_permission_result_card(title: str, chosen_label: str):
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "green",
+            "title": {"content": "✅ ACP 权限审批已处理", "tag": "plain_text"},
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": f"**操作**：{title}\n**已选择**：**{chosen_label}**\n\n已回传给 Antigravity ACP 会话继续执行。",
+            },
+            create_footer(),
+        ],
+    }
+
+
 def build_help_card():
     elements = [
         {
@@ -155,8 +243,10 @@ def build_help_card():
         {
             "tag": "markdown",
             "content": (
-                "📁 **项目与记事本工程：**\n"
+                "📁 **项目与工作区工程：**\n"
                 "• `/project` : 弹出项目管理器（支持切换工作区、新建项目、设置路径与翻页）\n"
+                "• `/adddir [add|remove|clear|路径]` : 挂载/管理额外工作区目录（多仓库协同 `--add-dir`）\n"
+                "• `/mode [auto|accept-edits|plan]` : 切换 CLI 执行模式（支持 ACP 原地热切换）\n"
                 "• `/note` : 记事本管理看板（支持添加、查看详情、删除与清空）\n"
                 "• `/quota` : 查询 Google AI Pro 套餐官方剩余额度看板\n"
                 "• `/status` : 查看机器人的运行状态、CPU/内存/Uptime 与日志"
@@ -166,7 +256,11 @@ def build_help_card():
         {
             "tag": "markdown",
             "content": (
-                "⚡ **系统管理与防护：**\n"
+                "⚡ **系统管理、ACP 与原生生态：**\n"
+                "• `/steer <纠正内容>` : 在 ACP 长任务运行中实时转向/插话，无需 `/stop`\n"
+                "• `/transport [acp|stream-json]` : 查看或切换会话传输引擎（默认 ACP）\n"
+                "• `/mcp [list|enable|disable|remove|add ...]` : 管理 `agy` 原生 MCP 服务\n"
+                "• `/agyplugin [list|validate|install|enable|disable|uninstall ...]` : 管理 `agy` 原生插件\n"
                 "• `/stop` : 中止当前会话中正在执行的后台任务\n"
                 "• `/s1` : 打开 System One 决策网关控制台\n"
                 "• `/update` : 检查并更新机器人服务至最新版本\n"

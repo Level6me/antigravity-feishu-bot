@@ -53,18 +53,40 @@ async def _process_post_message(loop, message_id, content_json):
     download_success = True
     
     if image_keys:
-        image_key = image_keys[0]
         os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-        output_filename = os.path.join(DOWNLOADS_DIR, f"img_{image_key}.jpg")
-        
-        dl_card = CardBuilder.build_download_indicator("图片内容")
+        total_imgs = len(image_keys)
+        indicator_label = "图片内容" if total_imgs == 1 else f"图文中的 {total_imgs} 张图片"
+        dl_card = CardBuilder.build_download_indicator(indicator_label)
         bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
-        
-        output_path = os.path.abspath(output_filename)
-        download_success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
-        
-        downloaded_file_name = os.path.basename(output_filename)
-        user_text += f"\n[附加图片路径: {output_path}]"
+
+        downloaded_paths = []
+        failed_count = 0
+        for idx, image_key in enumerate(image_keys):
+            if not image_key:
+                continue
+            suffix = f"_{idx}" if total_imgs > 1 else ""
+            output_filename = os.path.join(DOWNLOADS_DIR, f"img_{image_key}{suffix}.jpg")
+            output_path = os.path.abspath(output_filename)
+            ok = await loop.run_in_executor(
+                None,
+                lambda ik=image_key, op=output_path: download_message_resource_sdk(message_id, ik, "image", op),
+            )
+            if ok:
+                downloaded_paths.append(output_path)
+            else:
+                failed_count += 1
+
+        download_success = (failed_count == 0)
+        if downloaded_paths:
+            if len(downloaded_paths) == 1:
+                downloaded_file_name = os.path.basename(downloaded_paths[0])
+                user_text += f"\n[附加图片路径: {downloaded_paths[0]}]"
+            else:
+                downloaded_file_name = f"{len(downloaded_paths)} 张图片"
+                lines = [f"[附加图片路径 #{i + 1}: {p}]" for i, p in enumerate(downloaded_paths)]
+                user_text += "\n" + "\n".join(lines)
+        elif total_imgs > 0:
+            downloaded_file_name = f"{total_imgs} 张图片"
         
     return user_text, downloaded_file_name, download_success, bot_reply_msg_id
 

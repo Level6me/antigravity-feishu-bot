@@ -600,6 +600,48 @@ async def _process_single_task(chat_id, task):
                 log.warning(f"[TypeSafe FastPath] Home Assistant dispatch failed: {e}")
 
     # Plugin fast paths above do not need an agent process.
+    # Scheme C: 0ms pre-flight circuit breaker — if the selected model recently hit 503 No capacity,
+    # automatically switch to a healthy cross-family fallback model and relay tainted conversation context.
+    try:
+        if getattr(config, "AUTO_FALLBACK_ON_CAPACITY_ERROR", True) and selected_model:
+            from utils.model_health import is_model_circuit_open, pick_healthy_fallback_model
+            if is_model_circuit_open(selected_model):
+                fallback_model = pick_healthy_fallback_model(selected_model, preferred_tier=selected_effort)
+                if fallback_model and fallback_model != selected_model:
+                    old_congested_model = selected_model
+                    selected_model = fallback_model
+                    selected_effort = infer_effort_from_model(fallback_model, selected_effort)
+                    session_data["model"] = fallback_model
+                    session_data["base_model"] = fallback_model
+                    session_data["reasoning_effort"] = selected_effort
+                    session_data["_capacity_fallback_notice"] = (
+                        f"⚡ 检测到原模型 `{old_congested_model}` 当前处于 503 算力拥堵熔断期，"
+                        f"已 0 秒自动无感切换至 **`{fallback_model}`** 执行。"
+                    )
+                    try:
+                        from agent_memory import relay_conversation_for_model_switch
+                        relay_conversation_for_model_switch(
+                            chat_id=chat_id,
+                            session_data=session_data,
+                            new_model=fallback_model,
+                            old_model=old_congested_model,
+                            project_dir=session_data.get("project", "默认"),
+                        )
+                    except Exception as _r_err:
+                        log.warning(f"[ModelHealth] Pre-flight fallback relay failed: {_r_err}")
+                    await save_session_async(chat_id, session_data)
+                    try:
+                        from session_pool import session_pool
+                        await session_pool.reset_session(chat_id)
+                    except Exception:
+                        pass
+                    log.warning(
+                        f"[ModelHealth] Pre-flight circuit-breaker auto-fallback for chat {chat_id}: "
+                        f"{old_congested_model} -> {fallback_model}"
+                    )
+    except Exception as cb_err:
+        log.warning(f"[Pipeline] Pre-flight model circuit-breaker check failed: {cb_err}")
+
     # Before prewarming the agent session, inspect the current conversation's compaction health
     # and perform Proactive Session Relay (`无感会话接力`) if checkpoints >= 3 or summary was corrupted.
     relay_handoff_context = ""
@@ -611,9 +653,19 @@ async def _process_single_task(chat_id, task):
             write_turn_contract,
         )
         from hooks.agy_hooks import ensure_agy_hooks_installed
-        if not getattr(app_state, "_agy_hooks_ensured", False):
-            ensure_agy_hooks_installed()
-            app_state._agy_hooks_ensured = True
+        proj_dir_for_hooks = session_data.get("project", "默认")
+        valid_proj_for_hooks = (
+            proj_dir_for_hooks
+            if (proj_dir_for_hooks and proj_dir_for_hooks not in ("默认", "Default") and os.path.isdir(proj_dir_for_hooks))
+            else config.BASE_DIR
+        )
+        ensured_dirs = getattr(app_state, "_agy_hooks_ensured_dirs", None)
+        if ensured_dirs is None:
+            ensured_dirs = set()
+            app_state._agy_hooks_ensured_dirs = ensured_dirs
+        if valid_proj_for_hooks not in ensured_dirs:
+            ensure_agy_hooks_installed(workspace_dir=valid_proj_for_hooks)
+            ensured_dirs.add(valid_proj_for_hooks)
 
         relay_res = check_and_prepare_session_relay(
             chat_id,
@@ -778,34 +830,55 @@ async def _process_single_task(chat_id, task):
         else:
             session_data["_sys_prompt_injected_proj"] = current_proj
             session_data["_sys_prompt_pending_mark"] = True
-            system_instruction = (
-                "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
-                "Any English text in the response must be limited to code syntax or technical names only. "
-                "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles. "
-                "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
+
+            # 若工作区已配置原生 `.agents/rules/feishu-bot-core.md` 且开启精简模式，
+            # 由 agy 原生 Rules 承接静态语言/文件/安全护栏，首轮仅注入动态上下文与任务规划指令，大幅省 Token
+            native_core_rule_path = (
+                os.path.join(current_proj, ".agents", "rules", "feishu-bot-core.md")
+                if (current_proj and os.path.isdir(current_proj))
+                else ""
+            )
+            has_native_core_rule = bool(
+                getattr(config, "USE_NATIVE_RULES_SLIM_PROMPT", True)
+                and native_core_rule_path
+                and os.path.isfile(native_core_rule_path)
             )
 
-            system_instruction += (
-                "[System Feishu Resource Delivery / 飞书文件传送规范]\n"
-                "1. 【区分「普通代码引用」与「主动发送文件」】：总结中提及编辑/查看的代码、配置或文档路径时，仅使用普通 Markdown 链接（如 `[app.py](file:///path/to/app.py)` 或 `[app.py](file:///path/to/app.py#L10-L20)`），**切勿**加 `📎`/`📄` 附件标记，系统不会将普通代码引用当作附件发送。\n"
-                f"2. 【命令行主动发送（最推荐）】：确需向飞书发送文件（用户要求发送文件，或需推送报告/压缩包/导出物/音视频供下载）时，直接运行 `{python_bin} {send_script_path} \"<文件绝对路径>\" {chat_id}`（在任何项目目录下均可直接执行，严禁自行 curl/webhook 传文件）。\n"
-                "3. 【回复文本标记推送】：若未通过命令行发送而需后台自动推送，请使用带附件标记的链接 `📎 [文件名](/绝对路径/文件名)` 或 `📄 [文件名](/绝对路径/文件名)`（勿加 `#L行号`）。\n\n"
-            )
+            if has_native_core_rule:
+                system_instruction = (
+                    f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n"
+                    f"- Feishu active file delivery CLI: `{python_bin} {send_script_path} \"<文件绝对路径>\" {chat_id}`\n"
+                    f"- Native rules loaded from `.agents/rules/feishu-bot-core.md`.\n\n"
+                )
+            else:
+                system_instruction = (
+                    "[System Rule: MUST ALWAYS communicate, reply, explain, and write responses in Simplified Chinese (简体中文). "
+                    "Any English text in the response must be limited to code syntax or technical names only. "
+                    "Absolute directive: NEVER output internal chain-of-thought, reasoning steps, planning commentary, or English preambles. "
+                    "Output ONLY your final answer directly in Simplified Chinese.]\n\n"
+                )
+
+                system_instruction += (
+                    "[System Feishu Resource Delivery / 飞书文件传送规范]\n"
+                    "1. 【区分「普通代码引用」与「主动发送文件」】：总结中提及编辑/查看的代码、配置或文档路径时，仅使用普通 Markdown 链接（如 `[app.py](file:///path/to/app.py)` 或 `[app.py](file:///path/to/app.py#L10-L20)`），**切勿**加 `📎`/`📄` 附件标记，系统不会将普通代码引用当作附件发送。\n"
+                    f"2. 【命令行主动发送（最推荐）】：确需向飞书发送文件（用户要求发送文件，或需推送报告/压缩包/导出物/音视频供下载）时，直接运行 `{python_bin} {send_script_path} \"<文件绝对路径>\" {chat_id}`（在任何项目目录下均可直接执行，严禁自行 curl/webhook 传文件）。\n"
+                    "3. 【回复文本标记推送】：若未通过命令行发送而需后台自动推送，请使用带附件标记的链接 `📎 [文件名](/绝对路径/文件名)` 或 `📄 [文件名](/绝对路径/文件名)`（勿加 `#L行号`）。\n\n"
+                )
+
+                # 注入当前工作空间上下文与安全防线（全模式常驻保障）
+                system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
+                system_instruction += (
+                    "[System Execution & Safety Guardrails]\n"
+                    "1. 【全指令强制超时】：终端执行必须前缀 `timeout <秒数>`。\n"
+                    "2. 【受限递归与安全避让】：严禁系统全盘无限制递归搜索；严禁重启当前飞书机器人自身进程。\n"
+                    "3. 【计划任务调度能力】：用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
+                )
 
             if task.get("message_type") == "audio" or task.get("is_voice_message"):
                 system_instruction += (
                     "[Voice Interaction Directive / 语音交互规范]\n"
                     "用户正在通过飞书原生语音与你对话，回复将合成为语音消息。请遵循口语化表达，语言自然生动、亲切凝练、避免长代码块或复杂大表格。\n\n"
                 )
-
-            # 注入当前工作空间上下文与安全防线（全模式常驻保障）
-            system_instruction += f"[System Active Project Context]\n- Current active project workspace path is: {current_proj}\n\n"
-            system_instruction += (
-                "[System Execution & Safety Guardrails]\n"
-                "1. 【全指令强制超时】：终端执行必须前缀 `timeout <秒数>`。\n"
-                "2. 【受限递归与安全避让】：严禁系统全盘无限制递归搜索；严禁重启当前飞书机器人自身进程。\n"
-                "3. 【计划任务调度能力】：用户有定时提醒或周期任务时，使用 run_command 执行 CLI 注册到 cron_scheduler 引擎中。\n\n"
-            )
             if getattr(config, "TYPESAFE_TIER", "gateway") in ("sentry", "copilot") or getattr(decision, "security_level", "L0") in ("L1", "L2", "L3"):
                 system_instruction += (
                     "[System One Sentry/Co-Pilot & HMDM L1/L2 Safety Directive / 全链路风险受控与防泄密规则]\n"

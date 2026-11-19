@@ -116,7 +116,15 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         
         if c_id in chat_workers and not chat_workers[c_id].done():
             qsize = chat_queues[c_id].qsize()
-            warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {qsize + 1} 个任务)..."
+            steer_hint = ""
+            try:
+                from session_pool import session_pool
+                active_sess = session_pool.get_active_session(c_id)
+                if active_sess and getattr(active_sess, "transport_name", "") == "acp" and active_sess.is_turn_running():
+                    steer_hint = "\n💡 提示：当前会话运行在 ACP 引擎下，如需对正在执行的任务实时插话转向，可直接发送 `/steer <纠正指令>`。"
+            except Exception:
+                pass
+            warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {qsize + 1} 个任务)...{steer_hint}"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(msg_id, warning_msg))
             await chat_queues[c_id].put(task_payload)
             save_pending_task(c_id, task_payload)

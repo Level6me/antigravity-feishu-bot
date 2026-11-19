@@ -70,6 +70,30 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 此操作仅管理员可用！"}})
         
+    if action_value.get("action") == "acp_permission_decision":
+        perm_token = str(action_value.get("perm_token") or "")
+        option_id = str(action_value.get("option_id") or "")
+        chosen_label = str(action_value.get("label") or option_id or "已处理")
+        req_title = str(action_value.get("title") or "工具权限审批")
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def _do_resolve_perm():
+                from acp_client import resolve_pending_permission
+                ok, msg = resolve_pending_permission(perm_token, chat_id, option_id)
+                if ok and card_message_id:
+                    res_card = CardBuilder.build_acp_permission_result_card(req_title, chosen_label)
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: patch_interactive_card_sdk(card_message_id, res_card)
+                    )
+                return ok, msg
+            try:
+                ok, msg = asyncio.run_coroutine_threadsafe(_do_resolve_perm(), app_state.main_loop).result(timeout=5)
+                toast_type = "success" if ok else "warning"
+                return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": msg}})
+            except Exception as e:
+                log.error(f"[CardAction] acp_permission_decision error: {e}")
+                return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "权限审批提交失败"}})
+        return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "事件循环未就绪"}})
+
     if action_value.get("action") == "switch_model":
         new_model = action_value.get("model")
         
@@ -108,18 +132,108 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                         chat_workers[chat_id].cancel()
                         chat_workers.pop(chat_id, None)
                     from session_pool import session_pool
-                    await session_pool.reset_session(chat_id)
                     proj_val = session_data.get("project")
                     cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
                     conv_id = session_data.get("conversation", "")
-                    asyncio.create_task(session_pool.prewarm(
-                        chat_id, new_model, cwd_dir, conversation_id=conv_id,
-                        effort=effort_to_set
-                    ))
+                    agent_mode = session_data.get("agent_mode") or None
+                    extra_dirs = list(session_data.get("extra_dirs") or [])
+                    active_sess = session_pool.get_active_session(chat_id) if hasattr(session_pool, "get_active_session") else None
+                    # Live ACP session: hot-switch model in-place when not auto-relaying (preserves subagents & warm state!)
+                    if (
+                        not auto_relayed
+                        and active_sess
+                        and getattr(active_sess, "transport_name", "") == "acp"
+                        and active_sess.is_alive()
+                        and not active_sess.lock.locked()
+                    ):
+                        switched_ok = await active_sess.set_model(new_model, effort=effort_to_set)
+                        if not switched_ok:
+                            await session_pool.reset_session(chat_id)
+                            asyncio.create_task(session_pool.prewarm(
+                                chat_id, new_model, cwd_dir, conversation_id=conv_id,
+                                effort=effort_to_set, agent_mode=agent_mode, extra_dirs=extra_dirs,
+                            ))
+                    else:
+                        await session_pool.reset_session(chat_id)
+                        asyncio.create_task(session_pool.prewarm(
+                            chat_id, new_model, cwd_dir, conversation_id=conv_id,
+                            effort=effort_to_set, agent_mode=agent_mode, extra_dirs=extra_dirs,
+                        ))
                 except Exception:
                     pass
-                res_card = CardBuilder.build_model_switch_result_card(new_model, old_model, auto_relayed=auto_relayed)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, res_card))
+                initial_probe_status = "probing"
+                initial_probe_latency = 0.0
+                initial_fallback = None
+                should_run_bg_probe = True
+                try:
+                    from utils.model_health import (
+                        get_model_health,
+                        pick_healthy_fallback_model,
+                        probe_model_capacity,
+                    )
+                    cached_h = get_model_health(new_model)
+                    if cached_h.get("status") == "healthy" and cached_h.get("age_seconds", 999.0) < 60.0:
+                        initial_probe_status = "healthy"
+                        initial_probe_latency = float(cached_h.get("latency_ms") or 0.0)
+                        should_run_bg_probe = False
+                    elif cached_h.get("status") == "unhealthy":
+                        initial_probe_status = "unhealthy"
+                        initial_fallback = pick_healthy_fallback_model(new_model, preferred_tier=effort_to_set)
+                        # Still re-probe in background in case the model just recovered
+                        should_run_bg_probe = True
+                except Exception as mh_err:
+                    log.debug(f"[switch_model] Model health check skipped: {mh_err}")
+                    should_run_bg_probe = False
+                    initial_probe_status = None
+
+                res_card = CardBuilder.build_model_switch_result_card(
+                    new_model,
+                    old_model,
+                    auto_relayed=auto_relayed,
+                    probe_status=initial_probe_status,
+                    probe_latency_ms=initial_probe_latency,
+                    suggested_fallback=initial_fallback,
+                )
+
+                if should_run_bg_probe and card_message_id:
+                    async def _probe_and_patch_card():
+                        try:
+                            import config as _cfg
+                            from utils.model_health import pick_healthy_fallback_model, probe_model_capacity
+                            probe_timeout = float(getattr(_cfg, "CAPACITY_PROBE_TIMEOUT_SECONDS", 18) or 18)
+                            probe_res = await probe_model_capacity(
+                                new_model,
+                                timeout_seconds=probe_timeout,
+                                force=(initial_probe_status == "unhealthy"),
+                            )
+                            # Only patch if the user hasn't already switched to another model
+                            latest_session = await get_session_async(chat_id)
+                            if latest_session.get("model") != new_model and latest_session.get("base_model") != new_model:
+                                return
+                            p_status = probe_res.get("status")
+                            if p_status not in ("healthy", "unhealthy", "timeout"):
+                                p_status = None
+                            fb_model = (
+                                pick_healthy_fallback_model(new_model, preferred_tier=effort_to_set)
+                                if p_status in ("unhealthy", "timeout")
+                                else None
+                            )
+                            updated_card = CardBuilder.build_model_switch_result_card(
+                                new_model,
+                                old_model,
+                                auto_relayed=auto_relayed,
+                                probe_status=p_status,
+                                probe_latency_ms=float(probe_res.get("latency_ms") or 0.0),
+                                suggested_fallback=fb_model,
+                            )
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, lambda: patch_interactive_card_sdk(card_message_id, updated_card)
+                            )
+                        except Exception as pe:
+                            log.warning(f"[switch_model] Background probe card patch failed: {pe}")
+
+                    asyncio.create_task(_probe_and_patch_card())
+
                 return res_card
 
             future = asyncio.run_coroutine_threadsafe(do_switch(), app_state.main_loop)

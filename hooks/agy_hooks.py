@@ -151,11 +151,33 @@ def handle_hook_payload(payload: Dict[str, Any], custom_root: Optional[str] = No
     return {"continue": True}
 
 
-def ensure_agy_hooks_installed(bot_root: Optional[str] = None) -> str:
-    """Ensure `~/.gemini/config/hooks.json` registers `agy_hooks.py` for PreInvocation and PreToolUse."""
+def ensure_agy_hooks_installed(
+    bot_root: Optional[str] = None,
+    workspace_dir: Optional[str] = None,
+    global_install: Optional[bool] = None,
+) -> str:
+    """Register `agy_hooks.py` for PreInvocation and PreToolUse.
+
+    To avoid polluting the user's standalone terminal `agy` sessions, defaults to installing
+    workspace-scoped `<workspace>/.agents/hooks.json` when `workspace_dir` is provided
+    (or `bot_root` when `SYNC_GLOBAL_HOOKS_JSON` is False). Set `global_install=True` (or
+    `SYNC_GLOBAL_HOOKS_JSON=true`) to also write `~/.gemini/config/hooks.json`.
+    """
     root = bot_root or ROOT_DIR
     hook_script = os.path.abspath(os.path.join(root, "hooks", "agy_hooks.py"))
-    config_dir = os.path.expanduser("~/.gemini/config")
+    if global_install is None:
+        try:
+            import config as _cfg
+            global_install = bool(getattr(_cfg, "SYNC_GLOBAL_HOOKS_JSON", False))
+        except Exception:
+            global_install = False
+
+    if workspace_dir and os.path.isdir(workspace_dir) and not global_install:
+        config_dir = os.path.join(os.path.abspath(workspace_dir), ".agents")
+    elif not global_install:
+        config_dir = os.path.join(os.path.abspath(root), ".agents")
+    else:
+        config_dir = os.path.expanduser("~/.gemini/config")
     os.makedirs(config_dir, exist_ok=True)
     hooks_json_path = os.path.join(config_dir, "hooks.json")
 

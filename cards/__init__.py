@@ -38,6 +38,8 @@ class CardBuilder:
     build_update_card = staticmethod(system.build_update_card)
     build_welcome_card = staticmethod(system.build_welcome_card)
     build_security_warning = staticmethod(system.build_security_warning)
+    build_acp_permission_card = staticmethod(system.build_acp_permission_card)
+    build_acp_permission_result_card = staticmethod(system.build_acp_permission_result_card)
     build_help_card = staticmethod(system.build_help_card)
     build_status_card = staticmethod(system.build_status_card)
 

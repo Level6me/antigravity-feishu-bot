@@ -467,7 +467,24 @@ def format_tool_action(tool_name: str = "", params: dict = None, raw_action: str
     elif tool_name == "read_url_content":
         return "正在抓取网页内容"
     elif tool_name == "invoke_subagent":
-        return "正在调度子智能体"
+        role = (params.get("Role") or params.get("role") or "").strip()
+        return f"正在调度子智能体: {role[:16]}" if role else "正在调度子智能体"
+    elif tool_name == "manage_subagents":
+        return "正在管理子智能体"
+    elif tool_name == "define_subagent":
+        return "正在定义子智能体"
+    elif tool_name == "swarm":
+        action = (params.get("action") or "").strip()
+        return f"正在协同智能体蜂群 ({action})" if action else "正在协同智能体蜂群"
+    elif tool_name == "run_workflow":
+        desc = (params.get("Description") or params.get("description") or "").strip()
+        return f"正在编排工作流: {desc[:14]}" if desc else "正在编排工作流"
+    elif tool_name == "schedule":
+        return "正在配置定时调度"
+    elif tool_name == "ask_question":
+        return "正在生成交互确认问题"
+    elif tool_name == "send_message":
+        return "正在向子智能体发送消息"
     elif tool_name == "manage_task":
         return "正在管理后台任务"
 
@@ -481,12 +498,21 @@ def format_tool_action(tool_name: str = "", params: dict = None, raw_action: str
         "replace_file_content": "编辑文件",
         "edit_file": "编辑文件",
         "grep_search": "搜索代码",
+        "grep": "搜索代码",
         "find_by_name": "查找文件",
+        "glob": "查找文件",
         "list_dir": "浏览目录",
         "search_web": "联网搜索",
         "read_url_content": "抓取网页",
         "manage_task": "管理任务",
-        "invoke_subagent": "调度智能体",
+        "invoke_subagent": "调度子智能体",
+        "manage_subagents": "管理子智能体",
+        "define_subagent": "定义子智能体",
+        "send_message": "协同智能体通信",
+        "swarm": "协同智能体蜂群",
+        "run_workflow": "编排工作流",
+        "schedule": "配置定时调度",
+        "ask_question": "发起交互确认",
     }
     if tool_name in TOOL_MAP:
         return f"正在{TOOL_MAP[tool_name]}"
@@ -1085,21 +1111,98 @@ async def execute_antigravity(
         custom_env["STDOUT_LINE_BUFFERED"] = "1"
         sess_locked = False
         turn_stream = None
+        sidecar_probe_task = None
         pool_key = session_data.get("_isolated_pool_key") or chat_id
         try:
             from session_pool import session_pool
             conv_id_to_resume = session_data.get("conversation", "") if not is_new_conversation else ""
-            sess = session_pool.get_or_create(
-                pool_key,
-                safe_model,
-                cwd_dir,
-                conversation_id=conv_id_to_resume,
-                effort=safe_effort,
-            )
+            effective_agent_mode = session_data.get("agent_mode") or getattr(config, "DEFAULT_AGENT_MODE", "auto")
+            extra_dirs = list(session_data.get("extra_dirs") or [])
+            preferred_transport = session_data.get("transport") or getattr(config, "AGENT_TRANSPORT", "acp")
+
+            async def _acp_permission_notifier(target_chat_id: str, perm_token: str, params: dict) -> bool:
+                try:
+                    perm_card = CardBuilder.build_acp_permission_card(perm_token, params)
+                    from lark_client import send_interactive_card_to_chat_sdk
+                    mid = await _feishu_call(send_interactive_card_to_chat_sdk, target_chat_id, perm_card)
+                    return bool(mid)
+                except Exception as pe:
+                    log.warning(f"[Executor] Failed to send ACP permission card: {pe}")
+                    return False
+
+            async def _acp_async_update_cb(target_chat_id: str, async_text: str):
+                try:
+                    if not async_text.strip():
+                        return
+                    from lark_client import send_interactive_card_to_chat_sdk
+                    bg_card = CardBuilder.build_ai_response(
+                        f"🔔 **[后台任务 / Subagent 异步更新]**\n\n{async_text}",
+                        user_query="后台任务异步回调",
+                        think_seconds=0,
+                    )
+                    await _feishu_call(send_interactive_card_to_chat_sdk, target_chat_id, bg_card)
+                except Exception as ae:
+                    log.warning(f"[Executor] Failed to push ACP async update: {ae}")
+
+            try:
+                sess = session_pool.get_or_create(
+                    pool_key,
+                    safe_model,
+                    cwd_dir,
+                    conversation_id=conv_id_to_resume,
+                    effort=safe_effort,
+                    agent_mode=effective_agent_mode,
+                    extra_dirs=extra_dirs,
+                    transport=preferred_transport,
+                    permission_notifier=_acp_permission_notifier,
+                    async_update_callback=_acp_async_update_cb,
+                )
+            except TypeError:
+                # Backward compatibility with lightweight mocks in unit tests
+                sess = session_pool.get_or_create(
+                    pool_key,
+                    safe_model,
+                    cwd_dir,
+                    conversation_id=conv_id_to_resume,
+                    effort=safe_effort,
+                )
+
             await sess.lock.acquire()
             sess_locked = True
             if not sess.is_alive():
-                await sess.start()
+                try:
+                    await sess.start()
+                except Exception as start_err:
+                    if getattr(sess, "transport_name", "") == "acp" and hasattr(session_pool, "fallback_to_stream_json"):
+                        log.warning(
+                            f"[Executor] ACP start failed for {pool_key} ({start_err}), seamlessly falling back to stream-json."
+                        )
+                        sess.lock.release()
+                        sess_locked = False
+                        sess = await session_pool.fallback_to_stream_json(
+                            pool_key,
+                            safe_model,
+                            project_dir=cwd_dir,
+                            conversation_id=conv_id_to_resume,
+                            effort=safe_effort,
+                            agent_mode=effective_agent_mode,
+                            extra_dirs=extra_dirs,
+                        )
+                        await sess.lock.acquire()
+                        sess_locked = True
+                        await sess.start()
+                    else:
+                        raise
+            elif getattr(sess, "transport_name", "") == "acp" and asyncio.iscoroutinefunction(
+                getattr(session_pool, "sync_live_session_config", None)
+            ):
+                # Live ACP session: apply model/effort/mode changes in-place without killing subagents!
+                await session_pool.sync_live_session_config(
+                    sess,
+                    safe_model,
+                    effort=safe_effort,
+                    agent_mode=effective_agent_mode,
+                )
             process = sess.process
             running_processes[pool_key] = process
             
@@ -1147,6 +1250,8 @@ async def execute_antigravity(
             else:
                 if session_data.pop("_was_safety_filter_retry", False):
                     retry_hint = f"🛡️ 首轮触发云端安全过滤器误报，已自动开启全新无污染会话并携记忆胶囊发起第 {attempt}/2 次合规接力重试...\n\n{user_text}"
+                elif session_data.pop("_was_capacity_fallback_retry", False):
+                    retry_hint = f"⚡ 原模型服务端 503 算力不足，已自动无感接力上下文并切换至 `{session_data.get('model', '')}` 继续执行...\n\n{user_text}"
                 elif session_data.pop("_was_budget_retry", False):
                     retry_hint = f"🔄 首轮执行触及步数/耗时预算，已自动携记忆胶囊与已完成进度发起第 {attempt}/2 次收敛重试...\n\n{user_text}"
                 else:
@@ -1191,6 +1296,9 @@ async def execute_antigravity(
             is_quota_exhausted = False
             is_capacity_error = False
             last_capacity_poll_time = 0.0
+            sidecar_probe_task = None
+            sidecar_probe_launched = False
+            sidecar_probe_confirmed_healthy = False
 
             def get_latest_transcript_file():
                 if session_data.get("conversation"):
@@ -1278,6 +1386,10 @@ async def execute_antigravity(
             conv_id = session_data.get("conversation") or getattr(sess, "conversation_id", "") or ""
 
             budget_retry_ctx = session_data.pop("_budget_retry_context", "") if attempt > 1 else ""
+            if attempt > 1 and session_data.get("_relay_handoff_context"):
+                relay_ctx = session_data.pop("_relay_handoff_context", "")
+                if relay_ctx:
+                    budget_retry_ctx = f"{relay_ctx}\n\n{budget_retry_ctx}".strip()
             prompt_for_attempt = (
                 desensitize_hardware_engineering_text(final_prompt)
                 if session_data.pop("_desensitize_prompt_on_retry", False)
@@ -1560,6 +1672,12 @@ async def execute_antigravity(
                                                 })
                                         except Exception as e:
                                             log.warning(f"[TypeSafe Co-Pilot] Tool execution evaluation error: {e}")
+                    elif event_type == "usage":
+                        session_data["acp_last_usage"] = {
+                            "used": ev.get("used", 0),
+                            "size": ev.get("size", 0),
+                            "updated_at": time.time(),
+                        }
                     elif event_type == "result":
                         if current_tool_action:
                             if current_tool_action not in completed_tool_steps:
@@ -1600,6 +1718,68 @@ async def execute_antigravity(
 
                 if os.path.exists(log_file_path):
                     await _sync_conversation_id_from_log(log_file_path)
+
+                # Scheme B: 并行侧翼微探针（默认 15s 零首字、零工具时异步探活当前模型）
+                # 精准区分“大上下文真正在深度思考”与“服务端静默悬空 / 503 无容量”：
+                # - 探针命中 503 或 18s 超时无响应 -> 立即截停悬空主任务并触发熔断/自动切备用模型；
+                # - 探针返回 healthy -> 证明模型有算力，放行主任务继续安心思考，绝不误杀！
+                probe_delay_s = float(getattr(config, "CAPACITY_PROBE_DELAY_SECONDS", 15) or 15)
+                if (
+                    not sidecar_probe_launched
+                    and not accumulated_text.strip()
+                    and not completed_tool_steps
+                    and not current_tool_action
+                    and attempt_elapsed_seconds >= probe_delay_s
+                ):
+                    sidecar_probe_launched = True
+                    probe_model_id = session_data.get("model", "")
+                    if probe_model_id and probe_model_id not in ("Default", "默认"):
+                        try:
+                            from utils.model_health import probe_model_capacity
+                            probe_timeout_s = float(getattr(config, "CAPACITY_PROBE_TIMEOUT_SECONDS", 18) or 18)
+                            log.info(
+                                f"[Executor] Launching parallel sidecar capacity probe for {probe_model_id} "
+                                f"after {attempt_elapsed_seconds}s zero-output in chat {chat_id}"
+                            )
+                            sidecar_probe_task = asyncio.create_task(
+                                probe_model_capacity(probe_model_id, timeout_seconds=probe_timeout_s, force=True)
+                            )
+                        except Exception as sp_err:
+                            log.debug(f"[Executor] Sidecar probe launch skipped: {sp_err}")
+
+                if sidecar_probe_task is not None and sidecar_probe_task.done():
+                    try:
+                        sp_res = sidecar_probe_task.result()
+                    except Exception as sp_exc:
+                        sp_res = {"status": "error", "error": str(sp_exc)}
+                    sidecar_probe_task = None
+                    sp_status = sp_res.get("status")
+                    sp_model = sp_res.get("model") or session_data.get("model", "")
+                    if sp_status == "healthy":
+                        sidecar_probe_confirmed_healthy = True
+                        log.info(
+                            f"[Executor] Sidecar probe confirmed {sp_model} HEALTHY "
+                            f"({sp_res.get('latency_ms', 0):.0f}ms); allowing deep thinking to continue."
+                        )
+                    elif sp_status in ("unhealthy", "timeout") and not accumulated_text.strip() and not completed_tool_steps and not current_tool_action:
+                        try:
+                            from utils.model_health import mark_model_unhealthy
+                            reason_txt = (
+                                sp_res.get("error")
+                                if sp_status == "unhealthy"
+                                else f"UNAVAILABLE (code 503): No capacity available for model {sp_model} on the server (sidecar probe timeout)"
+                            )
+                            mark_model_unhealthy(sp_model, reason=reason_txt)
+                        except Exception:
+                            reason_txt = f"UNAVAILABLE (code 503): No capacity available for model {sp_model} on the server"
+                        stream_error_msg = reason_txt
+                        is_capacity_error = True
+                        log.warning(
+                            f"[Executor] Sidecar probe fast-fail triggered for chat {chat_id}: "
+                            f"model={sp_model}, probe_status={sp_status}, main_elapsed={attempt_elapsed_seconds}s"
+                        )
+                        await sess.close()
+                        break
 
                 # 快速 503 容量拥堵看门狗：若模型零输出且 transcript.jsonl 已连续出现 >= 3 次 503 无容量重试，
                 # 立即快速失败并提示换模型，避免白等 agy 内部 8 次退避重试（3~5 分钟）
@@ -1656,7 +1836,15 @@ async def execute_antigravity(
                 extend_until = app_state.extended_wait_chats.get(chat_id, 0)
                 extended_bonus = max(0, int(extend_until - now)) if extend_until > now else 0
                 
-                FAST_LOCAL_TOOLS = {"view_file", "write_to_file", "replace_file_content", "search_web", "read_url_content", "ask_question", "schedule"}
+                FAST_LOCAL_TOOLS = {
+                    "view_file", "read_file",
+                    "write_to_file", "write_file",
+                    "replace_file_content", "edit_file",
+                    "grep_search", "grep", "find_by_name", "glob", "list_dir",
+                    "search_web", "read_url_content",
+                    "ask_question", "schedule",
+                    "manage_task", "manage_subagents", "define_subagent", "send_message",
+                }
                 is_fast_tool = bool(current_tool_name in FAST_LOCAL_TOOLS or any(k in current_tool_action for k in ["查看", "读取", "搜索", "写入", "编辑"]))
                 tool_elapsed = (now - tool_in_flight_start_time) if tool_in_flight_start_time else 0
                 has_tool_in_flight = bool(current_tool_action or stream_action) and not is_fast_tool and (is_worker_active or tool_elapsed < 180)
@@ -2113,7 +2301,10 @@ async def execute_antigravity(
                             session_data["last_execution_error"] = False
 
                 if not stale_quota_artifact:
-                    # 优先判定 503 服务端算力容量不足（非个人额度耗尽），标记受污染会话以便切换模型时自动无感接力
+                    # 优先判定 503 服务端算力容量不足（非个人额度耗尽）：
+                    # 1. 打开该模型短时熔断器 (Scheme C)；
+                    # 2. 标记受污染会话；
+                    # 3. 若允许自动回退且存在健康跨家族备用模型（且本轮尚未回退过），直接自动无感接力上下文并切备用模型立刻重试！
                     if is_capacity_error or (
                         (not final_reply or final_reply == "Sorry, I couldn't generate a response.")
                         and is_model_capacity_error(combined_err_text)
@@ -2129,11 +2320,70 @@ async def execute_antigravity(
                         session_data["_capacity_error_at"] = time.time()
                         session_data["last_execution_error"] = True
                         try:
-                            await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                            from utils.model_health import mark_model_unhealthy, pick_healthy_fallback_model
+                            if err_model:
+                                mark_model_unhealthy(err_model, reason=stream_error_msg or combined_err_text[:180])
                         except Exception:
-                            pass
+                            pick_healthy_fallback_model = None
+
                         try:
                             await sess.close()
+                        except Exception:
+                            pass
+
+                        # 自动回退到健康备用模型（仅在 attempt == 1 且允许自动回退时触发）
+                        if (
+                            attempt < 2
+                            and getattr(config, "AUTO_FALLBACK_ON_CAPACITY_ERROR", True)
+                            and pick_healthy_fallback_model is not None
+                        ):
+                            try:
+                                from system_one_gate import infer_effort_from_model
+                                cur_effort = session_data.get("reasoning_effort", "high")
+                                fb_model = pick_healthy_fallback_model(err_model, preferred_tier=cur_effort)
+                            except Exception:
+                                fb_model = None
+                            if fb_model and fb_model != err_model:
+                                fb_effort = infer_effort_from_model(fb_model, session_data.get("reasoning_effort", "high"))
+                                try:
+                                    from agent_memory import relay_conversation_for_model_switch
+                                    relay_conversation_for_model_switch(
+                                        chat_id=chat_id,
+                                        session_data=session_data,
+                                        new_model=fb_model,
+                                        old_model=err_model,
+                                        project_dir=session_data.get("project", "默认"),
+                                        force=bool(tainted_conv),
+                                    )
+                                except Exception as fb_relay_err:
+                                    log.warning(f"[Executor] Auto-fallback relay failed: {fb_relay_err}")
+                                session_data["model"] = fb_model
+                                session_data["base_model"] = fb_model
+                                session_data["reasoning_effort"] = fb_effort
+                                session_data["_was_capacity_fallback_retry"] = True
+                                session_data["_capacity_fallback_notice"] = (
+                                    f"⚡ 检测到原模型 `{err_model}` 服务端 503 算力不足，"
+                                    f"已自动无感接力上下文并切换至 **`{fb_model}`** 完成本次任务。"
+                                )
+                                try:
+                                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                                except Exception:
+                                    pass
+                                log.warning(
+                                    f"[Executor] Mid-turn 503 auto-fallback for chat {chat_id}: "
+                                    f"{err_model} -> {fb_model} (effort={fb_effort}), retrying seamlessly on attempt {attempt + 1}"
+                                )
+                                return {
+                                    "has_reply": False,
+                                    "returncode": -503,
+                                    "is_error": True,
+                                    "is_quota_error": False,
+                                    "is_capacity_error": True,
+                                    "capacity_auto_fallback": True,
+                                }
+
+                        try:
+                            await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
                         except Exception:
                             pass
                         final_reply = detect_and_format_agent_system_error(
@@ -2182,6 +2432,16 @@ async def execute_antigravity(
                 session_data.pop("_capacity_tainted_conv", None)
                 session_data.pop("_capacity_error_model", None)
                 session_data.pop("_capacity_error_at", None)
+                try:
+                    from utils.model_health import mark_model_healthy
+                    ok_model = session_data.get("model", "")
+                    if ok_model:
+                        mark_model_healthy(ok_model, latency_ms=max(0.0, (time.time() - attempt_start_time) * 1000.0))
+                except Exception:
+                    pass
+                fb_notice = session_data.pop("_capacity_fallback_notice", "")
+                if fb_notice:
+                    reply_text = f"{fb_notice}\n\n---\n\n{reply_text}"
 
             from plugin_manager import plugin_manager
             reply_text = await plugin_manager.dispatch_after_ai(reply_text, chat_id, session_data)
@@ -2571,6 +2831,8 @@ async def execute_antigravity(
 
         
         finally:
+            if sidecar_probe_task is not None and not sidecar_probe_task.done():
+                sidecar_probe_task.cancel()
             if turn_stream is not None:
                 await turn_stream.aclose()
             if sess_locked and 'sess' in dir() and sess.lock.locked():
@@ -2594,6 +2856,10 @@ async def execute_antigravity(
     MAX_ATTEMPTS = 2
     for attempt in range(1, MAX_ATTEMPTS + 1):
         res = await _run_single_attempt(attempt)
+        if res.get("capacity_auto_fallback") and attempt < MAX_ATTEMPTS:
+            log.info(f"[Executor] Executing capacity auto-fallback retry attempt {attempt + 1}/{MAX_ATTEMPTS} for chat {chat_id}...")
+            await asyncio.sleep(0.2)
+            continue
         if res.get("is_quota_error") or res.get("is_capacity_error") or res["has_reply"] or res["returncode"] == 0 or attempt == MAX_ATTEMPTS:
             return res["is_error"]
         log.warning(f"[Executor] Attempt {attempt}/{MAX_ATTEMPTS} failed/stalled without final response for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")

@@ -131,6 +131,7 @@ from database import get_profile_async, save_profile_async, save_session_async
 from lark_client import send_reply_sdk, send_interactive_card_sdk
 from logger import log
 from card_builder import CardBuilder
+import config
 from config import ANTIGRAVITY_BIN, BASE_VERSION_PREFIX, VERSION_START_COMMIT, WORKSPACE_ROOT, BASE_DIR, GITEE_MIRROR_URL, get_global_memory_path
 from database import list_auth_sessions
 from utils.auth import SCOPE_PROJECT, SCOPE_TIERS, get_admin_chat_id, has_scope, is_admin, set_session_role
@@ -676,6 +677,16 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             except Exception:
                 pass
 
+            # Gracefully cancel active ACP turn before hard-killing subprocess
+            try:
+                from session_pool import session_pool
+                active_sess = session_pool.get_active_session(chat_id)
+                if active_sess and getattr(active_sess, "transport_name", "") == "acp" and active_sess.is_alive():
+                    await active_sess.cancel_active_turn()
+                    await asyncio.sleep(0.1)
+            except Exception:
+                pass
+
             # Kill the subprocess
             try:
                 if chat_id in running_processes:
@@ -1069,6 +1080,266 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             tier=cfg.get("tier")
         )
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, ts_card))
+        return True, user_text
+
+    elif first_word == "/mode":
+        args = user_text[len(first_word):].strip().lower()
+        cur_mode = session_data.get("agent_mode") or getattr(config, "DEFAULT_AGENT_MODE", "auto")
+        valid_modes = {
+            "auto": "自动模式（智能评估并执行）",
+            "accept-edits": "自动放行文件编辑（高危命令仍拦截）",
+            "plan": "只读规划模式（严禁修改文件）",
+            "default": "默认模式（按权限策略执行）",
+        }
+        if not args or args in ("status", "show"):
+            lines = [f"🎛️ **当前 CLI 执行模式**：`{cur_mode}`\n", "可选模式："]
+            for k, desc in valid_modes.items():
+                mark = "✅" if k == cur_mode else "•"
+                lines.append(f"{mark} `/mode {k}` — {desc}")
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "\n".join(lines))
+            )
+            return True, user_text
+        if args not in valid_modes:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"❌ 无效模式 `{args}`，支持：`auto` | `accept-edits` | `plan` | `default`")
+            )
+            return True, user_text
+        if args != "plan" and not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "🔒 权限不足：当前会话仅允许切换到 `plan` 模式。")
+            )
+            return True, user_text
+        session_data["agent_mode"] = args
+        await save_session_async(chat_id, session_data)
+        hot_switched = False
+        try:
+            from session_pool import session_pool
+            active_sess = session_pool.get_active_session(chat_id)
+            if active_sess and getattr(active_sess, "transport_name", "") == "acp" and active_sess.is_alive():
+                hot_switched = await active_sess.set_mode(args)
+            elif active_sess:
+                await session_pool.reset_session(chat_id)
+        except Exception as e:
+            log.debug(f"[/mode] live switch warning: {e}")
+        tip = "（ACP 会话已原地热切换，无需重启进程）" if hot_switched else "（将于下一轮会话生效）"
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: send_reply_sdk(message_id, f"✅ 执行模式已切换为 **`{args}`** — {valid_modes[args]}\n{tip}")
+        )
+        return True, user_text
+
+    elif first_word in ("/adddir", "/add-dir"):
+        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "🔒 权限不足：需要工作区目录管理权限 (`SCOPE_PROJECT`)。")
+            )
+            return True, user_text
+        args = user_text[len(first_word):].strip()
+        extra_dirs = list(session_data.get("extra_dirs") or [])
+        if not args or args.lower() == "list":
+            if not extra_dirs:
+                msg = "📂 当前未挂载额外工作区目录。\n\n用法：\n• `/adddir /path/to/repo` 或 `/adddir add <路径>`\n• `/adddir remove <路径>`\n• `/adddir clear`"
+            else:
+                listing = "\n".join(f"{i + 1}. `{d}`" for i, d in enumerate(extra_dirs))
+                msg = f"📂 **当前额外挂载目录 (`--add-dir`)**：\n{listing}\n\n支持 `/adddir remove <路径>` 或 `/adddir clear`。"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, msg))
+            return True, user_text
+
+        parts = args.split(None, 1)
+        sub = parts[0].lower()
+        if sub == "clear":
+            session_data["extra_dirs"] = []
+            await save_session_async(chat_id, session_data)
+            try:
+                from session_pool import session_pool
+                await session_pool.reset_session(chat_id)
+            except Exception:
+                pass
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, "✅ 已清空全部额外挂载目录。"))
+            return True, user_text
+
+        if sub in ("remove", "rm", "del") and len(parts) == 2:
+            raw_p = os.path.abspath(os.path.expanduser(parts[1].strip()))
+            if raw_p in extra_dirs:
+                extra_dirs.remove(raw_p)
+                session_data["extra_dirs"] = extra_dirs
+                await save_session_async(chat_id, session_data)
+                try:
+                    from session_pool import session_pool
+                    await session_pool.reset_session(chat_id)
+                except Exception:
+                    pass
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, f"✅ 已移除额外目录：`{raw_p}`"))
+            else:
+                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, f"⚠️ 目录不在挂载列表中：`{raw_p}`"))
+            return True, user_text
+
+        raw_target = parts[1].strip() if (sub == "add" and len(parts) == 2) else args
+        target_path = os.path.abspath(os.path.expanduser(raw_target))
+        forbidden_sys_dirs = ("/etc", "/root", "/proc", "/sys", "/boot", "/dev", "/var/log")
+        if not is_admin(chat_id) and any(target_path == d or target_path.startswith(d + "/") for d in forbidden_sys_dirs):
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"🔒 安全拦截：禁止非管理员挂载系统敏感目录 `{target_path}`。")
+            )
+            return True, user_text
+        if not os.path.isdir(target_path):
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"❌ 挂载失败：目录不存在 `{target_path}`")
+            )
+            return True, user_text
+        if target_path not in extra_dirs:
+            extra_dirs.append(target_path)
+            session_data["extra_dirs"] = extra_dirs
+            await save_session_async(chat_id, session_data)
+            try:
+                from session_pool import session_pool
+                await session_pool.reset_session(chat_id)
+            except Exception:
+                pass
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: send_reply_sdk(message_id, f"✅ 已挂载额外工作区目录 (`--add-dir`)：\n`{target_path}`\n当前共挂载 {len(extra_dirs)} 个目录。")
+        )
+        return True, user_text
+
+    elif first_word == "/steer":
+        steer_text = user_text[len(first_word):].strip()
+        if not steer_text:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "用法：`/steer <转向指令>` — 向正在执行的 ACP 任务实时插话转向，无需 `/stop`。")
+            )
+            return True, user_text
+        from session_pool import session_pool
+        active_sess = session_pool.get_active_session(chat_id)
+        if active_sess and getattr(active_sess, "transport_name", "") == "acp" and active_sess.is_turn_running():
+            ok = await active_sess.steer(steer_text)
+            reply_msg = f"🧭 已将实时转向指令注入当前运行中的 ACP 任务：\n> {steer_text[:200]}" if ok else "❌ 转向指令发送失败，请稍后重试或使用 `/stop`。"
+        else:
+            reply_msg = "ℹ️ 当前没有运行中的 ACP 任务（若处于 `stream-json` 传输或空闲状态，直接发送消息即可）。"
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_msg))
+        return True, user_text
+
+    elif first_word == "/transport":
+        args = user_text[len(first_word):].strip().lower()
+        cur_t = session_data.get("transport") or getattr(config, "AGENT_TRANSPORT", "acp")
+        if not args or args == "status":
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: send_reply_sdk(
+                    message_id,
+                    f"🔌 **当前会话传输引擎**：`{cur_t}`\n\n"
+                    "• `/transport acp` — 官方 ACP 协议（支持不杀进程热切模型/模式、原生多图、Steering、交互审批）\n"
+                    "• `/transport stream-json` — 经典流式 JSON 协议",
+                ),
+            )
+            return True, user_text
+        if args not in ("acp", "stream-json"):
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "❌ 仅支持 `acp` 或 `stream-json`。")
+            )
+            return True, user_text
+        if not is_admin(chat_id):
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "🔒 切换底层传输引擎仅管理员可用。")
+            )
+            return True, user_text
+        session_data["transport"] = args
+        await save_session_async(chat_id, session_data)
+        try:
+            from session_pool import session_pool
+            await session_pool.reset_session(chat_id)
+        except Exception:
+            pass
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: send_reply_sdk(message_id, f"✅ 已切换当前会话传输引擎为 **`{args}`**，并已重置温池连接。")
+        )
+        return True, user_text
+
+    elif first_word in ("/mcp", "/agyplugin"):
+        import shlex
+        is_mcp = (first_word == "/mcp")
+        sub_root = "mcp" if is_mcp else "plugin"
+        raw_args = user_text[len(first_word):].strip()
+        try:
+            parsed_args = shlex.split(raw_args) if raw_args else ["list"]
+        except ValueError as ve:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"❌ 参数解析失败：{ve}")
+            )
+            return True, user_text
+
+        sub_action = parsed_args[0].lower()
+        allowed_subs = (
+            {"list", "add", "remove", "enable", "disable", "help"}
+            if is_mcp
+            else {"list", "validate", "install", "uninstall", "enable", "disable", "import", "help"}
+        )
+        if sub_action not in allowed_subs:
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: send_reply_sdk(
+                    message_id,
+                    f"❌ 不支持的子命令 `{sub_action}`，允许：`{' | '.join(sorted(allowed_subs))}`",
+                ),
+            )
+            return True, user_text
+
+        read_only_subs = {"list", "validate", "help"}
+        if sub_action not in read_only_subs and not is_admin(chat_id):
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"🔒 `/{sub_root} {sub_action}` 修改操作仅管理员可用。")
+            )
+            return True, user_text
+
+        bin_path = config.ANTIGRAVITY_BIN or config.find_antigravity_bin()
+        if not bin_path:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, "❌ 未找到 `agy` 可执行文件。")
+            )
+            return True, user_text
+
+        cli_argv = [bin_path, sub_root] + parsed_args
+        if not is_mcp and sub_action == "list" and "--json" not in parsed_args:
+            cli_argv.append("--json")
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cli_argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+            raw_out = (out_b or b"").decode("utf-8", errors="replace").strip()
+            raw_err = (err_b or b"").decode("utf-8", errors="replace").strip()
+            ansi_re = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+            clean_out = ansi_re.sub("", raw_out)
+            clean_err = ansi_re.sub("", raw_err)
+
+            if not is_mcp and sub_action == "list" and proc.returncode == 0 and clean_out.startswith("["):
+                try:
+                    items = json.loads(clean_out)
+                    if not items:
+                        body = "当前尚未安装任何 `agy` 原生插件。"
+                    else:
+                        lines = [
+                            f"• `{it.get('name', '?')}` (`v{it.get('version', '-')}`) — {'✅ 已启用' if it.get('enabled', True) else '⏸️ 已停用'}"
+                            for it in items[:30]
+                        ]
+                        body = "\n".join(lines)
+                except Exception:
+                    body = f"```\n{clean_out[:2500]}\n```"
+            else:
+                combined = "\n".join(x for x in (clean_out, clean_err) if x).strip() or "(无输出)"
+                body = f"```\n{combined[:2500]}\n```"
+
+            icon = "✅" if proc.returncode == 0 else "⚠️"
+            title = "MCP 服务管理" if is_mcp else "Antigravity 原生插件管理"
+            reply_msg = f"{icon} **{title}** (`agy {sub_root} {' '.join(parsed_args)}`)\n\n{body}"
+        except asyncio.TimeoutError:
+            reply_msg = f"⏱️ 执行 `agy {sub_root} {sub_action}` 超时（25s）。"
+        except Exception as e:
+            reply_msg = f"❌ 执行 `agy {sub_root}` 异常：{e}"
+
+        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_msg))
         return True, user_text
 
     # Dispatch command to plugin manager

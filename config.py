@@ -35,7 +35,17 @@ class Settings(BaseSettings):
     )
 
     # Optional default model configuration
-    default_model: str = Field(default="gemini-3.7-flash-low", alias="DEFAULT_MODEL")
+    default_model: str = Field(default="gemini-3.8-flash-low", alias="DEFAULT_MODEL")
+
+    # Antigravity CLI 1.5.x transport, execution mode & isolation settings
+    agent_transport: str = Field(default="acp", alias="AGENT_TRANSPORT")  # acp | stream-json
+    acp_process_per_session: bool = Field(default=True, alias="ACP_PROCESS_PER_SESSION")
+    acp_enable_steering: bool = Field(default=True, alias="ACP_ENABLE_STEERING")
+    acp_interactive_permissions: bool = Field(default=True, alias="ACP_INTERACTIVE_PERMISSIONS")
+    default_agent_mode: str = Field(default="auto", alias="DEFAULT_AGENT_MODE")  # auto | accept-edits | plan | default
+    use_session_settings_isolation: bool = Field(default=True, alias="USE_SESSION_SETTINGS_ISOLATION")
+    use_native_rules_slim_prompt: bool = Field(default=True, alias="USE_NATIVE_RULES_SLIM_PROMPT")
+    sync_global_hooks_json: bool = Field(default=False, alias="SYNC_GLOBAL_HOOKS_JSON")
 
     # Native voice reply settings
     tts_voice: str = Field(default="zh-CN-XiaoxiaoNeural", alias="TTS_VOICE")
@@ -54,6 +64,11 @@ class Settings(BaseSettings):
     stall_hard_timeout: int = Field(default=3600, alias="STALL_HARD_TIMEOUT")
     tool_execution_timeout: int = Field(default=3600, alias="TOOL_EXECUTION_TIMEOUT")
 
+    # Model 503 capacity circuit-breaker, sidecar probe, and auto-fallback settings
+    auto_fallback_on_capacity_error: bool = Field(default=True, alias="AUTO_FALLBACK_ON_CAPACITY_ERROR")
+    capacity_probe_delay_seconds: int = Field(default=15, alias="CAPACITY_PROBE_DELAY_SECONDS")
+    capacity_probe_timeout_seconds: int = Field(default=18, alias="CAPACITY_PROBE_TIMEOUT_SECONDS")
+
     model_config = SettingsConfigDict(
         env_file=os.path.join(BASE_DIR, ".env"),
         env_file_encoding="utf-8",
@@ -65,7 +80,15 @@ class Settings(BaseSettings):
 settings = Settings()
 
 APP_ID = settings.feishu_app_id or settings.app_id
-DEFAULT_MODEL = settings.default_model or "gemini-3.7-flash-low"
+DEFAULT_MODEL = settings.default_model or "gemini-3.8-flash-low"
+AGENT_TRANSPORT = (settings.agent_transport or "acp").strip().lower()
+ACP_PROCESS_PER_SESSION = settings.acp_process_per_session
+ACP_ENABLE_STEERING = settings.acp_enable_steering
+ACP_INTERACTIVE_PERMISSIONS = settings.acp_interactive_permissions
+DEFAULT_AGENT_MODE = (settings.default_agent_mode or "auto").strip().lower()
+USE_SESSION_SETTINGS_ISOLATION = settings.use_session_settings_isolation
+USE_NATIVE_RULES_SLIM_PROMPT = settings.use_native_rules_slim_prompt
+SYNC_GLOBAL_HOOKS_JSON = settings.sync_global_hooks_json
 APP_SECRET = settings.feishu_app_secret or settings.app_secret
 TTS_VOICE = settings.tts_voice or "zh-CN-XiaoxiaoNeural"
 ENABLE_VOICE_REPLY = settings.enable_voice_reply
@@ -74,6 +97,9 @@ ENABLE_VOICE_REPLY = settings.enable_voice_reply
 STALL_TIMEOUT = settings.stall_timeout
 STALL_HARD_TIMEOUT = settings.stall_hard_timeout
 TOOL_EXECUTION_TIMEOUT = settings.tool_execution_timeout
+AUTO_FALLBACK_ON_CAPACITY_ERROR = settings.auto_fallback_on_capacity_error
+CAPACITY_PROBE_DELAY_SECONDS = settings.capacity_probe_delay_seconds
+CAPACITY_PROBE_TIMEOUT_SECONDS = settings.capacity_probe_timeout_seconds
 
 # TypeSafe AI exports
 TYPESAFE_API_KEY = settings.typesafe_api_key or os.getenv("TYPESAFE_API_KEY", "")

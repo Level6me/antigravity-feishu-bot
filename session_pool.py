@@ -1,7 +1,12 @@
-"""Persistent session pool for Antigravity (agy) interactive CLI processes.
+"""Persistent session pool for Antigravity (agy) CLI processes.
 
-Maintains warm, long-lived `agy --input-format stream-json --output-format stream-json`
-processes per chat/project to eliminate cold-start overhead and enable instant 1-2s responses.
+Supports dual transport modes:
+  - `acp` (default on agy 1.5.x): Agent Client Protocol JSON-RPC stdio server with in-place
+    model/mode hot-switching, native multimodal image blocks, mid-turn steering, and interactive
+    permission approval callbacks.
+  - `stream-json`: Legacy warm `agy --input-format stream-json --output-format stream-json`
+    with `--mode`, `--add-dir` (multi-dir), and `--settings` session-scoped isolation,
+    also serving as automatic fallback if ACP fails to initialize.
 """
 from __future__ import annotations
 
@@ -13,7 +18,7 @@ import signal
 import subprocess
 import time
 import uuid
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Callable, Awaitable
 
 import config
 from config import (
@@ -34,6 +39,29 @@ import app_state
 
 _TERMINAL_TURN_EVENTS = {"result", "error", "turn_error", "cancelled", "fatal", "process_exit", "read_error"}
 _ALLOWED_EFFORTS = ("minimal", "fast", "low", "medium", "high", "xhigh", "max", "ultra")
+_ALLOWED_CLI_MODES = ("auto", "accept-edits", "plan")
+
+
+def normalize_cli_mode(mode: Optional[str]) -> str:
+    """Normalize bot mode string to valid `agy --mode` value (`auto`, `accept-edits`, `plan`)."""
+    m = (mode or "auto").strip().lower()
+    if m in ("plan", "readonly", "read-only"):
+        return "plan"
+    if m in ("accept-edits", "accept_edits", "edits"):
+        return "accept-edits"
+    return "auto"
+
+
+def build_session_settings_json(agent_mode: str, sandbox_enabled: bool, project_dir: Optional[str]) -> str:
+    """Build ephemeral per-session `--settings` JSON without mutating global settings.json."""
+    settings_obj: Dict[str, Any] = {
+        "agentMode": normalize_cli_mode(agent_mode),
+        # NOTE: `artifactReviewMode` is rejected by agy 1.5.12 `--settings` ("unknown setting"), do not add it here.
+        "allowNonWorkspaceAccess": not sandbox_enabled,
+    }
+    if project_dir and os.path.isdir(project_dir):
+        settings_obj["trustedWorkspaces"] = [os.path.abspath(project_dir)]
+    return json.dumps(settings_obj, ensure_ascii=False, separators=(",", ":"))
 
 
 def _extract_model_family(model_name: str) -> str:
@@ -104,13 +132,28 @@ class TurnEventStream:
                 pass
 
 class PersistentSession:
-    """Represents a long-lived interactive agy CLI process."""
-    def __init__(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = "", effort: str = "medium", sandbox_enabled: bool = False):
+    """Represents a long-lived interactive agy CLI process (`stream-json` transport)."""
+
+    transport_name = "stream-json"
+
+    def __init__(
+        self,
+        chat_id: str,
+        model: str,
+        project_dir: Optional[str] = None,
+        conversation_id: str = "",
+        effort: str = "medium",
+        sandbox_enabled: bool = False,
+        agent_mode: str = "auto",
+        extra_dirs: Optional[List[str]] = None,
+    ):
         self.chat_id = chat_id
         self.model = model
         self.effort = effort if effort in _ALLOWED_EFFORTS else "medium"
         self.sandbox_enabled = sandbox_enabled
+        self.agent_mode = normalize_cli_mode(agent_mode)
         self.project_dir = project_dir
+        self.extra_dirs: List[str] = [os.path.abspath(d) for d in (extra_dirs or []) if d and os.path.isdir(d)]
         self.process: Optional[asyncio.subprocess.Process] = None
         self.conversation_id: str = conversation_id
         self.lock = asyncio.Lock()
@@ -160,6 +203,7 @@ class PersistentSession:
             "--input-format", "stream-json",
             "--output-format", "stream-json",
             "--model", self.model,
+            "--mode", self.agent_mode,
             "--print-timeout", "60m"
         ]
 
@@ -174,14 +218,25 @@ class PersistentSession:
         if self.sandbox_enabled:
             cmd_args.append("--sandbox")
 
+        if getattr(config, "USE_SESSION_SETTINGS_ISOLATION", True):
+            settings_json = build_session_settings_json(self.agent_mode, self.sandbox_enabled, self.project_dir)
+            cmd_args.extend(["--settings", settings_json])
+
         is_admin_chat = is_admin(self.chat_id)
-        if DANGEROUSLY_SKIP_PERMISSIONS and is_admin_chat:
+        if DANGEROUSLY_SKIP_PERMISSIONS and is_admin_chat and self.agent_mode != "plan":
             cmd_args.append("--dangerously-skip-permissions")
 
         cwd_dir = None
+        added_dirs: List[str] = []
         if self.project_dir and os.path.isdir(self.project_dir):
             cwd_dir = self.project_dir
-            cmd_args.extend(["--add-dir", self.project_dir])
+            abs_proj = os.path.abspath(self.project_dir)
+            added_dirs.append(abs_proj)
+        for extra_d in self.extra_dirs:
+            if extra_d not in added_dirs and os.path.isdir(extra_d):
+                added_dirs.append(extra_d)
+        for d in added_dirs:
+            cmd_args.extend(["--add-dir", d])
 
         custom_env = os.environ.copy()
         custom_env["GIT_TERMINAL_PROMPT"] = "0"
@@ -190,7 +245,10 @@ class PersistentSession:
         custom_env["PYTHONUNBUFFERED"] = "1"
         custom_env["STDOUT_LINE_BUFFERED"] = "1"
 
-        log.info(f"[SessionPool] Spawning warm agy process for chat {self.chat_id} (model={self.model}, effort={self.effort}, sandbox={self.sandbox_enabled}, cwd={cwd_dir})")
+        log.info(
+            f"[SessionPool] Spawning warm agy stream-json process for chat {self.chat_id} "
+            f"(model={self.model}, effort={self.effort}, mode={self.agent_mode}, sandbox={self.sandbox_enabled}, cwd={cwd_dir}, extra_dirs={len(self.extra_dirs)})"
+        )
         proc = await asyncio.create_subprocess_exec(
             *cmd_args,
             stdin=asyncio.subprocess.PIPE,
@@ -337,47 +395,126 @@ class PersistentSession:
                     log.warning(f"[SessionPool] Error terminating process for {self.chat_id}: {e}")
 
 class SessionPool:
-    """Manages active persistent sessions across chats."""
-    def __init__(self):
-        self._sessions: Dict[str, PersistentSession] = {}
+    """Manages active persistent sessions across chats (ACP + stream-json dual transport)."""
 
-    def get_or_create(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = "", effort: str = "medium") -> PersistentSession:
+    def __init__(self):
+        self._sessions: Dict[str, Any] = {}
+
+    def get_active_session(self, chat_id: str) -> Optional[Any]:
+        """Return currently pooled session for `chat_id` if alive and not closing."""
         sess = self._sessions.get(chat_id)
+        if sess and not sess.is_dead_or_closing():
+            return sess
+        return None
+
+    def _resolve_transport(self, transport: Optional[str]) -> str:
+        t = (transport or getattr(config, "AGENT_TRANSPORT", "acp") or "acp").strip().lower()
+        return "acp" if t == "acp" else "stream-json"
+
+    def _create_session(
+        self,
+        *,
+        transport: str,
+        chat_id: str,
+        model: str,
+        project_dir: Optional[str],
+        conversation_id: str,
+        effort: str,
+        sandbox_enabled: bool,
+        agent_mode: str,
+        extra_dirs: List[str],
+        permission_notifier: Optional[Callable[[str, str, Dict[str, Any]], Awaitable[bool]]] = None,
+        async_update_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
+    ):
+        if transport == "acp":
+            from acp_client import AcpPersistentSession
+            return AcpPersistentSession(
+                chat_id=chat_id,
+                model=model,
+                project_dir=project_dir,
+                conversation_id=conversation_id,
+                effort=effort,
+                sandbox_enabled=sandbox_enabled,
+                agent_mode=agent_mode,
+                extra_dirs=extra_dirs,
+                permission_notifier=permission_notifier,
+                async_update_callback=async_update_callback,
+            )
+        return PersistentSession(
+            chat_id=chat_id,
+            model=model,
+            project_dir=project_dir,
+            conversation_id=conversation_id,
+            effort=effort,
+            sandbox_enabled=sandbox_enabled,
+            agent_mode=agent_mode,
+            extra_dirs=extra_dirs,
+        )
+
+    def get_or_create(
+        self,
+        chat_id: str,
+        model: str,
+        project_dir: Optional[str] = None,
+        conversation_id: str = "",
+        effort: str = "medium",
+        agent_mode: Optional[str] = None,
+        extra_dirs: Optional[List[str]] = None,
+        transport: Optional[str] = None,
+        permission_notifier: Optional[Callable[[str, str, Dict[str, Any]], Awaitable[bool]]] = None,
+        async_update_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
+    ):
+        sess = self._sessions.get(chat_id)
+        desired_transport = self._resolve_transport(transport)
         # conversation_id 比对：只在"双方均非空且不同"时才视作需要重建
-        # 避免传入空串（新会话/clear后）与已有真实 UUID 的 sess 不匹配，导致每轮都重建进程
         conv_mismatch = bool(conversation_id and sess and sess.conversation_id and sess.conversation_id != conversation_id)
 
         normalized_effort = effort if effort in _ALLOWED_EFFORTS else "medium"
+        raw_mode = agent_mode if agent_mode is not None else getattr(config, "DEFAULT_AGENT_MODE", "auto")
+        normalized_cli_mode = normalize_cli_mode(raw_mode)
+        normalized_extra_dirs = sorted({os.path.abspath(d) for d in (extra_dirs or []) if d and os.path.isdir(d)})
+
         # Enforce CLI sandbox both when Co-Pilot mode is active AND when a non-admin user lacks SCOPE_SHELL
         real_chat_id = str(chat_id).split("cron_")[-1] if str(chat_id).startswith("cron_") else str(chat_id)
         user_lacks_shell = not is_admin(real_chat_id) and not has_scope(real_chat_id, SCOPE_SHELL)
         sandbox_enabled = bool((config.TYPESAFE_ENABLED and config.TYPESAFE_TIER == "copilot") or user_lacks_shell)
 
         sess_dead = sess is None or sess.is_dead_or_closing()
-        auto_mode = bool(getattr(config, "TYPESAFE_AUTO_MODE", True))
-        if sess and not sess_dead and auto_mode:
-            # 自适应模式下，同家族且当前温池档位 >= 目标档位（或同为低中档）时复用温池；
-            # 但当新任务被判定为 High 档高复杂度工程任务，而驻留进程仅处于 Low/Medium 档时，
-            # 触发升档重建，避免复杂任务被锁死在低档位模型中陷入工具死循环。
-            sess_rank = _extract_model_tier_rank(sess.model, sess.effort)
-            target_rank = _extract_model_tier_rank(model, normalized_effort)
-            needs_high_upgrade = bool(target_rank >= 60 and sess_rank < target_rank)
-            if needs_high_upgrade:
-                log.info(
-                    f"[SessionPool] Upgrading warm session for {chat_id} from "
-                    f"{sess.model} (effort={sess.effort}) to High-tier {model} (effort={normalized_effort})"
-                )
-            model_mismatch = bool(
-                _extract_model_family(sess.model) != _extract_model_family(model)
-                or sess.sandbox_enabled != sandbox_enabled
-                or needs_high_upgrade
-            )
+        sess_transport = getattr(sess, "transport_name", "stream-json") if sess else ""
+        transport_mismatch = bool(sess and sess_transport != desired_transport)
+        extra_dirs_mismatch = bool(
+            sess and sorted(getattr(sess, "extra_dirs", []) or []) != normalized_extra_dirs
+        )
+
+        # Live ACP sessions support in-place model/effort/mode hot-switching without process restart!
+        is_live_acp = bool(sess and not sess_dead and sess_transport == "acp" and sess.is_alive())
+        if is_live_acp:
+            model_mismatch = bool(sess.sandbox_enabled != sandbox_enabled)
+            mode_mismatch = False
         else:
-            model_mismatch = bool(sess and (
-                sess.model != model
-                or sess.effort != normalized_effort
-                or sess.sandbox_enabled != sandbox_enabled
-            ))
+            auto_mode = bool(getattr(config, "TYPESAFE_AUTO_MODE", True))
+            if sess and not sess_dead and auto_mode:
+                sess_rank = _extract_model_tier_rank(sess.model, sess.effort)
+                target_rank = _extract_model_tier_rank(model, normalized_effort)
+                needs_high_upgrade = bool(target_rank >= 60 and sess_rank < target_rank)
+                if needs_high_upgrade:
+                    log.info(
+                        f"[SessionPool] Upgrading warm session for {chat_id} from "
+                        f"{sess.model} (effort={sess.effort}) to High-tier {model} (effort={normalized_effort})"
+                    )
+                model_mismatch = bool(
+                    _extract_model_family(sess.model) != _extract_model_family(model)
+                    or sess.sandbox_enabled != sandbox_enabled
+                    or needs_high_upgrade
+                )
+            else:
+                model_mismatch = bool(sess and (
+                    sess.model != model
+                    or sess.effort != normalized_effort
+                    or sess.sandbox_enabled != sandbox_enabled
+                ))
+            sess_mode = normalize_cli_mode(getattr(sess, "agent_mode", "auto")) if sess else "auto"
+            mode_mismatch = bool(sess and sess_mode != normalized_cli_mode)
 
         # Prevent warm sessions older than 40 minutes from hitting Google OAuth2 60m token expiry mid-turn
         now_ts = time.time()
@@ -390,7 +527,16 @@ class SessionPool:
         if token_ttl_expired:
             log.info(f"[SessionPool] Recycling warm session for {chat_id} (>40m age) to refresh OAuth token window.")
 
-        if sess_dead or model_mismatch or sess.project_dir != project_dir or conv_mismatch or token_ttl_expired:
+        if (
+            sess_dead
+            or transport_mismatch
+            or model_mismatch
+            or mode_mismatch
+            or extra_dirs_mismatch
+            or sess.project_dir != project_dir
+            or conv_mismatch
+            or token_ttl_expired
+        ):
             if sess:
                 try:
                     asyncio.get_running_loop().create_task(sess.close())
@@ -410,13 +556,77 @@ class SessionPool:
                         asyncio.get_running_loop().create_task(evict_sess.close())
                     except RuntimeError:
                         pass
-            sess = PersistentSession(chat_id, model, project_dir, conversation_id, normalized_effort, sandbox_enabled)
+            sess = self._create_session(
+                transport=desired_transport,
+                chat_id=chat_id,
+                model=model,
+                project_dir=project_dir,
+                conversation_id=conversation_id,
+                effort=normalized_effort,
+                sandbox_enabled=sandbox_enabled,
+                agent_mode=raw_mode,
+                extra_dirs=normalized_extra_dirs,
+                permission_notifier=permission_notifier,
+                async_update_callback=async_update_callback,
+            )
             self._sessions[chat_id] = sess
         else:
             sess.last_active_time = time.time()
             if conversation_id and not sess.conversation_id:
                 sess.conversation_id = conversation_id
+            if is_live_acp:
+                if permission_notifier is not None:
+                    sess._permission_notifier = permission_notifier
+                if async_update_callback is not None:
+                    sess._async_update_callback = async_update_callback
         return sess
+
+    async def sync_live_session_config(
+        self,
+        sess: Any,
+        model: str,
+        effort: str = "medium",
+        agent_mode: Optional[str] = None,
+    ) -> None:
+        """Apply in-place model/effort/mode changes on a live ACP session without restarting it."""
+        if not sess or getattr(sess, "transport_name", "") != "acp" or not sess.is_alive():
+            return
+        normalized_effort = effort if effort in _ALLOWED_EFFORTS else "medium"
+        if sess.model != model or sess.effort != normalized_effort:
+            await sess.set_model(model, effort=normalized_effort)
+        if agent_mode is not None:
+            from acp_client import normalize_acp_mode
+            target_acp_mode = normalize_acp_mode(agent_mode)
+            if sess.agent_mode != target_acp_mode:
+                await sess.set_mode(target_acp_mode)
+
+    async def fallback_to_stream_json(
+        self,
+        chat_id: str,
+        model: str,
+        project_dir: Optional[str] = None,
+        conversation_id: str = "",
+        effort: str = "medium",
+        agent_mode: Optional[str] = None,
+        extra_dirs: Optional[List[str]] = None,
+    ) -> PersistentSession:
+        """Replace a failed ACP session with a stream-json session seamlessly."""
+        old = self._sessions.pop(chat_id, None)
+        if old:
+            try:
+                await old.close()
+            except Exception:
+                pass
+        return self.get_or_create(
+            chat_id,
+            model,
+            project_dir=project_dir,
+            conversation_id=conversation_id,
+            effort=effort,
+            agent_mode=agent_mode,
+            extra_dirs=extra_dirs,
+            transport="stream-json",
+        )
 
     def update_conversation_id(self, chat_id: str, conversation_id: str):
         """Sync runtime assigned conversation ID into memory to maintain persistent session continuity."""
@@ -426,12 +636,33 @@ class SessionPool:
         if sess:
             sess.conversation_id = conversation_id
 
-    async def prewarm(self, chat_id: str, model: str, project_dir: Optional[str] = None, conversation_id: str = "", effort: str = "medium"):
+    async def prewarm(
+        self,
+        chat_id: str,
+        model: str,
+        project_dir: Optional[str] = None,
+        conversation_id: str = "",
+        effort: str = "medium",
+        agent_mode: Optional[str] = None,
+        extra_dirs: Optional[List[str]] = None,
+        transport: Optional[str] = None,
+    ):
         """Asynchronously pre-spawns a warm process in the background so next message has 0s start latency."""
         try:
-            sess = self.get_or_create(chat_id, model, project_dir, conversation_id, effort=effort)
+            sess = self.get_or_create(
+                chat_id,
+                model,
+                project_dir,
+                conversation_id,
+                effort=effort,
+                agent_mode=agent_mode,
+                extra_dirs=extra_dirs,
+                transport=transport,
+            )
             if not sess.is_alive():
                 await sess.start()
+            else:
+                await self.sync_live_session_config(sess, model, effort=effort, agent_mode=agent_mode)
         except Exception as e:
             log.warning(f"[SessionPool] Prewarm failed for chat {chat_id}: {e}")
 
