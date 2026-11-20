@@ -14,6 +14,14 @@ from plugin_base import BasePlugin
 
 PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")
 
+DEFAULT_SYSTEM_COMMANDS = [
+    "/help", "/model", "/card", "/menu", "/project", "/note", "/notes",
+    "/status", "/context", "/quota", "/clear", "/stop", "/update", "/ping",
+    "/newproj_resolve", "/cron", "/schedule", "/plugin", "/plugins", "/pluginreload",
+    "/user", "/brain", "/auth", "/s1", "/sys1", "/system1",
+    "/mode", "/adddir", "/add-dir", "/steer", "/transport", "/mcp", "/agyplugin",
+]
+
 
 class PluginManager:
     """Singleton manager for bot plugins."""
@@ -136,12 +144,7 @@ class PluginManager:
             log.info("[PluginManager] Successfully reloaded commands and cards.memory modules")
         except Exception as _e_cmd:
             log.warning(f"[PluginManager] Failed to reload commands: {_e_cmd}")
-        self.register_system_commands([
-            "/help", "/model", "/card", "/menu", "/project", "/note", "/notes",
-            "/status", "/context", "/quota", "/clear", "/stop", "/update", "/ping",
-            "/newproj_resolve", "/cron", "/schedule", "/plugin", "/plugins", "/user",
-            "/brain", "/auth", "/s1", "/sys1", "/system1"
-        ])
+        self.register_system_commands(DEFAULT_SYSTEM_COMMANDS)
         to_del = [k for k in list(sys.modules.keys()) if k.startswith("bot_plugin_") or k in ["scheduler_db", "scheduler", "executors", "cards.cron", "ha_client", "ha_cards"]]
         for k in to_del:
             sys.modules.pop(k, None)

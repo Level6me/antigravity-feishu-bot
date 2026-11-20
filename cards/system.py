@@ -221,7 +221,23 @@ def build_acp_permission_result_card(title: str, chosen_label: str):
     }
 
 
-def build_help_card():
+_HELP_STATIC_COMMANDS = {
+    "/model", "/card", "/menu", "/context", "/memory", "/brain", "/clear",
+    "/project", "/adddir", "/add-dir", "/mode", "/note", "/notes", "/cron",
+    "/schedule", "/quota", "/status", "/steer", "/plugin", "/plugins",
+    "/pluginreload", "/mcp", "/agyplugin", "/stop", "/s1", "/sys1", "/system1",
+    "/ping", "/update", "/help", "/user", "/auth", "/transport",
+}
+
+
+def build_help_card(is_admin_user: bool = False, plugins=None):
+    if plugins is None:
+        try:
+            from plugin_manager import plugin_manager
+            plugins = plugin_manager.get_plugin_list()
+        except Exception:
+            plugins = []
+
     elements = [
         {
             "tag": "markdown",
@@ -248,6 +264,7 @@ def build_help_card():
                 "• `/adddir [add|remove|clear|路径]` : 挂载/管理额外工作区目录（多仓库协同 `--add-dir`）\n"
                 "• `/mode [auto|accept-edits|plan]` : 切换 CLI 执行模式（支持 ACP 原地热切换）\n"
                 "• `/note` : 记事本管理看板（支持添加、查看详情、删除与清空）\n"
+                "• `/cron`（或 `/schedule`）: 定时任务与周期提醒调度中心\n"
                 "• `/quota` : 查询 Google AI Pro 套餐官方剩余额度看板\n"
                 "• `/status` : 查看机器人的运行状态、CPU/内存/Uptime 与日志"
             )
@@ -256,17 +273,58 @@ def build_help_card():
         {
             "tag": "markdown",
             "content": (
-                "⚡ **系统管理、ACP 与原生生态：**\n"
+                "⚡ **系统管理、ACP 与生态扩展：**\n"
                 "• `/steer <追加内容>` : 向运行中的 ACP 会话排队追加指令（当前回合结束后自动续跑，无需 `/stop`）\n"
-                "• `/transport [acp|stream-json]` : 查看或切换会话传输引擎（默认 ACP）\n"
+                "• `/plugin [reload]` : 管理**机器人扩展插件**（查看、启停与热重载）\n"
                 "• `/mcp [list|enable|disable|remove|add ...]` : 管理 `agy` 原生 MCP 服务\n"
-                "• `/agyplugin [list|validate|install|enable|disable|uninstall ...]` : 管理 `agy` 原生插件\n"
+                "• `/agyplugin [list|validate|install|enable|disable|uninstall ...]` : 管理 `agy` 原生 CLI 插件\n"
                 "• `/stop` : 中止当前会话中正在执行的后台任务\n"
                 "• `/s1` : 打开 System One 决策网关控制台\n"
+                "• `/ping` : 检测机器人在线状态与响应连通性\n"
                 "• `/update` : 检查并更新机器人服务至最新版本\n"
                 "• `/help` : 显示此帮助卡片"
             )
         },
+    ]
+
+    # 动态渲染已启用的第三方/硬件扩展插件命令（自动去重内置核心指令）
+    dynamic_plugin_lines = []
+    for p in (plugins or []):
+        if not isinstance(p, dict) or not p.get("enabled", True):
+            continue
+        raw_cmds = p.get("commands") or []
+        extra_cmds = [
+            c.strip()
+            for c in raw_cmds
+            if isinstance(c, str) and c.strip() and c.strip().lower() not in _HELP_STATIC_COMMANDS
+        ]
+        if not extra_cmds:
+            continue
+        cmd_str = " ".join(f"`{c}`" for c in extra_cmds)
+        p_name = p.get("name") or p.get("id") or "扩展插件"
+        dynamic_plugin_lines.append(f"• {cmd_str} : {p_name}")
+
+    if dynamic_plugin_lines:
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "markdown",
+            "content": "🧩 **已加载扩展插件指令：**\n" + "\n".join(dynamic_plugin_lines),
+        })
+
+    if is_admin_user:
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "markdown",
+            "content": (
+                "🔐 **管理员专属指令：**\n"
+                "• `/user [grant|revoke|ban|unban]` : 管理多会话用户授权与权限分级\n"
+                "• `/auth` : 查看当前会话授权状态\n"
+                "• `/transport [acp|stream-json]` : 查看或切换底层会话传输引擎（默认 ACP）\n"
+                "• `/pluginreload` : 一键热重载机器人插件与命令模块"
+            ),
+        })
+
+    elements.extend([
         {"tag": "hr"},
         {
             "tag": "markdown",
@@ -325,7 +383,7 @@ def build_help_card():
             )
         },
         create_footer()
-    ]
+    ])
 
     return {
         "config": {"wide_screen_mode": True},

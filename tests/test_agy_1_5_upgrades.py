@@ -837,6 +837,50 @@ class TestP2AcpAndCommands(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_help_card_dynamic_plugins_and_admin_section(self):
+        from card_builder import CardBuilder
+        from plugin_manager import DEFAULT_SYSTEM_COMMANDS
+
+        # Ensure newly added CLI commands are registered in DEFAULT_SYSTEM_COMMANDS
+        for cmd in ("/mode", "/adddir", "/steer", "/transport", "/mcp", "/agyplugin", "/pluginreload"):
+            self.assertIn(cmd, DEFAULT_SYSTEM_COMMANDS)
+
+        sample_plugins = [
+            {"id": "cron_scheduler", "name": "计划任务", "commands": ["/cron", "/schedule"], "enabled": True},
+            {"id": "passport_bridge", "name": "Passport 硬件网关", "commands": ["/passport", "/aipass"], "enabled": True},
+            {"id": "disabled_gpio", "name": "停用插件", "commands": ["/gpio_led"], "enabled": False},
+        ]
+
+        # Non-admin view: shows core commands + enabled extension plugins, hides admin section & disabled plugins
+        user_card = CardBuilder.build_help_card(is_admin_user=False, plugins=sample_plugins)
+        user_md = "\n".join(el.get("content", "") for el in user_card["elements"] if el.get("tag") == "markdown")
+        self.assertIn("/plugin", user_md)
+        self.assertIn("/agyplugin", user_md)
+        self.assertIn("/cron", user_md)
+        self.assertIn("/ping", user_md)
+        self.assertIn("/passport", user_md)
+        self.assertIn("/aipass", user_md)
+        self.assertNotIn("/gpio_led", user_md)
+        self.assertNotIn("管理员专属指令", user_md)
+        self.assertNotIn("/user [grant", user_md)
+        # Core plugin command /cron should not be duplicated in dynamic plugin section
+        self.assertEqual(user_md.count("/cron"), 1)
+        self.assertNotIn("• `/cron` `/schedule`", user_md)
+
+        # Admin view: includes admin-only section
+        admin_card = CardBuilder.build_help_card(is_admin_user=True, plugins=[])
+        admin_md = "\n".join(el.get("content", "") for el in admin_card["elements"] if el.get("tag") == "markdown")
+        self.assertIn("管理员专属指令", admin_md)
+        self.assertIn("/user", admin_md)
+        self.assertIn("/auth", admin_md)
+        self.assertIn("/transport", admin_md)
+        self.assertIn("/pluginreload", admin_md)
+        self.assertNotIn("已加载扩展插件指令", admin_md)
+
+        # Backward-compatible no-arg call must succeed
+        default_card = CardBuilder.build_help_card()
+        self.assertEqual(default_card["header"]["template"], "blue")
+
 
 if __name__ == "__main__":
     unittest.main()

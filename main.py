@@ -175,13 +175,8 @@ async def main():
         log.error(f"Failed to process post-update notification: {e}")
 
     # Register system commands & load plugins
-    from plugin_manager import plugin_manager
-    plugin_manager.register_system_commands([
-        "/help", "/model", "/card", "/menu", "/project", "/note", "/notes",
-        "/status", "/context", "/quota", "/clear", "/stop", "/update", "/ping",
-        "/newproj_resolve", "/cron", "/schedule", "/plugin", "/plugins", "/user",
-        "/brain", "/auth", "/s1", "/sys1", "/system1"
-    ])
+    from plugin_manager import DEFAULT_SYSTEM_COMMANDS, plugin_manager
+    plugin_manager.register_system_commands(DEFAULT_SYSTEM_COMMANDS)
     plugin_manager.load_all_plugins()
 
     # Start background GC task

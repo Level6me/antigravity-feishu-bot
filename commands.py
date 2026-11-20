@@ -1021,7 +1021,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             return True, user_text
 
     elif user_text.startswith("/help"):
-        help_card = CardBuilder.build_help_card()
+        help_card = CardBuilder.build_help_card(is_admin_user=is_admin(chat_id))
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, help_card))
         return True, user_text
         
