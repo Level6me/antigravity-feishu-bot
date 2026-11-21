@@ -292,9 +292,9 @@ class TestExecutorCapacityErrorHandling(unittest.IsolatedAsyncioTestCase):
 
         captured_cards = []
 
-        def fake_build_ai_response(*args, **kwargs):
+        def fake_build_capacity_choice_card(*args, **kwargs):
             captured_cards.append((args, kwargs))
-            return {"mock_card": True}
+            return {"mock_capacity_card": True}
 
         session_data = {
             "conversation": "conv-503-test",
@@ -310,7 +310,7 @@ class TestExecutorCapacityErrorHandling(unittest.IsolatedAsyncioTestCase):
              patch("executor.save_session_async", AsyncMock()), \
              patch("executor.send_interactive_card_sdk", return_value="om_init"), \
              patch("executor.patch_interactive_card_sdk", return_value=True), \
-             patch("executor.CardBuilder.build_ai_response", side_effect=fake_build_ai_response), \
+             patch("executor.CardBuilder.build_capacity_choice_card", side_effect=fake_build_capacity_choice_card), \
              patch("system_one_gate.evaluate_tool_error", eval_mock), \
              patch("utils.quota.detect_and_format_quota_error", quota_mock), \
              patch("plugin_manager.plugin_manager.dispatch_after_ai", AsyncMock(side_effect=lambda txt, *a, **k: txt)):
@@ -328,7 +328,9 @@ class TestExecutorCapacityErrorHandling(unittest.IsolatedAsyncioTestCase):
                 download_success=False,
             )
 
-        self.assertTrue(is_err)
+        self.assertFalse(is_err)
+        self.assertTrue(session_data.get("last_execution_paused"))
+        self.assertIsNotNone(session_data.get("paused_capacity_state"))
         # Must NOT retry Attempt 2 on the same 503 model
         self.assertEqual(fake_sess.send_count, 1)
         self.assertTrue(fake_sess.closed)
@@ -341,15 +343,11 @@ class TestExecutorCapacityErrorHandling(unittest.IsolatedAsyncioTestCase):
         # Session must be marked tainted for seamless model-switch relay
         self.assertEqual(session_data.get("_capacity_tainted_conv"), "conv-503-test")
         self.assertEqual(session_data.get("_capacity_error_model"), "gemini-4-hydrogen-high")
-        # Final Feishu card must show 503 notice + /model button
+        # Final Feishu card must be the interactive capacity choice card
         self.assertTrue(captured_cards)
         args, kwargs = captured_cards[-1]
-        reply_text = args[0] if args else kwargs.get("reply_text", "")
-        choice_data = args[1] if len(args) > 1 else kwargs.get("choice_card_data")
-        self.assertIn("HTTP 503 No Capacity", reply_text)
-        self.assertIn("gemini-4-hydrogen-high", reply_text)
-        self.assertIsNotNone(choice_data)
-        self.assertIn("/model", choice_data.get("options", []))
+        self.assertEqual(kwargs.get("failed_model"), "gemini-4-hydrogen-high")
+        self.assertEqual(kwargs.get("user_text"), "帮我查树莓派日志")
 
     async def test_503_mid_turn_auto_fallback_switches_model_and_succeeds(self):
         err_msg = "UNAVAILABLE (code 503): No capacity available for model gemini-4-argon-high on the server"

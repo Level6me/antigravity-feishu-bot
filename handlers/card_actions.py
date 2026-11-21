@@ -24,6 +24,8 @@ import app_state
 from handlers.messages import _handle_message_async_internal
 from handlers.auth_actions import handle_auth_card_action
 from handlers.mcp_actions import handle_mcp_card_action
+from handlers.agy_plugin_actions import handle_agy_plugin_card_action
+from handlers.skill_actions import handle_skill_card_action
 from utils.auth import SCOPE_PROJECT, get_role, has_scope, is_admin
 
 # Compatibility aliases for extracted body
@@ -250,6 +252,111 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 "toast": {"type": "success", "content": f"模型已切换为 {new_model}"}
             })
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"模型已切换为 {new_model}"}})
+
+    elif action_value.get("action") == "capacity_choice_decision":
+        decision = str(action_value.get("decision") or "switch_and_continue")
+        failed_model = str(action_value.get("failed_model") or "")
+        target_model = str(action_value.get("target_model") or "")
+        if decision == "switch_form_and_continue":
+            target_model = str(form_value.get("capacity_target_model") or target_model or "").strip()
+
+        if decision == "cancel":
+            if app_state.main_loop and app_state.main_loop.is_running():
+                async def _do_cancel_capacity():
+                    session_data = await get_session_async(chat_id)
+                    paused = session_data.pop("paused_capacity_state", None) or {}
+                    await save_session_async(chat_id, session_data)
+                    cancelled_card = CardBuilder.build_capacity_choice_card(
+                        failed_model=failed_model or paused.get("failed_model") or session_data.get("model", "Default"),
+                        user_text=paused.get("user_text", ""),
+                        current_project=paused.get("project_dir") or session_data.get("project", "默认"),
+                        resolved_status="cancelled",
+                    )
+                    if card_message_id:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: patch_interactive_card_sdk(card_message_id, cancelled_card)
+                        )
+                asyncio.run_coroutine_threadsafe(_do_cancel_capacity(), app_state.main_loop)
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已取消本次任务重试"}})
+
+        if app_state.main_loop and app_state.main_loop.is_running():
+            async def _do_capacity_resume():
+                session_data = await get_session_async(chat_id)
+                paused = session_data.pop("paused_capacity_state", None) or {}
+                orig_q = paused.get("user_text") or session_data.get("last_user_query") or "继续执行刚才的任务"
+                err_m = failed_model or paused.get("failed_model") or session_data.get("model", "Default")
+                proj_dir = paused.get("project_dir") or session_data.get("project", "默认")
+                chosen_model = (err_m if decision == "retry_current" else (target_model or paused.get("recommended_model") or err_m)).strip()
+
+                from system_one_gate import infer_effort_from_model
+                effort_to_set = infer_effort_from_model(chosen_model, session_data.get("reasoning_effort", "medium"))
+
+                if decision == "retry_current":
+                    try:
+                        from utils.model_health import clear_model_health
+                        clear_model_health(chosen_model)
+                    except Exception:
+                        pass
+                else:
+                    session_data["model"] = chosen_model
+                    session_data["base_model"] = chosen_model
+                    session_data["reasoning_effort"] = effort_to_set
+
+                try:
+                    from agent_memory import relay_conversation_for_model_switch
+                    relay_conversation_for_model_switch(
+                        chat_id=chat_id,
+                        session_data=session_data,
+                        new_model=chosen_model,
+                        old_model=err_m,
+                        project_dir=proj_dir,
+                        force=bool(paused.get("tainted_conv") or session_data.get("_capacity_tainted_conv")),
+                    )
+                except Exception as relay_err:
+                    log.warning(f"[capacity_choice_decision] Relay check failed: {relay_err}")
+
+                comp_steps = list(paused.get("completed_steps") or [])
+                plan_steps = list(paused.get("planned_steps") or [])
+                if comp_steps or plan_steps:
+                    session_data["_resumed_task_progress"] = {
+                        "user_text": orig_q,
+                        "elapsed_seconds": int(paused.get("elapsed_seconds") or 0),
+                        "completed_steps": comp_steps,
+                        "planned_steps": plan_steps,
+                        "current_plan_idx": int(paused.get("current_plan_idx") or 0),
+                        "max_progress_pct": int(paused.get("max_progress_pct") or 0),
+                    }
+                await save_session_async(chat_id, session_data)
+
+                try:
+                    from session_pool import session_pool
+                    await session_pool.reset_session(chat_id)
+                except Exception:
+                    pass
+
+                resolved_card = CardBuilder.build_capacity_choice_card(
+                    failed_model=err_m,
+                    user_text=orig_q,
+                    current_project=proj_dir,
+                    resolved_status="retry_current" if decision == "retry_current" else "switched",
+                    resolved_model=chosen_model,
+                )
+                if card_message_id:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: patch_interactive_card_sdk(card_message_id, resolved_card)
+                    )
+
+                simulated_content = json.dumps({"text": orig_q}, ensure_ascii=False)
+                await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
+
+            asyncio.run_coroutine_threadsafe(_do_capacity_resume(), app_state.main_loop)
+
+        toast_msg = (
+            f"🔄 正在继续使用 {failed_model or '当前模型'} 重试任务..."
+            if decision == "retry_current"
+            else f"⚡ 已切换至 {target_model}，正在继续执行任务..."
+        )
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": toast_msg}})
 
     elif action_value.get("action") == "user_choice":
         choice = action_value.get("choice", "")
@@ -656,6 +763,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     current_model=session_data.get("model", "Default"),
                     current_project=proj_dir,
                     resumed_status="continued",
+                    current_step_idx=int(paused.get("current_plan_idx") or 0),
+                    min_pct=int(paused.get("max_progress_pct") or 0),
                 )
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: patch_interactive_card_sdk(card_message_id, resumed_card)
@@ -686,6 +795,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             async def do_stop_paused_task():
                 session_data = await get_session_async(chat_id)
                 paused = session_data.pop("paused_task_state", None) or {}
+                session_data.pop("_paused_message_reaction", None)
+                session_data["last_execution_paused"] = False
                 await save_session_async(chat_id, session_data)
                 stopped_card = CardBuilder.build_budget_pause_card(
                     user_text=paused.get("user_text", "阶段性任务"),
@@ -698,6 +809,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     current_model=session_data.get("model", "Default"),
                     current_project=paused.get("project_dir") or session_data.get("project", "默认"),
                     resumed_status="stopped",
+                    current_step_idx=int(paused.get("current_plan_idx") or 0),
+                    min_pct=int(paused.get("max_progress_pct") or 0),
                 )
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: patch_interactive_card_sdk(card_message_id, stopped_card)
@@ -1505,6 +1618,16 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     mcp_resp = handle_mcp_card_action(action_value, chat_id, card_message_id, form_value=form_value)
     if mcp_resp is not None:
         return mcp_resp
+
+    # Interactive Antigravity native plugin management panel actions (/agyplugin)
+    agy_plugin_resp = handle_agy_plugin_card_action(action_value, chat_id, card_message_id, form_value=form_value)
+    if agy_plugin_resp is not None:
+        return agy_plugin_resp
+
+    # Interactive Antigravity CLI Skills management panel actions (/skills)
+    skill_resp = handle_skill_card_action(action_value, chat_id, card_message_id, form_value=form_value)
+    if skill_resp is not None:
+        return skill_resp
 
     # Dispatch to plugin manager
     action_name = action_value.get("action", "")

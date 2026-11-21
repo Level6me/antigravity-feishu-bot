@@ -62,6 +62,13 @@ def clear_health_cache() -> None:
     _HEALTH_REGISTRY.clear()
 
 
+def clear_model_health(model_id: str) -> None:
+    """Clear health/circuit-breaker record for a single `model_id` (e.g., when user chooses to retry current model)."""
+    key = _norm(model_id)
+    if key:
+        _HEALTH_REGISTRY.pop(key, None)
+
+
 def mark_model_unhealthy(
     model_id: str,
     reason: str = "503 No capacity",
@@ -164,7 +171,11 @@ def _load_cached_model_entries() -> List[str]:
                 return [str(m) for m in models if m]
     except Exception:
         pass
-    return []
+    try:
+        from utils.model_tiers import FALLBACK_MODELS_CATALOG
+        return [str(m) for m in FALLBACK_MODELS_CATALOG if m]
+    except Exception:
+        return []
 
 
 def _parse_model_id(entry: str) -> str:
@@ -175,6 +186,19 @@ def _parse_model_id(entry: str) -> str:
         return s.split("\t", 1)[0].strip()
     parts = s.split(maxsplit=1)
     return parts[0].strip() if parts else ""
+
+
+def _parse_model_label(entry: str) -> Tuple[str, str]:
+    s = (entry or "").strip()
+    if not s:
+        return "", ""
+    if "\t" in s:
+        m_id, m_label = s.split("\t", 1)
+        return m_id.strip(), (m_label.strip() or m_id.strip())
+    parts = s.split(maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return s, s
 
 
 def _family_priority(family: str) -> int:
@@ -266,6 +290,57 @@ def pick_healthy_fallback_model(
     if best_key[0] == 1:
         return None
     return best_model
+
+
+def list_healthy_candidate_models(
+    failed_model: str,
+    available_models: Optional[Iterable[str]] = None,
+    preferred_tier: str = "",
+    limit: int = 8,
+) -> List[Dict[str, str]]:
+    """Return a ranked list of candidate models (`id`, `label`, `health`, `family`) for the interactive 503 choice card."""
+    raw_entries = list(available_models) if available_models is not None else _load_cached_model_entries()
+    if not raw_entries:
+        return []
+
+    failed_norm = _norm(failed_model)
+    failed_family = extract_model_family(failed_model)
+    target_tier = (preferred_tier or extract_model_tier(failed_model) or "high").lower()
+
+    scored: List[Tuple[Tuple[int, int, int, int], Dict[str, str]]] = []
+    seen: Set[str] = set()
+    for entry in raw_entries:
+        m_id, m_label = _parse_model_label(entry)
+        m_norm = _norm(m_id)
+        if not m_id or m_norm in seen or m_norm == failed_norm:
+            continue
+        seen.add(m_norm)
+        if "orchestrator" in m_norm:
+            continue
+
+        health_status = get_model_health(m_id).get("status", "unknown")
+        is_unhealthy = health_status == "unhealthy"
+        fam = extract_model_family(m_id)
+        tier = extract_model_tier(m_id)
+
+        unhealthy_penalty = 2 if is_unhealthy else 0
+        same_family_penalty = 1 if (failed_family and fam == failed_family) else 0
+        health_rank = 0 if health_status == "healthy" else (2 if is_unhealthy else 1)
+        fam_rank = _family_priority(fam)
+        tier_dist = _tier_distance(tier, target_tier)
+
+        scored.append((
+            (unhealthy_penalty + same_family_penalty, health_rank, fam_rank, tier_dist),
+            {
+                "id": m_id,
+                "label": m_label or m_id,
+                "health": health_status,
+                "family": fam,
+            },
+        ))
+
+    scored.sort(key=lambda item: item[0])
+    return [item[1] for item in scored[: max(1, int(limit))]]
 
 
 async def _kill_process_group(proc: Any) -> None:

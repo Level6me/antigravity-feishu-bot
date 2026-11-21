@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     tool_execution_timeout: int = Field(default=3600, alias="TOOL_EXECUTION_TIMEOUT")
 
     # Model 503 capacity circuit-breaker, sidecar probe, and auto-fallback settings
-    auto_fallback_on_capacity_error: bool = Field(default=True, alias="AUTO_FALLBACK_ON_CAPACITY_ERROR")
+    auto_fallback_on_capacity_error: bool = Field(default=False, alias="AUTO_FALLBACK_ON_CAPACITY_ERROR")
     capacity_probe_delay_seconds: int = Field(default=15, alias="CAPACITY_PROBE_DELAY_SECONDS")
     capacity_probe_timeout_seconds: int = Field(default=18, alias="CAPACITY_PROBE_TIMEOUT_SECONDS")
 

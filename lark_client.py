@@ -31,19 +31,24 @@ upload_client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).time
 
 @with_retry()
 def set_emoji_sdk(message_id, emoji_type):
+    candidates = [emoji_type]
+    if emoji_type in ("PAUSE", "Pause", "⏸️", "⏸"):
+        candidates = ["PAUSE", "Pause", "OnIt", "Coffee"]
     try:
-        req = CreateMessageReactionRequest.builder() \
-            .message_id(message_id) \
-            .request_body(CreateMessageReactionRequestBody.builder() \
-                .reaction_type(Emoji.builder().emoji_type(emoji_type).build()) \
-                .build()) \
-            .build()
-        resp = api_client.im.v1.message_reaction.create(req)
-        if resp.code == 0:
-            return json.loads(resp.raw.content).get("data", {}).get("reaction_id")
-        else:
-            log.error(f"[set_emoji_sdk] Failed: {resp.msg}")
-            return None
+        last_msg = ""
+        for cand in candidates:
+            req = CreateMessageReactionRequest.builder() \
+                .message_id(message_id) \
+                .request_body(CreateMessageReactionRequestBody.builder() \
+                    .reaction_type(Emoji.builder().emoji_type(cand).build()) \
+                    .build()) \
+                .build()
+            resp = api_client.im.v1.message_reaction.create(req)
+            if resp.code == 0:
+                return json.loads(resp.raw.content).get("data", {}).get("reaction_id")
+            last_msg = resp.msg
+        log.error(f"[set_emoji_sdk] Failed for {emoji_type}: {last_msg}")
+        return None
     except Exception as e:
         log.error(f"[set_emoji_sdk] Error: {e}")
         return None

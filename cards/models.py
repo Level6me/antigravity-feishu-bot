@@ -226,3 +226,258 @@ def build_model_switch_result_card(
         },
         "elements": elements
     }
+
+
+def build_capacity_choice_card(
+    failed_model: str,
+    user_text: str = "",
+    candidate_models=None,
+    recommended_model: str = "",
+    current_project: str = "默认",
+    error_detail: str = "",
+    resolved_status: str = "",
+    resolved_model: str = "",
+):
+    """Build an interactive card when a model encounters HTTP 503 capacity exhaustion,
+    allowing the user to choose whether to retry the current model, switch to a recommended
+    model, or pick any specific target model to continue the task.
+    """
+    err_model = (failed_model or "当前模型").strip()
+    if candidate_models is None:
+        try:
+            from utils.model_health import list_healthy_candidate_models
+            candidate_models = list_healthy_candidate_models(err_model, limit=8)
+        except Exception:
+            candidate_models = []
+
+    if not recommended_model and candidate_models:
+        first_cand = candidate_models[0]
+        if isinstance(first_cand, dict) and first_cand.get("health") != "unhealthy":
+            recommended_model = first_cand.get("id", "")
+
+    task_preview = (user_text or "").strip().replace("\n", " ")
+    if len(task_preview) > 120:
+        task_preview = task_preview[:117] + "..."
+
+    if resolved_status == "retry_current":
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "blue",
+                "title": {"content": "🔄 已选择继续使用当前模型重试", "tag": "plain_text"},
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"▶️ **正在使用原模型 `{resolved_model or err_model}` 重新执行任务...**\n\n"
+                        + (f"📌 **待执行任务**：`{task_preview}`\n" if task_preview else "")
+                        + "♻️ 已自动清理此前 503 失败轨迹并保留对话上下文。"
+                    ),
+                },
+                create_footer(),
+            ],
+        }
+
+    if resolved_status == "switched":
+        target_m = resolved_model or recommended_model or "新模型"
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "green",
+                "title": {"content": f"⚡ 已切换至 {target_m} 并继续执行", "tag": "plain_text"},
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"✅ **模型已从 ~~`{err_model}`~~ 切换为 `{target_m}`，正在自动继续执行当前任务！**\n\n"
+                        + (f"📌 **继续任务**：`{task_preview}`\n" if task_preview else "")
+                        + "♻️ 已无感接力近期对话上下文与项目记忆胶囊。"
+                    ),
+                },
+                create_footer(),
+            ],
+        }
+
+    if resolved_status == "cancelled":
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "grey",
+                "title": {"content": "⏹️ 已暂停当前任务重试", "tag": "plain_text"},
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"已取消本次 503 算力拥堵任务的自动续跑（当前模型仍为 `{err_model}`）。\n"
+                        "您可以随时重新发送消息，或发送 `/model` 切换其他模型。"
+                    ),
+                },
+                create_footer(),
+            ],
+        }
+
+    elements = [
+        {
+            "tag": "markdown",
+            "content": (
+                f"🚦 **模型服务端算力不足 (HTTP 503 No Capacity)**\n\n"
+                f"当前模型 **`{err_model}`** 在云端暂时没有空闲算力容量（**并非**您的个人套餐配额耗尽）。\n"
+                + (f"📌 **待执行任务**：`{task_preview}`\n" if task_preview else "")
+                + "\n请选择：**继续使用当前模型重试**，或**切换到指定模型立即继续执行任务**（系统将自动无感接力上下文，无需 `/clear`）："
+            ),
+        },
+    ]
+
+    # Primary quick decision buttons
+    primary_actions = []
+    if recommended_model and recommended_model.lower() != err_model.lower():
+        rec_label = recommended_model
+        for c in (candidate_models or []):
+            if isinstance(c, dict) and c.get("id") == recommended_model:
+                rec_label = c.get("label") or recommended_model
+                break
+        primary_actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": f"⚡ 切换推荐模型 ({rec_label}) 并继续"},
+            "type": "primary",
+            "value": {
+                "action": "capacity_choice_decision",
+                "decision": "switch_and_continue",
+                "target_model": recommended_model,
+                "failed_model": err_model,
+            },
+        })
+
+    primary_actions.append({
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": f"🔄 继续当前模型 ({err_model}) 执行"},
+        "type": "default" if primary_actions else "primary",
+        "value": {
+            "action": "capacity_choice_decision",
+            "decision": "retry_current",
+            "target_model": err_model,
+            "failed_model": err_model,
+        },
+    })
+    primary_actions.append({
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "⏹️ 暂不继续"},
+        "type": "default",
+        "value": {
+            "action": "capacity_choice_decision",
+            "decision": "cancel",
+            "failed_model": err_model,
+        },
+    })
+    elements.append({
+        "tag": "action",
+        "layout": "flow",
+        "actions": primary_actions,
+    })
+
+    # Candidate model quick buttons & dropdown selector
+    if candidate_models:
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "markdown",
+            "content": "🎛️ **或直接点击切换至以下模型并立即继续任务**：",
+        })
+        model_buttons = []
+        select_options = []
+        for item in candidate_models:
+            if isinstance(item, dict):
+                m_id = str(item.get("id") or "").strip()
+                m_label = str(item.get("label") or m_id).strip()
+                m_health = str(item.get("health") or "unknown")
+            else:
+                m_id, m_label = _parse_model_entry(str(item))
+                m_health = "unknown"
+            if not m_id or m_id.lower() == err_model.lower():
+                continue
+
+            if m_health == "healthy":
+                btn_text = f"🟢 {m_label}"
+            elif m_health == "unhealthy":
+                btn_text = f"🔴 {m_label} (503拥堵)"
+            else:
+                btn_text = m_label
+
+            is_rec = bool(recommended_model and m_id.lower() == recommended_model.lower())
+            model_buttons.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"⭐ {btn_text}" if is_rec else btn_text},
+                "type": "primary" if is_rec else ("danger" if m_health == "unhealthy" else "default"),
+                "value": {
+                    "action": "capacity_choice_decision",
+                    "decision": "switch_and_continue",
+                    "target_model": m_id,
+                    "failed_model": err_model,
+                },
+            })
+            select_options.append({
+                "text": {"tag": "plain_text", "content": f"{btn_text} ({m_id})"},
+                "value": m_id,
+            })
+
+        if model_buttons:
+            elements.append({
+                "tag": "action",
+                "layout": "flow",
+                "actions": model_buttons[:8],
+            })
+
+        if select_options:
+            initial_opt = recommended_model if any(o["value"] == recommended_model for o in select_options) else select_options[0]["value"]
+            elements.append({
+                "tag": "form",
+                "name": "capacity_model_select_form",
+                "elements": [
+                    {
+                        "tag": "select_static",
+                        "name": "capacity_target_model",
+                        "initial_option": initial_opt,
+                        "placeholder": {"tag": "plain_text", "content": "从下拉列表选择目标模型"},
+                        "options": select_options[:20],
+                    },
+                    {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "background_style": "default",
+                        "columns": [
+                            {
+                                "tag": "column",
+                                "width": "auto",
+                                "elements": [
+                                    {
+                                        "tag": "button",
+                                        "name": "capacity_form_submit_btn",
+                                        "text": {"tag": "plain_text", "content": "✅ 切换所选模型并继续任务"},
+                                        "type": "primary",
+                                        "action_type": "form_submit",
+                                        "value": {
+                                            "action": "capacity_choice_decision",
+                                            "decision": "switch_form_and_continue",
+                                            "failed_model": err_model,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            })
+
+    elements.append({"tag": "hr"})
+    elements.append(create_footer())
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange",
+            "title": {"content": "🚦 模型算力不足 · 请选择切换模型或继续执行", "tag": "plain_text"},
+        },
+        "elements": elements,
+    }

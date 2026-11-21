@@ -1,5 +1,21 @@
 """Feishu interactive card builders (split modules)."""
-from cards import common, models, indicators, response, projects, system, memory, stats_cards, auth, cron, plugin, system_one_card, mcp
+from cards import (
+    common,
+    models,
+    indicators,
+    response,
+    projects,
+    system,
+    memory,
+    stats_cards,
+    auth,
+    cron,
+    plugin,
+    system_one_card,
+    mcp,
+    agy_plugin,
+    skills,
+)
 
 
 class CardBuilder:
@@ -9,6 +25,7 @@ class CardBuilder:
 
     build_model_panel = staticmethod(models.build_model_panel)
     build_model_switch_result_card = staticmethod(models.build_model_switch_result_card)
+    build_capacity_choice_card = staticmethod(models.build_capacity_choice_card)
 
     _guess_intent = staticmethod(indicators._guess_intent)
     _get_dynamic_think_text = staticmethod(indicators._get_dynamic_think_text)
@@ -79,6 +96,8 @@ class CardBuilder:
 
     build_plugin_panel_card = staticmethod(plugin.build_plugin_panel_card)
     build_mcp_panel_card = staticmethod(mcp.build_mcp_panel_card)
+    build_agy_plugin_panel_card = staticmethod(agy_plugin.build_agy_plugin_panel_card)
+    build_skill_panel_card = staticmethod(skills.build_skill_panel_card)
     build_system_one_config_card = staticmethod(system_one_card.build_system_one_config_card)
     build_system_one_tier_menu_card = staticmethod(system_one_card.build_system_one_tier_menu_card)
     build_typesafe_config_card = build_system_one_config_card

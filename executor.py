@@ -351,13 +351,57 @@ def format_tool_action(tool_name: str = "", params: dict = None, raw_action: str
     params = params or {}
     tool_name = (tool_name or "").strip()
 
-    # 1. 优先提取语义化的工具动作说明
+    # 0. 针对常用文件与检索工具 (兼容 agy 1.5.x ACP title="File ..." 及 read_file / edit_file / write_file)：
+    # 优先输出规范中文动作名称（避免 ACP 原始英文 title "File xxx" 被当作普通动作变成 "正在执行 File xxx"）
+    if tool_name in ("view_file", "read_file"):
+        path = params.get("Path") or params.get("AbsolutePath") or params.get("path") or ""
+        if not path and isinstance(raw_action, str) and raw_action.startswith("File "):
+            path = raw_action[5:].strip()
+        fname = os.path.basename(str(path).strip(' "\'')) if path else ""
+        return f"正在读取文件: {fname}" if fname else "正在读取文件"
+    elif tool_name in ("write_to_file", "replace_file_content", "edit_file", "write_file"):
+        path = params.get("Path") or params.get("TargetFile") or params.get("path") or ""
+        if not path and isinstance(raw_action, str) and raw_action.startswith("File "):
+            path = raw_action[5:].strip()
+        fname = os.path.basename(str(path).strip(' "\'')) if path else ""
+        verb = "写入文件" if tool_name in ("write_file", "write_to_file") else "编辑文件"
+        return f"正在{verb}: {fname}" if fname else f"正在{verb}"
+    elif tool_name in ("grep_search", "grep"):
+        q = (params.get("Query") or params.get("query") or "").strip(' "\'')
+        q = re.sub(r'[\r\n\t]+', ' ', q)[:12]
+        return f"正在搜索代码: {q}" if q else "正在搜索代码"
+    elif tool_name in ("find_by_name", "glob"):
+        p = (params.get("Pattern") or params.get("pattern") or "").strip(' "\'')
+        p = re.sub(r'[\r\n\t]+', ' ', p)[:12]
+        return f"正在查找文件: {p}" if p else "正在查找文件"
+    elif tool_name == "list_dir":
+        return "正在浏览目录结构"
+
+    # 针对 run_command 中的高确定性操作（单元测试、语法校验、Git 提交推送），优先使用精准中文阶段标签
+    cmd = (params.get("CommandLine") or params.get("command") or "").strip()
+    if tool_name == "run_command" or cmd:
+        clean_cmd_early = re.sub(r'^timeout\s+(?:-k\s+\S+\s+)?\d+(?:\.\d+)?[smhd]?\s+', '', cmd).strip()
+        if "-m unittest" in clean_cmd_early or "pytest" in clean_cmd_early:
+            return "正在运行单元测试验证"
+        if "-m py_compile" in clean_cmd_early:
+            return "正在校验代码语法规范"
+        if clean_cmd_early.startswith("git "):
+            if "push" in clean_cmd_early:
+                return "正在推送代码至远端仓库"
+            if "commit" in clean_cmd_early:
+                return "正在提交 Git 代码变更"
+
+    # 1. 提取语义化的工具动作说明
     act = params.get("toolAction") or params.get("toolSummary") or raw_action or ""
     if isinstance(act, str):
         act = act.replace('"', '').replace("'", "").strip()
         act = re.sub(r'[\r\n\t]+', ' ', act).strip()
         act = re.sub(r'\s+', ' ', act)
-        act = CardBuilder.translate_action_verb(act)
+        if act.startswith("File "):
+            fname = os.path.basename(act[5:].strip())
+            act = f"读取文件: {fname}" if fname else "读取文件"
+        else:
+            act = CardBuilder.translate_action_verb(act)
     else:
         act = ""
 
@@ -1039,11 +1083,17 @@ async def execute_antigravity(
             log.error(f"Failed to sync conversation id from log: {e}")
 
     resumed_task_ctx = session_data.pop("_resumed_task_progress", None) or {}
+    session_data["last_execution_paused"] = False
     if resumed_task_ctx:
         try:
             await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
         except Exception:
             pass
+    display_user_text = resumed_task_ctx.get("user_text") or user_text
+    if (display_user_text or "").lstrip().startswith(("[CONTINUE_PAUSED_TASK]", "[AUTO_RESUME_AFTER_L3_APPROVAL]")):
+        m_orig_u = re.search(r"-\s*(?:原始指令|前序任务目标)：(.+)", display_user_text)
+        if m_orig_u:
+            display_user_text = m_orig_u.group(1).strip()
     prior_elapsed_seconds = max(0, int(resumed_task_ctx.get("elapsed_seconds") or 0))
     task_start_time = time.time() - prior_elapsed_seconds
     task_max_progress_pct = int(resumed_task_ctx.get("max_progress_pct") or 0)
@@ -1309,11 +1359,10 @@ async def execute_antigravity(
             sidecar_probe_confirmed_healthy = False
 
             def get_latest_transcript_file():
-                if session_data.get("conversation"):
-                    conv_id = session_data["conversation"]
-                    path = get_transcript_path(conv_id)
-                    if os.path.exists(path):
-                        return path
+                eff_conv = conv_id or session_data.get("conversation") or getattr(sess, "conversation_id", "")
+                if eff_conv:
+                    path = get_transcript_path(eff_conv)
+                    return path if os.path.exists(path) else None
                 brain_dir = get_brain_dir()
                 if os.path.exists(brain_dir):
                     try:
@@ -2216,6 +2265,7 @@ async def execute_antigravity(
             if typesafe_blocked_info:
                 is_error = False
                 session_data["last_execution_error"] = False
+                session_data["last_execution_paused"] = True
                 session_data["typesafe_audit_summary"] = "⚡️S1：L3全流程决策 · 高危操作待审批"
                 # 防止多次连续 L3 审批时将 [AUTO_RESUME_AFTER_L3_APPROVAL] 嵌套进 user_text 引发套娃膨胀
                 orig_l3_user_text = user_text
@@ -2277,13 +2327,29 @@ async def execute_antigravity(
                 }
 
             if budget_intercepted:
+                if not planned_steps:
+                    planned_steps = CardBuilder.generate_task_plan(display_user_text)
+                    current_plan_idx = CardBuilder.match_step_index(
+                        planned_steps, current_plan_idx, last_tool_action, len(completed_tool_steps)
+                    )
+                effective_total_stages = len(planned_steps) if planned_steps else 4
+                current_plan_idx = max(0, min(current_plan_idx, effective_total_stages - 1))
+                task_plan_idx = max(task_plan_idx, current_plan_idx)
+                task_planned_steps = list(planned_steps)
+                task_max_progress_pct = CardBuilder._compute_monotonic_progress_pct(
+                    current_plan_idx,
+                    effective_total_stages,
+                    False,
+                    len(completed_tool_steps),
+                    min_pct=task_max_progress_pct,
+                )
                 partial_clean = extract_final_chinese_response(current_turn_text or accumulated_text)
                 proj_dir = session_data.get("project", "默认")
                 try:
                     from agent_memory import read_project_capsule, update_project_capsule_incremental
                     update_project_capsule_incremental(
                         project_dir=proj_dir,
-                        user_request=user_text,
+                        user_request=display_user_text,
                         reply_text=partial_clean or f"（阶段性截停：{budget_exceeded_reason}；已完成：{', '.join(completed_tool_steps[-6:])}）",
                         chat_id=chat_id,
                         conv_id=session_data.get("conversation", ""),
@@ -2332,7 +2398,7 @@ async def execute_antigravity(
                 # 第二次重试依然超预算：立即截停并向飞书推送带「▶️ 继续执行剩余步骤」按钮的进度卡片
                 elapsed_s = max(0, int(time.time() - process_start_time))
                 session_data["paused_task_state"] = {
-                    "user_text": user_text,
+                    "user_text": display_user_text,
                     "scope": scope_info.get("scope", "modify"),
                     "scope_label": scope_info.get("scope_label", ""),
                     "completed_steps": list(completed_tool_steps),
@@ -2346,13 +2412,14 @@ async def execute_antigravity(
                     "created_at": time.time(),
                 }
                 session_data["last_execution_error"] = False
+                session_data["last_execution_paused"] = True
                 try:
                     await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
                 except Exception:
                     pass
 
                 pause_card = CardBuilder.build_budget_pause_card(
-                    user_text=user_text,
+                    user_text=display_user_text,
                     reason=budget_exceeded_reason,
                     completed_steps=completed_tool_steps,
                     planned_steps=planned_steps,
@@ -2361,6 +2428,8 @@ async def execute_antigravity(
                     scope_label=scope_info.get("scope_label", ""),
                     current_model=session_data.get("model", "Default"),
                     current_project=proj_dir,
+                    current_step_idx=current_plan_idx,
+                    min_pct=task_max_progress_pct,
                 )
                 if bot_reply_msg_id:
                     await _feishu_call(
@@ -2536,64 +2605,116 @@ async def execute_antigravity(
                         except Exception:
                             pass
 
-                        # 自动回退到健康备用模型（仅在 attempt == 1 且允许自动回退时触发）
+                        try:
+                            from system_one_gate import infer_effort_from_model
+                            from utils.model_health import list_healthy_candidate_models
+                            cur_effort = session_data.get("reasoning_effort", "high")
+                            fb_model = (
+                                pick_healthy_fallback_model(err_model, preferred_tier=cur_effort)
+                                if pick_healthy_fallback_model is not None
+                                else None
+                            )
+                            candidate_models = list_healthy_candidate_models(
+                                err_model, preferred_tier=cur_effort, limit=8
+                            )
+                        except Exception:
+                            fb_model = None
+                            candidate_models = []
+
+                        # 自动回退到健康备用模型（仅当显式开启 AUTO_FALLBACK_ON_CAPACITY_ERROR=True 时才静默切换）
                         if (
                             attempt < 2
-                            and getattr(config, "AUTO_FALLBACK_ON_CAPACITY_ERROR", True)
-                            and pick_healthy_fallback_model is not None
+                            and getattr(config, "AUTO_FALLBACK_ON_CAPACITY_ERROR", False)
+                            and fb_model
+                            and fb_model != err_model
                         ):
+                            fb_effort = infer_effort_from_model(fb_model, session_data.get("reasoning_effort", "high"))
                             try:
-                                from system_one_gate import infer_effort_from_model
-                                cur_effort = session_data.get("reasoning_effort", "high")
-                                fb_model = pick_healthy_fallback_model(err_model, preferred_tier=cur_effort)
+                                from agent_memory import relay_conversation_for_model_switch
+                                relay_conversation_for_model_switch(
+                                    chat_id=chat_id,
+                                    session_data=session_data,
+                                    new_model=fb_model,
+                                    old_model=err_model,
+                                    project_dir=session_data.get("project", "默认"),
+                                    force=bool(tainted_conv),
+                                )
+                            except Exception as fb_relay_err:
+                                log.warning(f"[Executor] Auto-fallback relay failed: {fb_relay_err}")
+                            session_data["model"] = fb_model
+                            session_data["base_model"] = fb_model
+                            session_data["reasoning_effort"] = fb_effort
+                            session_data["_was_capacity_fallback_retry"] = True
+                            session_data["_capacity_fallback_notice"] = (
+                                f"⚡ 检测到原模型 `{err_model}` 服务端 503 算力不足，"
+                                f"已自动无感接力上下文并切换至 **`{fb_model}`** 完成本次任务。"
+                            )
+                            try:
+                                await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
                             except Exception:
-                                fb_model = None
-                            if fb_model and fb_model != err_model:
-                                fb_effort = infer_effort_from_model(fb_model, session_data.get("reasoning_effort", "high"))
-                                try:
-                                    from agent_memory import relay_conversation_for_model_switch
-                                    relay_conversation_for_model_switch(
-                                        chat_id=chat_id,
-                                        session_data=session_data,
-                                        new_model=fb_model,
-                                        old_model=err_model,
-                                        project_dir=session_data.get("project", "默认"),
-                                        force=bool(tainted_conv),
-                                    )
-                                except Exception as fb_relay_err:
-                                    log.warning(f"[Executor] Auto-fallback relay failed: {fb_relay_err}")
-                                session_data["model"] = fb_model
-                                session_data["base_model"] = fb_model
-                                session_data["reasoning_effort"] = fb_effort
-                                session_data["_was_capacity_fallback_retry"] = True
-                                session_data["_capacity_fallback_notice"] = (
-                                    f"⚡ 检测到原模型 `{err_model}` 服务端 503 算力不足，"
-                                    f"已自动无感接力上下文并切换至 **`{fb_model}`** 完成本次任务。"
-                                )
-                                try:
-                                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
-                                except Exception:
-                                    pass
-                                log.warning(
-                                    f"[Executor] Mid-turn 503 auto-fallback for chat {chat_id}: "
-                                    f"{err_model} -> {fb_model} (effort={fb_effort}), retrying seamlessly on attempt {attempt + 1}"
-                                )
-                                return {
-                                    "has_reply": False,
-                                    "returncode": -503,
-                                    "is_error": True,
-                                    "is_quota_error": False,
-                                    "is_capacity_error": True,
-                                    "capacity_auto_fallback": True,
-                                }
+                                pass
+                            log.warning(
+                                f"[Executor] Mid-turn 503 auto-fallback for chat {chat_id}: "
+                                f"{err_model} -> {fb_model} (effort={fb_effort}), retrying seamlessly on attempt {attempt + 1}"
+                            )
+                            return {
+                                "has_reply": False,
+                                "returncode": -503,
+                                "is_error": True,
+                                "is_quota_error": False,
+                                "is_capacity_error": True,
+                                "capacity_auto_fallback": True,
+                            }
 
+                        # 默认模式 (AUTO_FALLBACK_ON_CAPACITY_ERROR=False)：弹出交互式卡片，让用户自主选择切换模型或继续当前模型执行任务
+                        elapsed_s = max(0, int(time.time() - process_start_time))
+                        proj_dir = session_data.get("project", "默认")
+                        session_data["paused_capacity_state"] = {
+                            "user_text": display_user_text,
+                            "failed_model": err_model,
+                            "recommended_model": fb_model or "",
+                            "completed_steps": list(completed_tool_steps),
+                            "planned_steps": list(planned_steps),
+                            "current_plan_idx": current_plan_idx,
+                            "max_progress_pct": task_max_progress_pct,
+                            "elapsed_seconds": elapsed_s,
+                            "project_dir": proj_dir,
+                            "tainted_conv": tainted_conv,
+                            "created_at": time.time(),
+                        }
+                        session_data["last_execution_error"] = False
+                        session_data["last_execution_paused"] = True
                         try:
                             await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
                         except Exception:
                             pass
-                        final_reply = detect_and_format_agent_system_error(
-                            combined_err_text, model_name=err_model
+
+                        cap_card = CardBuilder.build_capacity_choice_card(
+                            failed_model=err_model,
+                            user_text=display_user_text,
+                            candidate_models=candidate_models,
+                            recommended_model=fb_model or "",
+                            current_project=proj_dir,
+                            error_detail=stream_error_msg or combined_err_text[:200],
                         )
+                        if bot_reply_msg_id:
+                            await _feishu_call(
+                                lambda: patch_interactive_card_sdk(bot_reply_msg_id, cap_card),
+                                label="patch capacity choice card",
+                            )
+                        else:
+                            await _feishu_call(
+                                lambda: send_interactive_card_sdk(message_id, cap_card),
+                                label="send capacity choice card",
+                            )
+                        return {
+                            "has_reply": True,
+                            "returncode": 0,
+                            "is_error": False,
+                            "is_quota_error": False,
+                            "is_capacity_error": True,
+                            "capacity_choice_prompted": True,
+                        }
                     else:
                         quota_err_reply = await detect_and_format_quota_error(combined_err_text, model=active_model_name)
                         if quota_err_reply:

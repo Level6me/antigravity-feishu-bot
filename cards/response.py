@@ -191,10 +191,26 @@ def build_budget_pause_card(
     current_model: str = "Default",
     current_project: str = "默认",
     resumed_status: str = "",
+    current_step_idx: int = None,
+    min_pct: int = 0,
 ):
     """Build an interactive pause/checkpoint card when Attempt 2 also exceeds the step/time/stagnation budget."""
+    from cards.indicators import (
+        MAX_PLANNED_STEPS,
+        _collapse_consecutive_steps,
+        _compute_monotonic_progress_pct,
+        format_step_item,
+        generate_task_plan,
+        match_step_index,
+    )
+
     completed_steps = completed_steps or []
-    planned_steps = planned_steps or []
+    planned_steps = list(planned_steps or [])
+    if not planned_steps and completed_steps:
+        planned_steps = generate_task_plan(user_text)[:MAX_PLANNED_STEPS]
+    else:
+        planned_steps = planned_steps[:MAX_PLANNED_STEPS]
+
     mins = elapsed_seconds // 60
     secs = elapsed_seconds % 60
     time_str = f"{mins}分{secs}秒" if mins > 0 else f"{secs}秒"
@@ -204,17 +220,34 @@ def build_budget_pause_card(
         short_q = short_q[:120] + "..."
 
     total_plan = max(1, len(planned_steps)) if planned_steps else 4
-    done_plan = max(1, min(total_plan - 1, len(completed_steps) // 3)) if completed_steps else 1
-    pct = max(10, min(90, int((done_plan / total_plan) * 100)))
-    filled = max(1, min(9, int(round(pct / 10.0))))
+    if current_step_idx is None:
+        if planned_steps and completed_steps:
+            eff_idx = 0
+            for act in completed_steps:
+                eff_idx = match_step_index(planned_steps, eff_idx, act, len(completed_steps))
+            current_step_idx = eff_idx
+        else:
+            current_step_idx = max(0, min(total_plan - 1, len(completed_steps) // 3)) if completed_steps else 0
+    else:
+        current_step_idx = max(0, min(int(current_step_idx), total_plan - 1))
+
+    pct = _compute_monotonic_progress_pct(
+        current_step_idx,
+        total_plan,
+        False,
+        len(completed_steps),
+        min_pct=int(min_pct or 0),
+    )
+    filled = max(1, min(9, int(round((pct / 100.0) * 10))))
     block_bar = ("■" * filled) + ("□" * (10 - filled))
+    stage_str = f"阶段 {current_step_idx + 1}/{total_plan}"
 
     elements = [
         {
             "tag": "markdown",
             "content": sanitize_feishu_markdown(
                 f"⏸️ **任务阶段性截停保护（已自动重试 1 次仍超出预算）**\n"
-                f"📊 **阶段进度**：`{block_bar}` **{pct}%** · 已执行 {len(completed_steps)} 步 · 耗时 {time_str}\n\n"
+                f"📊 **阶段进度**：`{block_bar}` **{pct}%** · {stage_str} · 已调用 {len(completed_steps)} 次工具 · 耗时 {time_str}\n\n"
                 f"- **当前指令**：`{short_q}`\n"
                 f"- **截停原因**：{reason or '单轮工具调用步数或耗时达到预算上限'}"
                 + (f"\n- **范围契约**：{scope_label}" if scope_label else "")
@@ -223,23 +256,40 @@ def build_budget_pause_card(
     ]
 
     if planned_steps:
-        plan_lines = ["**📋 任务规划进度**："]
-        for i, st in enumerate(planned_steps[:6], 1):
-            done_mark = "✅" if i <= max(1, min(len(planned_steps) - 1, len(completed_steps) // 3)) else "⏳"
-            plan_lines.append(f"{done_mark} {i}. {st}")
+        plan_lines = [f"**📋 任务规划与执行清单 (第 {current_step_idx + 1}/{total_plan} 阶段)**："]
+        for i, raw_step in enumerate(planned_steps):
+            step = raw_step.strip()
+            core = re.sub(r'^[•\-\*\s✅⏳⏸️⚪\d\.\、\[\]]+\s*', '', step).strip()
+            core = re.sub(r'^(?:正在执行|正在运行|正在|已执行|已运行|已)\s*', '', core).strip()
+            if i < current_step_idx:
+                completed_text = f"已{core}" if not core.startswith("已") else core
+                plan_lines.append(f"• ✅ **{i + 1}. {completed_text}**")
+            elif i == current_step_idx:
+                active_text = f"正在{core}" if not core.startswith("正在") else core
+                if resumed_status == "continued":
+                    plan_lines.append(f"• ⏳ **{i + 1}. {active_text}**")
+                else:
+                    plan_lines.append(f"• ⏸️ **{i + 1}. {active_text}** *(当前阶段暂停)*")
+            else:
+                plan_lines.append(f"• ⚪ {i + 1}. {core}")
         elements.append({"tag": "markdown", "content": sanitize_feishu_markdown("\n".join(plan_lines))})
 
     if completed_steps:
-        from cards.indicators import _collapse_consecutive_steps, format_step_item
         collapsed_all = _collapse_consecutive_steps(completed_steps)
         recent_steps = collapsed_all[-6:]
-        step_lines = [format_step_item(s, False) for s in recent_steps]
+        step_lines = []
+        for s_lbl, cnt in recent_steps:
+            formatted = format_step_item(s_lbl, is_completed=True, max_len=36)
+            if cnt > 1:
+                formatted += f" `(×{cnt})`"
+            step_lines.append(formatted)
         if len(collapsed_all) > 6:
-            step_lines.insert(0, f"*(前序已完成 {len(completed_steps)} 次工具调用已归档至项目记忆胶囊...)*")
+            hidden_cnt = sum(c for _, c in collapsed_all[:-6])
+            step_lines.insert(0, f"*(前序已完成 {hidden_cnt} 次底层操作已归档至项目记忆胶囊...)*")
         elements.append(
             {
                 "tag": "markdown",
-                "content": sanitize_feishu_markdown("**🔧 最近已完成操作轨迹**：\n" + "\n".join(step_lines)),
+                "content": sanitize_feishu_markdown(f"**🔧 最近已完成操作轨迹 (共 {len(completed_steps)} 步)**：\n" + "\n".join(step_lines)),
             }
         )
 

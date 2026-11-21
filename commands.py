@@ -1333,8 +1333,16 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 
     elif first_word == "/agyplugin":
         import shlex
-        is_mcp = False
-        sub_root = "plugin"
+        from utils.agy_plugin_manager import (
+            import_agy_plugins,
+            install_agy_plugin,
+            list_agy_plugins,
+            run_raw_agy_plugin_cli,
+            set_agy_plugin_enabled,
+            uninstall_agy_plugin,
+            validate_agy_plugin,
+        )
+
         raw_args = user_text[len(first_word):].strip()
         try:
             parsed_args = shlex.split(raw_args) if raw_args else ["list"]
@@ -1345,11 +1353,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             return True, user_text
 
         sub_action = parsed_args[0].lower()
-        allowed_subs = (
-            {"list", "add", "remove", "enable", "disable", "help"}
-            if is_mcp
-            else {"list", "validate", "install", "uninstall", "enable", "disable", "import", "help"}
-        )
+        allowed_subs = {"list", "panel", "validate", "install", "uninstall", "enable", "disable", "import", "help"}
         if sub_action not in allowed_subs:
             await asyncio.get_running_loop().run_in_executor(
                 None,
@@ -1360,63 +1364,260 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             )
             return True, user_text
 
-        read_only_subs = {"list", "validate", "help"}
-        if sub_action not in read_only_subs and not is_admin(chat_id):
+        proj = str(session_data.get("project") or "").strip()
+        ws_dir = proj if (proj and proj not in ("默认", "Default") and os.path.isdir(proj)) else os.getcwd()
+        admin_flag = is_admin(chat_id)
+
+        # Open interactive card for `/agyplugin`, `/agyplugin list`, `/agyplugin panel`, or bare `/agyplugin install|import|validate`
+        if sub_action in ("list", "panel") or (sub_action in ("install", "import") and len(parsed_args) == 1):
+            target_tab = "install" if sub_action in ("install", "import") else "list"
+            plugins, err = await list_agy_plugins(workspace_dir=ws_dir)
+            card = CardBuilder.build_agy_plugin_panel_card(
+                plugins,
+                active_tab=target_tab,
+                is_admin_user=admin_flag,
+                workspace_dir=ws_dir,
+                error_msg=err or "",
+            )
             await asyncio.get_running_loop().run_in_executor(
-                None, lambda: send_reply_sdk(message_id, f"🔒 `/{sub_root} {sub_action}` 修改操作仅管理员可用。")
+                None, lambda: send_interactive_card_sdk(message_id, card)
             )
             return True, user_text
 
-        bin_path = config.ANTIGRAVITY_BIN or config.find_antigravity_bin()
-        if not bin_path:
+        if sub_action == "help":
+            ok, out_text = await run_raw_agy_plugin_cli(parsed_args)
+            icon = "ℹ️" if ok else "⚠️"
             await asyncio.get_running_loop().run_in_executor(
-                None, lambda: send_reply_sdk(message_id, "❌ 未找到 `agy` 可执行文件。")
+                None, lambda: send_reply_sdk(message_id, f"{icon} **Antigravity 原生插件帮助**\n\n```\n{out_text[:2500]}\n```")
             )
             return True, user_text
 
-        cli_argv = [bin_path, sub_root] + parsed_args
-        if not is_mcp and sub_action == "list" and "--json" not in parsed_args:
-            cli_argv.append("--json")
+        read_only_subs = {"list", "panel", "validate", "help"}
+        if sub_action not in read_only_subs and not admin_flag:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"🔒 `/agyplugin {sub_action}` 修改操作仅管理员可用。")
+            )
+            return True, user_text
 
+        target_arg = parsed_args[1].strip() if len(parsed_args) >= 2 else ""
+        needs_reload = False
+        if sub_action == "validate":
+            strict_flag = "--strict" in parsed_args
+            eff_target = target_arg if (target_arg and not target_arg.startswith("-")) else ws_dir
+            ok, msg = await validate_agy_plugin(eff_target, strict=strict_flag)
+            notice_level = "success" if ok else "warning"
+        elif sub_action in ("enable", "disable"):
+            ok, msg = await set_agy_plugin_enabled(target_arg, enabled=(sub_action == "enable"))
+            needs_reload = ok
+            notice_level = "success" if ok else "error"
+        elif sub_action == "install":
+            ok, msg = await install_agy_plugin(target_arg)
+            needs_reload = ok
+            notice_level = "success" if ok else "error"
+        elif sub_action == "uninstall":
+            ok, msg = await uninstall_agy_plugin(target_arg)
+            needs_reload = ok
+            notice_level = "success" if ok else "error"
+        elif sub_action == "import":
+            ok, msg = await import_agy_plugins(target_arg or "claude")
+            needs_reload = ok
+            notice_level = "success" if ok else "error"
+        else:
+            ok, msg = await run_raw_agy_plugin_cli(parsed_args)
+            needs_reload = ok
+            notice_level = "success" if ok else "error"
+
+        plugins, list_err = await list_agy_plugins(workspace_dir=ws_dir)
+        card = CardBuilder.build_agy_plugin_panel_card(
+            plugins,
+            active_tab="list",
+            notice=msg[:360] if msg else f"已执行 `/agyplugin {sub_action}`",
+            notice_level=notice_level,
+            needs_session_reload=needs_reload,
+            is_admin_user=admin_flag,
+            workspace_dir=ws_dir,
+            error_msg=list_err or "",
+        )
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: send_interactive_card_sdk(message_id, card)
+        )
+        return True, user_text
+
+    elif first_word in ("/skills", "/skill"):
+        import shlex
+        from utils.skill_manager import (
+            install_skill_from_source,
+            list_skills,
+            remove_custom_skill,
+            set_skill_enabled,
+        )
+
+        raw_args = user_text[len(first_word):].strip()
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cli_argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            parsed_args = shlex.split(raw_args) if raw_args else ["list"]
+        except ValueError as ve:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"❌ 参数解析失败：{ve}")
             )
-            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=25.0)
-            raw_out = (out_b or b"").decode("utf-8", errors="replace").strip()
-            raw_err = (err_b or b"").decode("utf-8", errors="replace").strip()
-            ansi_re = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-            clean_out = ansi_re.sub("", raw_out)
-            clean_err = ansi_re.sub("", raw_err)
+            return True, user_text
 
-            if not is_mcp and sub_action == "list" and proc.returncode == 0 and clean_out.startswith("["):
-                try:
-                    items = json.loads(clean_out)
-                    if not items:
-                        body = "当前尚未安装任何 `agy` 原生插件。"
-                    else:
-                        lines = [
-                            f"• `{it.get('name', '?')}` (`v{it.get('version', '-')}`) — {'✅ 已启用' if it.get('enabled', True) else '⏸️ 已停用'}"
-                            for it in items[:30]
-                        ]
-                        body = "\n".join(lines)
-                except Exception:
-                    body = f"```\n{clean_out[:2500]}\n```"
+        sub_action = parsed_args[0].lower()
+        allowed_subs = {
+            "list", "panel", "add", "new", "create", "search",
+            "use", "pin", "unuse", "unpin", "clear",
+            "enable", "disable", "install", "remove", "delete", "help",
+        }
+        proj = str(session_data.get("project") or "").strip()
+        ws_dir = proj if (proj and proj not in ("默认", "Default") and os.path.isdir(proj)) else os.getcwd()
+        admin_flag = is_admin(chat_id)
+        pinned = [str(x).strip() for x in (session_data.get("active_skills") or []) if str(x).strip()]
+
+        # If user passed `/skills <keyword>` where keyword is not a subcommand, treat as search query
+        if sub_action not in allowed_subs:
+            search_q = raw_args.strip()
+            skills = list_skills(workspace_dir=ws_dir, search_query=search_q)
+            card = CardBuilder.build_skill_panel_card(
+                skills,
+                active_tab="list",
+                search_query=search_q,
+                pinned_skills=pinned,
+                notice=f"已按关键词「`{search_q}`」过滤技能库",
+                notice_level="info",
+                is_admin_user=admin_flag,
+                workspace_dir=ws_dir,
+            )
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_interactive_card_sdk(message_id, card)
+            )
+            return True, user_text
+
+        if sub_action == "help":
+            help_txt = (
+                "🧠 **Antigravity Skills 技能管理指令帮助**\n\n"
+                "• `/skills` 或 `/skills list` — 打开交互式技能管理中心\n"
+                "• `/skills add` — 打开新建 / GitHub 安装技能表单面板\n"
+                "• `/skills search <关键词>` — 按关键词过滤技能库\n"
+                "• `/skills use <技能名>` — 将指定技能显式挂载到当前会话\n"
+                "• `/skills unuse <技能名>` — 取消当前会话对该技能的挂载\n"
+                "• `/skills clear` — 清空当前会话挂载的所有技能\n"
+                "• `/skills enable|disable <技能名>` — 启用或禁用工作区/全局技能（管理员）\n"
+                "• `/skills install <GitHub URL或本地目录> [global|workspace]` — 安装技能（管理员）\n"
+                "• `/skills remove <技能名>` — 移除自定义技能（管理员）"
+            )
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, help_txt)
+            )
+            return True, user_text
+
+        if sub_action in ("list", "panel") or sub_action in ("add", "new", "create") or (sub_action == "install" and len(parsed_args) == 1):
+            target_tab = "add" if sub_action in ("add", "new", "create", "install") else "list"
+            skills = list_skills(workspace_dir=ws_dir)
+            card = CardBuilder.build_skill_panel_card(
+                skills,
+                active_tab=target_tab,
+                pinned_skills=pinned,
+                is_admin_user=admin_flag,
+                workspace_dir=ws_dir,
+            )
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_interactive_card_sdk(message_id, card)
+            )
+            return True, user_text
+
+        if sub_action == "search":
+            search_q = " ".join(parsed_args[1:]).strip()
+            skills = list_skills(workspace_dir=ws_dir, search_query=search_q)
+            card = CardBuilder.build_skill_panel_card(
+                skills,
+                active_tab="list",
+                search_query=search_q,
+                pinned_skills=pinned,
+                notice=f"已按关键词「`{search_q}`」过滤技能库" if search_q else "已显示全部技能",
+                notice_level="info",
+                is_admin_user=admin_flag,
+                workspace_dir=ws_dir,
+            )
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_interactive_card_sdk(message_id, card)
+            )
+            return True, user_text
+
+        if sub_action in ("use", "pin", "unuse", "unpin", "clear"):
+            if sub_action == "clear":
+                pinned = []
+                notice_msg = "已清空当前会话显式挂载的所有技能"
             else:
-                combined = "\n".join(x for x in (clean_out, clean_err) if x).strip() or "(无输出)"
-                body = f"```\n{combined[:2500]}\n```"
+                target_sk = parsed_args[1].strip() if len(parsed_args) >= 2 else ""
+                if not target_sk:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: send_reply_sdk(message_id, f"❌ 请指定技能名称，例如：`/skills {sub_action} python-pro`")
+                    )
+                    return True, user_text
+                if sub_action in ("use", "pin"):
+                    if target_sk.lower() not in {p.lower() for p in pinned}:
+                        pinned.append(target_sk)
+                    notice_msg = f"已将技能 `{target_sk}` 挂载到当前会话"
+                else:
+                    pinned = [p for p in pinned if p.lower() != target_sk.lower()]
+                    notice_msg = f"已取消挂载技能 `{target_sk}`"
+            session_data["active_skills"] = pinned
+            await save_session_async(chat_id, session_data)
+            skills = list_skills(workspace_dir=ws_dir)
+            card = CardBuilder.build_skill_panel_card(
+                skills,
+                active_tab="list",
+                pinned_skills=pinned,
+                notice=notice_msg,
+                notice_level="success",
+                is_admin_user=admin_flag,
+                workspace_dir=ws_dir,
+            )
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_interactive_card_sdk(message_id, card)
+            )
+            return True, user_text
 
-            icon = "✅" if proc.returncode == 0 else "⚠️"
-            title = "MCP 服务管理" if is_mcp else "Antigravity 原生插件管理"
-            reply_msg = f"{icon} **{title}** (`agy {sub_root} {' '.join(parsed_args)}`)\n\n{body}"
-        except asyncio.TimeoutError:
-            reply_msg = f"⏱️ 执行 `agy {sub_root} {sub_action}` 超时（25s）。"
-        except Exception as e:
-            reply_msg = f"❌ 执行 `agy {sub_root}` 异常：{e}"
+        if not admin_flag:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"🔒 `/skills {sub_action}` 修改操作仅管理员可用。")
+            )
+            return True, user_text
 
-        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_msg))
+        target_arg = parsed_args[1].strip() if len(parsed_args) >= 2 else ""
+        if not target_arg:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: send_reply_sdk(message_id, f"❌ 请提供参数，例如：`/skills {sub_action} <技能名或URL>`")
+            )
+            return True, user_text
+
+        if sub_action in ("enable", "disable"):
+            ok, msg = set_skill_enabled(target_arg, enabled=(sub_action == "enable"), workspace_dir=ws_dir)
+        elif sub_action == "install":
+            inst_scope = parsed_args[2].lower() if (len(parsed_args) >= 3 and parsed_args[2].lower() in ("workspace", "global")) else "global"
+            ok, msg = await install_skill_from_source(target_arg, scope=inst_scope, workspace_dir=ws_dir)
+        elif sub_action in ("remove", "delete"):
+            ok, msg = remove_custom_skill(target_arg, workspace_dir=ws_dir)
+            if ok and any(p.lower() == target_arg.lower() for p in pinned):
+                pinned = [p for p in pinned if p.lower() != target_arg.lower()]
+                session_data["active_skills"] = pinned
+                await save_session_async(chat_id, session_data)
+        else:
+            ok, msg = False, f"未知操作：`{sub_action}`"
+
+        skills = list_skills(workspace_dir=ws_dir)
+        card = CardBuilder.build_skill_panel_card(
+            skills,
+            active_tab="list",
+            pinned_skills=pinned,
+            notice=msg,
+            notice_level="success" if ok else "error",
+            needs_session_reload=ok,
+            is_admin_user=admin_flag,
+            workspace_dir=ws_dir,
+        )
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: send_interactive_card_sdk(message_id, card)
+        )
         return True, user_text
 
     # Dispatch command to plugin manager

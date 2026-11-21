@@ -19,7 +19,7 @@ DEFAULT_SYSTEM_COMMANDS = [
     "/status", "/context", "/quota", "/clear", "/stop", "/update", "/ping",
     "/newproj_resolve", "/cron", "/schedule", "/plugin", "/plugins", "/pluginreload",
     "/user", "/brain", "/auth", "/s1", "/sys1", "/system1",
-    "/mode", "/adddir", "/add-dir", "/steer", "/transport", "/mcp", "/agyplugin",
+    "/mode", "/adddir", "/add-dir", "/steer", "/transport", "/mcp", "/agyplugin", "/skills", "/skill",
 ]
 
 

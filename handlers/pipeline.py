@@ -600,10 +600,10 @@ async def _process_single_task(chat_id, task):
                 log.warning(f"[TypeSafe FastPath] Home Assistant dispatch failed: {e}")
 
     # Plugin fast paths above do not need an agent process.
-    # Scheme C: 0ms pre-flight circuit breaker — if the selected model recently hit 503 No capacity,
-    # automatically switch to a healthy cross-family fallback model and relay tainted conversation context.
+    # Scheme C: 0ms pre-flight circuit breaker — only auto-switches when AUTO_FALLBACK_ON_CAPACITY_ERROR is explicitly enabled.
+    # By default (AUTO_FALLBACK_ON_CAPACITY_ERROR=False), we respect the user's selected model and pop up an interactive choice card if 503 occurs.
     try:
-        if getattr(config, "AUTO_FALLBACK_ON_CAPACITY_ERROR", True) and selected_model:
+        if getattr(config, "AUTO_FALLBACK_ON_CAPACITY_ERROR", False) and selected_model:
             from utils.model_health import is_model_circuit_open, pick_healthy_fallback_model
             if is_model_circuit_open(selected_model):
                 fallback_model = pick_healthy_fallback_model(selected_model, preferred_tier=selected_effort)
@@ -941,6 +941,18 @@ async def _process_single_task(chat_id, task):
         except Exception as e:
             log.warning(f"[Pipeline] Memory recall injection failed: {e}")
 
+        # 注入当前会话显式挂载激活的 Antigravity Skills (/skills use <name>)
+        active_skills_list = session_data.get("active_skills") or []
+        if active_skills_list:
+            try:
+                from utils.skill_manager import build_active_skills_prompt_block
+                ws_for_skills = current_proj if (current_proj and current_proj not in ("默认", "Default") and os.path.isdir(current_proj)) else config.BASE_DIR
+                skills_block = build_active_skills_prompt_block(active_skills_list, workspace_dir=ws_for_skills)
+                if skills_block:
+                    system_instruction += skills_block
+            except Exception as sk_err:
+                log.debug(f"[Pipeline] Active skills prompt block injection skipped: {sk_err}")
+
         # 注入用户备忘录 Notes (常规非敏感笔记多轮常驻防遗忘；高危服务器凭证维持 JIT 按需挂载)
         notes_section = _build_turn_notes_block(
             session_data.get("notes", []),
@@ -1016,9 +1028,38 @@ async def _process_single_task(chat_id, task):
     except Exception as e:
         log.debug(f"[HMDM] Post-turn state update skipped: {e}")
 
+    is_paused = bool(session_data.get("last_execution_paused", False))
     if is_error:
         await set_emoji(message_id, "CrossMark")
+    elif is_paused:
+        pause_reaction_id = await set_emoji(message_id, "PAUSE")
+        if pause_reaction_id and message_id:
+            session_data["_paused_message_reaction"] = {
+                "message_id": message_id,
+                "reaction_id": pause_reaction_id,
+            }
+            try:
+                await save_session_async(chat_id, session_data)
+            except Exception:
+                pass
     else:
+        prev_pause_react = session_data.pop("_paused_message_reaction", None)
+        if isinstance(prev_pause_react, dict) and prev_pause_react.get("message_id"):
+            prev_mid = prev_pause_react["message_id"]
+            prev_rid = prev_pause_react.get("reaction_id")
+            if prev_rid:
+                try:
+                    await app_state.run_feishu_sync(
+                        loop, lambda: delete_emoji_sdk(prev_mid, prev_rid)
+                    )
+                except Exception:
+                    pass
+            if prev_mid != message_id:
+                await set_emoji(prev_mid, "DONE")
+            try:
+                await save_session_async(chat_id, session_data)
+            except Exception:
+                pass
         await set_emoji(message_id, "DONE")
 
 
@@ -1030,7 +1071,11 @@ async def set_emoji(message_id, emoji_type):
     mapping = {
         "StatusReading": "Typing",
         "CrossMark": "CrossMark",
-        "DONE": "DONE"
+        "DONE": "DONE",
+        "PAUSE": "PAUSE",
+        "Pause": "PAUSE",
+        "⏸️": "PAUSE",
+        "⏸": "PAUSE",
     }
     mapped_type = mapping.get(emoji_type, emoji_type)
     

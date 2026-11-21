@@ -225,7 +225,7 @@ _HELP_STATIC_COMMANDS = {
     "/model", "/card", "/menu", "/context", "/memory", "/brain", "/clear",
     "/project", "/adddir", "/add-dir", "/mode", "/note", "/notes", "/cron",
     "/schedule", "/quota", "/status", "/steer", "/plugin", "/plugins",
-    "/pluginreload", "/mcp", "/agyplugin", "/stop", "/s1", "/sys1", "/system1",
+    "/pluginreload", "/mcp", "/agyplugin", "/skills", "/skill", "/stop", "/s1", "/sys1", "/system1",
     "/ping", "/update", "/help", "/user", "/auth", "/transport",
 }
 
@@ -276,8 +276,9 @@ def build_help_card(is_admin_user: bool = False, plugins=None):
                 "⚡ **系统管理、ACP 与生态扩展：**\n"
                 "• `/steer <追加内容>` : 向运行中的 ACP 会话排队追加指令（当前回合结束后自动续跑，无需 `/stop`）\n"
                 "• `/plugin [reload]` : 管理**机器人扩展插件**（查看、启停与热重载）\n"
-                "• `/mcp [list|enable|disable|remove|add ...]` : 管理 `agy` 原生 MCP 服务\n"
-                "• `/agyplugin [list|validate|install|enable|disable|uninstall ...]` : 管理 `agy` 原生 CLI 插件\n"
+                "• `/skills [list|add|search|use|unuse|enable|disable|install ...]` : 弹出 Antigravity Skills 技能管理中心（支持浏览、搜索、会话挂载、启停、在线创建与 GitHub 安装）\n"
+                "• `/agyplugin [list|install|validate|enable|disable|uninstall|import ...]` : 弹出 `agy` 原生 CLI 插件交互式管理中心\n"
+                "• `/mcp [list|enable|disable|remove|add ...]` : 弹出 `agy` 原生 MCP 服务管理中心\n"
                 "• `/stop` : 中止当前会话中正在执行的后台任务\n"
                 "• `/s1` : 打开 System One 决策网关控制台\n"
                 "• `/ping` : 检测机器人在线状态与响应连通性\n"
@@ -345,6 +346,24 @@ def build_help_card(is_admin_user: bool = False, plugins=None):
                     "text": {"tag": "plain_text", "content": "🤖 切换模型"},
                     "type": "default",
                     "value": {"action": "user_choice", "choice": "/model", "label": "切换模型"}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🧠 技能中心"},
+                    "type": "default",
+                    "value": {"action": "user_choice", "choice": "/skills", "label": "技能中心"}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔌 原生插件"},
+                    "type": "default",
+                    "value": {"action": "user_choice", "choice": "/agyplugin", "label": "原生插件"}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🛠️ MCP 服务"},
+                    "type": "default",
+                    "value": {"action": "user_choice", "choice": "/mcp", "label": "MCP 服务"}
                 },
                 {
                     "tag": "button",

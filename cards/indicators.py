@@ -333,11 +333,15 @@ def generate_task_plan(user_text: str) -> list[str]:
 def _classify_action_phase(action: str) -> str:
     """Classify a tool action into one of 4 execution phases: explore | implement | verify | deliver."""
     act = (action or "").lower()
-    if any(k in act for k in ["推送代码", "git push", "提交 git", "git commit", "重载后台服务", "部署", "发送", "上传", "导出"]):
+    if any(k in act for k in ["推送代码", "git push", "提交 git", "git commit", "重载后台服务", "部署", "发送", "上传", "导出", "deploy", "deliver"]):
         return "deliver"
-    if any(k in act for k in ["测试", "unittest", "pytest", "语法", "py_compile", "编译", "构建", "校验", "验证"]):
+    if any(k in act for k in ["测试", "unittest", "pytest", "语法", "py_compile", "编译", "构建", "校验", "验证", "unit test", "test suite", "verify", "compile"]):
         return "verify"
-    if any(k in act for k in ["编辑文件", "写入文件", "修改文件", "生成", "创建", "重构", "执行脚本", "python 分析", "python 处理", "python 脚本", "远程连接"]):
+    if any(k in act for k in [
+        "编辑文件", "写入文件", "修改文件", "生成", "创建", "重构", "执行脚本",
+        "python 分析", "python 处理", "python 脚本", "远程连接",
+        "edit ", "write ", "modify ", "update ", "create ", "executing file", "正在执行 file",
+    ]):
         return "implement"
     return "explore"
 
@@ -500,7 +504,16 @@ def build_planned_steps_indicator(
     planned_steps = planned_steps[:MAX_PLANNED_STEPS]
     total = len(planned_steps)
     current_step_idx = max(0, min(current_step_idx, total - 1))
-    total_tools_run = len(completed_steps) + (1 if (tool_action and not is_all_completed) else 0)
+    _is_synthetic_resume_action = bool(
+        tool_action
+        and (
+            tool_action in ("继续推进剩余步骤", "正在推进任务")
+            or "次收敛接力" in str(tool_action)
+        )
+    )
+    total_tools_run = len(completed_steps) + (
+        0 if (_is_synthetic_resume_action or is_all_completed or not tool_action) else 1
+    )
 
     progress_bar_line = _build_visual_progress_bar(
         current_step_idx, total, is_all_completed, total_tools_run, think_seconds, min_pct=min_pct
