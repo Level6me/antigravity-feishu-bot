@@ -243,7 +243,7 @@ async def restore_pending_tasks():
     from card_builder import CardBuilder
     from lark_client import send_interactive_card_sdk, patch_interactive_card_sdk
 
-    tasks = load_pending_tasks()
+    tasks = await asyncio.get_running_loop().run_in_executor(None, load_pending_tasks)
     if not tasks:
         return
 
@@ -257,7 +257,7 @@ async def restore_pending_tasks():
 
         if retry_count >= 2:
             # 连续多次重启仍然失败的任务，丢弃以防崩溃循环，并发送友好卡片通知
-            delete_pending_task(chat_id, created_at)
+            await loop.run_in_executor(None, lambda c=chat_id, ts=created_at: delete_pending_task(c, ts))
             log.warning(f"[restore] Task for chat {chat_id} (msg {message_id}) exceeded max retry count ({retry_count}), dropping.")
             err_card = CardBuilder.build_ai_response(
                 "⚠️ **任务未能恢复**\n\n该任务在执行过程中导致服务异常重启超过上限，系统已自动保护并终止该任务。如需继续请重新发送指令。",
@@ -276,7 +276,7 @@ async def restore_pending_tasks():
         task["created_at"] = created_at
         task["retry_count"] = retry_count + 1
         task["resumed"] = True
-        save_pending_task(chat_id, task)
+        await loop.run_in_executor(None, lambda c=chat_id, t=dict(task): save_pending_task(c, t))
         recovered.setdefault(chat_id, []).append(task)
 
     total = 0
@@ -297,7 +297,12 @@ _shutdown_in_progress = False
 
 def _kill_tracked_subprocesses_snapshot():
     """Safely terminate all tracked subprocess groups over a snapshot copy without logging reentrancy."""
-    for process in list(app_state.running_processes.values()):
+    procs = (
+        app_state.snapshot_all_tracked_subprocesses()
+        if hasattr(app_state, "snapshot_all_tracked_subprocesses")
+        else list(app_state.running_processes.values())
+    )
+    for process in procs:
         if not process:
             continue
         try:

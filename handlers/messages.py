@@ -55,7 +55,14 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw, s
                 log.warning(f"[handle_message_async] Failed to send fallback error reply: {reply_err}")
 
 
-async def _handle_message_async_internal(message_id, chat_id, message_type, content_raw, sender_open_id=""):
+async def _handle_message_async_internal(
+    message_id,
+    chat_id,
+    message_type,
+    content_raw,
+    sender_open_id="",
+    trusted_internal_resume: bool = False,
+):
     loop = asyncio.get_running_loop()
     bot_reply_msg_id = None
 
@@ -122,7 +129,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
 
     # 辅助任务分发函数：入队与 worker 启动必须在同一事件循环 tick 内无 await 原子完成，
     # 彻底杜绝 send_reply_sdk 网络等待期间旧 worker 退出 pop(chat_queues) 引发 KeyError 或任务无人消费卡死！
-    async def dispatch_task(c_id, msg_id, m_type, c_json, c_raw, r_text):
+    async def dispatch_task(c_id, msg_id, m_type, c_json, c_raw, r_text, is_trusted_resume: bool = False):
         queue = chat_queues.get(c_id)
         if queue is None:
             queue = asyncio.Queue()
@@ -131,18 +138,23 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         worker_was_active = bool(c_id in chat_workers and not chat_workers[c_id].done())
         ahead_count = queue.qsize() + (1 if worker_was_active else 0)
 
-        task_payload = {
+        created_ts = allocate_pending_task_ts()
+        db_task_payload = {
             "message_id": msg_id,
             "message_type": m_type,
             "content_json": c_json,
             "content_raw": c_raw,
             "raw_text": r_text,
             "sender_open_id": sender_open_id or "",
-            "created_at": allocate_pending_task_ts(),
+            "created_at": created_ts,
         }
+        mem_task_payload = dict(db_task_payload)
+        if is_trusted_resume:
+            mem_task_payload["_trusted_internal_resume"] = True
+            mem_task_payload["is_continuation"] = True
 
-        queue.put_nowait(task_payload)
-        save_pending_task(c_id, task_payload)
+        queue.put_nowait(mem_task_payload)
+        save_pending_task(c_id, db_task_payload)
         if not worker_was_active:
             chat_workers[c_id] = asyncio.create_task(process_chat_queue(c_id))
 
@@ -153,50 +165,72 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                 active_sess = session_pool.get_active_session(c_id)
                 if active_sess and getattr(active_sess, "transport_name", "") == "acp" and active_sess.is_turn_running():
                     steer_hint = "\n💡 提示：当前会话运行在 ACP 引擎下，如需在当前回合结束后自动续接补充指令，也可发送 `/steer <追加指令>`（不会立即中断当前步骤，立即打断请用 `/stop`）。"
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug(f"[messages] check acp steer hint skipped: {e}")
             warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {ahead_count} 个任务)...{steer_hint}"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(msg_id, warning_msg))
 
-    # 方案四：多模态多图合并批处理防抖机制
+    # 方案四：多模态多图合并批处理防抖机制（防抖等待期同步写入 staging pending_task，杜绝 3s 窗口重启丢消息）
     if message_type in ["image", "file", "audio", "media"]:
+        from database import delete_pending_task
         if chat_id not in chat_media_batches:
             chat_media_batches[chat_id] = {
                 "items": [],
+                "staging_ts": [],
                 "timer_task": None
             }
             
         batch = chat_media_batches[chat_id]
+        staging_ts = allocate_pending_task_ts()
+        save_pending_task(chat_id, {
+            "message_id": message_id,
+            "message_type": message_type,
+            "content_json": content_json,
+            "content_raw": content_raw,
+            "raw_text": raw_text,
+            "sender_open_id": sender_open_id or "",
+            "created_at": staging_ts,
+        })
+        batch["staging_ts"].append(staging_ts)
         batch["items"].append({
             "message_id": message_id,
             "message_type": message_type,
             "content_json": content_json,
-            "content_raw": content_raw
+            "content_raw": content_raw,
+            "raw_text": raw_text,
         })
         
         if batch["timer_task"] and not batch["timer_task"].done():
             batch["timer_task"].cancel()
             
-        async def delay_dispatch():
+        async def delay_dispatch(target_batch=batch):
             try:
                 # Dynamic debounce: 1.5s + 0.1s per item, up to 3.0s max
-                delay = min(1.5 + len(batch["items"]) * 0.1, 3.0)
+                delay = min(1.5 + len(target_batch["items"]) * 0.1, 3.0)
                 await asyncio.sleep(delay)
-                items = batch["items"]
-                chat_media_batches.pop(chat_id, None)
+                items = list(target_batch["items"])
+                staged_list = list(target_batch.get("staging_ts", []))
+                if chat_media_batches.get(chat_id) is target_batch:
+                    chat_media_batches.pop(chat_id, None)
                 
                 if len(items) == 1:
                     single = items[0]
                     await dispatch_task(
                         chat_id, single["message_id"], single["message_type"], 
-                        single["content_json"], single["content_raw"], raw_text
+                        single["content_json"], single["content_raw"], single.get("raw_text", "")
                     )
-                else:
+                elif items:
                     target_msg_id = items[-1]["message_id"]
+                    clean_items = [
+                        {k: v for k, v in it.items() if k != "raw_text"}
+                        for it in items
+                    ]
                     await dispatch_task(
                         chat_id, target_msg_id, "batch_media", 
-                        {"items": items}, "", ""
+                        {"items": clean_items}, "", ""
                     )
+                for old_ts in staged_list:
+                    delete_pending_task(chat_id, old_ts)
             except asyncio.CancelledError:
                 pass
                 
@@ -204,4 +238,7 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         return
         
     # 普通非媒体消息直接分发
-    await dispatch_task(chat_id, message_id, message_type, content_json, content_raw, raw_text)
+    await dispatch_task(
+        chat_id, message_id, message_type, content_json, content_raw, raw_text,
+        is_trusted_resume=trusted_internal_resume,
+    )

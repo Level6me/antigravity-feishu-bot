@@ -19,125 +19,124 @@ def get_db():
     try:
         conn.execute('PRAGMA busy_timeout=5000')
         conn.execute('PRAGMA synchronous=NORMAL')
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug(f"[database] PRAGMA setup skipped: {e}")
     return conn
 
 def init_db():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('PRAGMA journal_mode=WAL')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_sessions (
-            chat_id TEXT PRIMARY KEY,
-            data JSON NOT NULL
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_profiles (
-            user_id TEXT PRIMARY KEY,
-            data JSON NOT NULL
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bot_meta (
-            key   TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS auth_sessions (
-            chat_id         TEXT PRIMARY KEY,
-            chat_type       TEXT NOT NULL DEFAULT 'p2p',
-            display_name    TEXT NOT NULL DEFAULT '',
-            sender_open_id  TEXT NOT NULL DEFAULT '',
-            role            TEXT NOT NULL DEFAULT 'guest',
-            scopes          TEXT NOT NULL DEFAULT '[]',
-            created_at      INTEGER NOT NULL DEFAULT 0,
-            updated_at      INTEGER NOT NULL DEFAULT 0,
-            granted_by      TEXT NOT NULL DEFAULT '',
-            request_count   INTEGER NOT NULL DEFAULT 0,
-            last_request_at INTEGER NOT NULL DEFAULT 0,
-            last_hint_at    INTEGER NOT NULL DEFAULT 0,
-            last_message    TEXT NOT NULL DEFAULT ''
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pending_tasks (
-            chat_id    TEXT NOT NULL,
-            task       TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            PRIMARY KEY (chat_id, created_at)
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS cron_tasks (
-            id           TEXT PRIMARY KEY,
-            chat_id      TEXT NOT NULL,
-            category     TEXT NOT NULL DEFAULT 'user',
-            name         TEXT NOT NULL,
-            task_type    TEXT NOT NULL DEFAULT 'cron',
-            action_type  TEXT NOT NULL DEFAULT 'reminder',
-            command      TEXT NOT NULL DEFAULT '',
-            cron_expr    TEXT NOT NULL,
-            prompt       TEXT NOT NULL,
-            project_path TEXT NOT NULL DEFAULT '',
-            is_active    INTEGER NOT NULL DEFAULT 1,
-            created_by   TEXT NOT NULL DEFAULT '',
-            created_at   INTEGER NOT NULL DEFAULT 0,
-            updated_at   INTEGER NOT NULL DEFAULT 0,
-            last_run_at  INTEGER NOT NULL DEFAULT 0,
-            next_run_at  INTEGER NOT NULL DEFAULT 0,
-            run_count    INTEGER NOT NULL DEFAULT 0
-        )
-    ''')
-    # Migrate existing cron_tasks schema if columns action_type / command are missing
-    for col_def in (
-        "action_type TEXT NOT NULL DEFAULT 'reminder'",
-        "command TEXT NOT NULL DEFAULT ''",
-    ):
-        try:
-            cursor.execute(f"ALTER TABLE cron_tasks ADD COLUMN {col_def}")
-        except sqlite3.OperationalError:
-            pass
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS cron_logs (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id      TEXT NOT NULL,
-            chat_id      TEXT NOT NULL DEFAULT '',
-            task_name    TEXT NOT NULL DEFAULT '',
-            task_type    TEXT NOT NULL DEFAULT 'cron',
-            action_type  TEXT NOT NULL DEFAULT 'reminder',
-            cron_expr    TEXT NOT NULL DEFAULT '',
-            prompt       TEXT NOT NULL DEFAULT '',
-            status       TEXT NOT NULL,
-            output       TEXT NOT NULL DEFAULT '',
-            error_msg    TEXT NOT NULL DEFAULT '',
-            duration_ms  INTEGER NOT NULL DEFAULT 0,
-            executed_at  INTEGER NOT NULL DEFAULT 0
-        )
-    ''')
-    for log_col_def in (
-        "chat_id TEXT NOT NULL DEFAULT ''",
-        "task_name TEXT NOT NULL DEFAULT ''",
-        "task_type TEXT NOT NULL DEFAULT 'cron'",
-        "action_type TEXT NOT NULL DEFAULT 'reminder'",
-        "cron_expr TEXT NOT NULL DEFAULT ''",
-        "prompt TEXT NOT NULL DEFAULT ''",
-    ):
-        try:
-            cursor.execute(f"ALTER TABLE cron_logs ADD COLUMN {log_col_def}")
-        except sqlite3.OperationalError:
-            pass
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS recent_messages (
-            message_id  TEXT PRIMARY KEY,
-            chat_id     TEXT NOT NULL,
-            create_time INTEGER NOT NULL
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    with closing(get_db()) as conn:
+        cursor = conn.cursor()
+        cursor.execute('PRAGMA journal_mode=WAL')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                chat_id TEXT PRIMARY KEY,
+                data JSON NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id TEXT PRIMARY KEY,
+                data JSON NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bot_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                chat_id         TEXT PRIMARY KEY,
+                chat_type       TEXT NOT NULL DEFAULT 'p2p',
+                display_name    TEXT NOT NULL DEFAULT '',
+                sender_open_id  TEXT NOT NULL DEFAULT '',
+                role            TEXT NOT NULL DEFAULT 'guest',
+                scopes          TEXT NOT NULL DEFAULT '[]',
+                created_at      INTEGER NOT NULL DEFAULT 0,
+                updated_at      INTEGER NOT NULL DEFAULT 0,
+                granted_by      TEXT NOT NULL DEFAULT '',
+                request_count   INTEGER NOT NULL DEFAULT 0,
+                last_request_at INTEGER NOT NULL DEFAULT 0,
+                last_hint_at    INTEGER NOT NULL DEFAULT 0,
+                last_message    TEXT NOT NULL DEFAULT ''
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pending_tasks (
+                chat_id    TEXT NOT NULL,
+                task       TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, created_at)
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cron_tasks (
+                id           TEXT PRIMARY KEY,
+                chat_id      TEXT NOT NULL,
+                category     TEXT NOT NULL DEFAULT 'user',
+                name         TEXT NOT NULL,
+                task_type    TEXT NOT NULL DEFAULT 'cron',
+                action_type  TEXT NOT NULL DEFAULT 'reminder',
+                command      TEXT NOT NULL DEFAULT '',
+                cron_expr    TEXT NOT NULL,
+                prompt       TEXT NOT NULL,
+                project_path TEXT NOT NULL DEFAULT '',
+                is_active    INTEGER NOT NULL DEFAULT 1,
+                created_by   TEXT NOT NULL DEFAULT '',
+                created_at   INTEGER NOT NULL DEFAULT 0,
+                updated_at   INTEGER NOT NULL DEFAULT 0,
+                last_run_at  INTEGER NOT NULL DEFAULT 0,
+                next_run_at  INTEGER NOT NULL DEFAULT 0,
+                run_count    INTEGER NOT NULL DEFAULT 0
+            )
+        ''')
+        # Migrate existing cron_tasks schema if columns action_type / command are missing
+        for col_def in (
+            "action_type TEXT NOT NULL DEFAULT 'reminder'",
+            "command TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                cursor.execute(f"ALTER TABLE cron_tasks ADD COLUMN {col_def}")
+            except sqlite3.OperationalError:
+                pass
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cron_logs (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id      TEXT NOT NULL,
+                chat_id      TEXT NOT NULL DEFAULT '',
+                task_name    TEXT NOT NULL DEFAULT '',
+                task_type    TEXT NOT NULL DEFAULT 'cron',
+                action_type  TEXT NOT NULL DEFAULT 'reminder',
+                cron_expr    TEXT NOT NULL DEFAULT '',
+                prompt       TEXT NOT NULL DEFAULT '',
+                status       TEXT NOT NULL,
+                output       TEXT NOT NULL DEFAULT '',
+                error_msg    TEXT NOT NULL DEFAULT '',
+                duration_ms  INTEGER NOT NULL DEFAULT 0,
+                executed_at  INTEGER NOT NULL DEFAULT 0
+            )
+        ''')
+        for log_col_def in (
+            "chat_id TEXT NOT NULL DEFAULT ''",
+            "task_name TEXT NOT NULL DEFAULT ''",
+            "task_type TEXT NOT NULL DEFAULT 'cron'",
+            "action_type TEXT NOT NULL DEFAULT 'reminder'",
+            "cron_expr TEXT NOT NULL DEFAULT ''",
+            "prompt TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                cursor.execute(f"ALTER TABLE cron_logs ADD COLUMN {log_col_def}")
+            except sqlite3.OperationalError:
+                pass
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS recent_messages (
+                message_id  TEXT PRIMARY KEY,
+                chat_id     TEXT NOT NULL,
+                create_time INTEGER NOT NULL
+            )
+        ''')
+        conn.commit()
 
 def migrate_from_json():
     with closing(get_db()) as conn:
@@ -167,7 +166,7 @@ def migrate_from_json():
 init_db()
 migrate_from_json()
 
-# 线程安全的会话锁缓存，设置有界淘汰上限，避免无限制增长造成内存泄漏
+# 事件循环隔离且线程安全的会话锁缓存，设置有界淘汰上限，避免跨事件循环绑定报错与内存泄漏
 _session_locks = {}
 _session_locks_guard = threading.Lock()
 _db_session_rw_lock = threading.RLock()
@@ -175,32 +174,64 @@ _auth_write_lock = threading.RLock()
 _profile_locks = {}
 _profile_locks_guard = threading.Lock()
 
+
+class SessionDict(dict):
+    """原生 dict 透明子类，额外携带 `_db_baseline` 快照供 `save_session_async` 自动执行三路原子合并。"""
+    def __init__(self, *args, _db_baseline=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._db_baseline = _db_baseline
+
+    def copy(self):
+        return SessionDict(
+            super().copy(),
+            _db_baseline=copy.deepcopy(self._db_baseline) if self._db_baseline is not None else None,
+        )
+
+    def __deepcopy__(self, memo):
+        plain_copy = {copy.deepcopy(k, memo): copy.deepcopy(v, memo) for k, v in self.items()}
+        base_copy = copy.deepcopy(self._db_baseline, memo) if self._db_baseline is not None else None
+        res = SessionDict(plain_copy, _db_baseline=base_copy)
+        memo[id(self)] = res
+        return res
+
+
+def _get_loop_key() -> int:
+    try:
+        return id(asyncio.get_running_loop())
+    except RuntimeError:
+        return 0
+
+
 def _get_session_lock(chat_id: str) -> asyncio.Lock:
+    compound_key = (_get_loop_key(), chat_id)
     with _session_locks_guard:
-        lock = _session_locks.get(chat_id)
+        lock = _session_locks.get(compound_key)
         if lock is None:
-            # 超过 2000 个会话时，主动清理未加锁的闲置对象
             if len(_session_locks) > 2000:
                 idle_keys = [k for k, l in _session_locks.items() if not l.locked()]
                 for k in idle_keys[:500]:
                     _session_locks.pop(k, None)
             lock = asyncio.Lock()
-            _session_locks[chat_id] = lock
+            _session_locks[compound_key] = lock
         return lock
 
+
 def _get_profile_lock(profile_key: str) -> asyncio.Lock:
+    compound_key = (_get_loop_key(), profile_key)
     with _profile_locks_guard:
-        lock = _profile_locks.get(profile_key)
+        lock = _profile_locks.get(compound_key)
         if lock is None:
             if len(_profile_locks) > 2000:
                 idle_keys = [k for k, l in _profile_locks.items() if not l.locked()]
                 for k in idle_keys[:500]:
                     _profile_locks.pop(k, None)
             lock = asyncio.Lock()
-            _profile_locks[profile_key] = lock
+            _profile_locks[compound_key] = lock
         return lock
 
+
 from config import DEFAULT_MODEL
+
 
 def _normalize_session_dict(raw_json: str) -> dict:
     try:
@@ -209,9 +240,12 @@ def _normalize_session_dict(raw_json: str) -> dict:
             data = {}
     except Exception:
         data = {}
+    # 防御清理历史可能误持久化的临时隔离池键
+    data.pop("_isolated_pool_key", None)
     if not data.get('model') or data.get('model') in ['Gemini 3.5 Flash', 'Gemini 3.5 Flash (Medium)']:
         data['model'] = DEFAULT_MODEL
     return data
+
 
 async def get_session_async(chat_id):
     async with _get_session_lock(chat_id):
@@ -221,56 +255,88 @@ async def get_session_async(chat_id):
             async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    return _normalize_session_dict(row['data'])
-                return {"conversation": "", "model": DEFAULT_MODEL, "role": "无", "project": "默认"}
+                    norm = _normalize_session_dict(row['data'])
+                else:
+                    norm = {"conversation": "", "model": DEFAULT_MODEL, "role": "无", "project": "默认"}
+                return SessionDict(norm, _db_baseline=copy.deepcopy(norm))
+
+
+async def _three_way_merge_locked(chat_id: str, data: dict, baseline: dict) -> dict:
+    clean_local = {k: v for k, v in data.items() if k != "_isolated_pool_key"}
+    async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
+        await db.execute('PRAGMA busy_timeout=5000')
+        db.row_factory = aiosqlite.Row
+        await db.execute('BEGIN IMMEDIATE')
+        try:
+            async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
+                row = await cursor.fetchone()
+            db_latest = _normalize_session_dict(row['data']) if row else {}
+            merged = {}
+            all_keys = set(db_latest.keys()) | set(baseline.keys()) | set(clean_local.keys())
+            for k in all_keys:
+                in_local = k in clean_local
+                in_base = k in baseline
+                local_changed = (in_local != in_base) or (in_local and clean_local[k] != baseline[k])
+                if local_changed:
+                    if in_local:
+                        merged[k] = clean_local[k]
+                else:
+                    if k in db_latest:
+                        merged[k] = copy.deepcopy(db_latest[k])
+            await db.execute(
+                'INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)',
+                (chat_id, json.dumps(merged, ensure_ascii=False)),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+    return merged
+
 
 async def save_session_async(chat_id, data):
+    # 若该会话数据携带 `_isolated_pool_key`（如 Cron 临时隔离会话），严禁污染写入主会话表
+    if isinstance(data, dict) and data.get("_isolated_pool_key"):
+        return
+    tracked_base = getattr(data, "_db_baseline", None)
+    if isinstance(tracked_base, dict):
+        async with _get_session_lock(chat_id):
+            merged = await _three_way_merge_locked(chat_id, data, tracked_base)
+            data.clear()
+            data.update(copy.deepcopy(merged))
+            data._db_baseline = copy.deepcopy(merged)
+        return
     async with _get_session_lock(chat_id):
-        with _db_session_rw_lock:
-            async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
-                await db.execute('PRAGMA busy_timeout=5000')
-                await db.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data, ensure_ascii=False)))
+        clean_data = {k: v for k, v in data.items() if k != "_isolated_pool_key"} if isinstance(data, dict) else data
+        async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
+            await db.execute('PRAGMA busy_timeout=5000')
+            await db.execute('BEGIN IMMEDIATE')
+            try:
+                await db.execute(
+                    'INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)',
+                    (chat_id, json.dumps(clean_data, ensure_ascii=False)),
+                )
                 await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
 
 async def merge_and_save_session_async(chat_id: str, data: dict, baseline: dict = None):
     """Three-way atomic merge for long-running turns so concurrent user edits (e.g. /model, /note, /dir) are never overwritten."""
+    if isinstance(data, dict) and data.get("_isolated_pool_key"):
+        return
     if baseline is None:
         await save_session_async(chat_id, data)
         return
     async with _get_session_lock(chat_id):
-        with _db_session_rw_lock:
-            async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
-                await db.execute('PRAGMA busy_timeout=5000')
-                db.row_factory = aiosqlite.Row
-                await db.execute('BEGIN IMMEDIATE')
-                try:
-                    async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
-                        row = await cursor.fetchone()
-                    db_latest = _normalize_session_dict(row['data']) if row else {}
-                    merged = {}
-                    all_keys = set(db_latest.keys()) | set(baseline.keys()) | set(data.keys())
-                    for k in all_keys:
-                        in_local = k in data
-                        in_base = k in baseline
-                        local_changed = (in_local != in_base) or (in_local and data[k] != baseline[k])
-                        if local_changed:
-                            if in_local:
-                                merged[k] = data[k]
-                        else:
-                            if k in db_latest:
-                                merged[k] = copy.deepcopy(db_latest[k])
-                    await db.execute(
-                        'INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)',
-                        (chat_id, json.dumps(merged, ensure_ascii=False)),
-                    )
-                    await db.commit()
-                except Exception:
-                    await db.rollback()
-                    raise
-                data.clear()
-                data.update(copy.deepcopy(merged))
-                baseline.clear()
-                baseline.update(copy.deepcopy(merged))
+        merged = await _three_way_merge_locked(chat_id, data, baseline)
+        data.clear()
+        data.update(copy.deepcopy(merged))
+        baseline.clear()
+        baseline.update(copy.deepcopy(merged))
+        if hasattr(data, "_db_baseline"):
+            data._db_baseline = copy.deepcopy(merged)
 
 async def get_profile_async(user_id, fallback_chat_id=None):
     primary_key = str(user_id or fallback_chat_id or "")
@@ -870,8 +936,13 @@ def cleanup_completed_delay_tasks(chat_id: str = None, include_paused: bool = Fa
     conn = get_db()
     try:
         cursor = conn.cursor()
+        is_adm = bool(chat_id and get_bot_meta("admin_chat_id") == chat_id)
         if include_paused:
-            if chat_id:
+            if chat_id and not is_adm:
+                cond = "is_active = 0 AND chat_id = ? AND category NOT IN ('system', 'maintenance')"
+                _archive_tasks_before_delete(cursor, cond, (chat_id,))
+                cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}", (chat_id,))
+            elif chat_id:
                 cond = "is_active = 0 AND (chat_id = ? OR chat_id = '' OR chat_id IS NULL) AND category NOT IN ('system', 'maintenance')"
                 _archive_tasks_before_delete(cursor, cond, (chat_id,))
                 cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}", (chat_id,))
@@ -880,7 +951,11 @@ def cleanup_completed_delay_tasks(chat_id: str = None, include_paused: bool = Fa
                 _archive_tasks_before_delete(cursor, cond)
                 cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}")
         else:
-            if chat_id:
+            if chat_id and not is_adm:
+                cond = "task_type = 'delay' AND (is_active = 0 OR run_count > 0 OR last_run_at > 0) AND chat_id = ?"
+                _archive_tasks_before_delete(cursor, cond, (chat_id,))
+                cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}", (chat_id,))
+            elif chat_id:
                 cond = "task_type = 'delay' AND (is_active = 0 OR run_count > 0 OR last_run_at > 0) AND (chat_id = ? OR chat_id = '' OR chat_id IS NULL)"
                 _archive_tasks_before_delete(cursor, cond, (chat_id,))
                 cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}", (chat_id,))
@@ -971,10 +1046,16 @@ def get_cron_logs(task_id=None, limit=15, chat_id=None):
         if task_id:
             cursor.execute(f"{base_select} WHERE l.task_id = ? ORDER BY l.executed_at DESC, l.id DESC LIMIT ?", (task_id, limit))
         elif chat_id:
-            cursor.execute(
-                f"{base_select} WHERE l.chat_id = ? OR l.chat_id = '' OR l.chat_id IS NULL OR t.chat_id = ? ORDER BY l.executed_at DESC, l.id DESC LIMIT ?",
-                (chat_id, chat_id, limit),
-            )
+            if get_bot_meta("admin_chat_id") == chat_id:
+                cursor.execute(
+                    f"{base_select} WHERE l.chat_id = ? OR l.chat_id = '' OR l.chat_id IS NULL OR t.chat_id = ? ORDER BY l.executed_at DESC, l.id DESC LIMIT ?",
+                    (chat_id, chat_id, limit),
+                )
+            else:
+                cursor.execute(
+                    f"{base_select} WHERE l.chat_id = ? OR t.chat_id = ? ORDER BY l.executed_at DESC, l.id DESC LIMIT ?",
+                    (chat_id, chat_id, limit),
+                )
         else:
             cursor.execute(f"{base_select} ORDER BY l.executed_at DESC, l.id DESC LIMIT ?", (limit,))
         rows = cursor.fetchall()
@@ -987,13 +1068,16 @@ def get_cron_logs(task_id=None, limit=15, chat_id=None):
 
 
 def clear_cron_logs(chat_id: str = None) -> int:
-    """清空历史执行审计记录。"""
+    """清空历史执行审计记录（非管理员仅限清空归属自身会话的日志）。"""
     conn = get_db()
     try:
         cursor = conn.cursor()
         _ensure_cron_logs_schema(cursor)
         if chat_id:
-            cursor.execute("DELETE FROM cron_logs WHERE chat_id = ? OR chat_id = '' OR chat_id IS NULL", (chat_id,))
+            if get_bot_meta("admin_chat_id") == chat_id:
+                cursor.execute("DELETE FROM cron_logs WHERE chat_id = ? OR chat_id = '' OR chat_id IS NULL", (chat_id,))
+            else:
+                cursor.execute("DELETE FROM cron_logs WHERE chat_id = ?", (chat_id,))
         else:
             cursor.execute("DELETE FROM cron_logs")
         deleted = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0

@@ -59,9 +59,26 @@ def decode_ima_adpcm(adpcm_data: bytes) -> bytes:
 
     return struct.pack(f"<{len(out_samples)}h", *out_samples)
 
+_MAX_VOICE_BUFFER_BYTES = 4 * 1024 * 1024  # 4 MB hard cap per WS voice recording
+
+
+def _is_loopback_or_private_ip(ip_str: str) -> bool:
+    import ipaddress
+    if not ip_str:
+        return False
+    clean_ip = ip_str.strip().split("%")[0]
+    try:
+        addr = ipaddress.ip_address(clean_ip)
+        return bool(addr.is_loopback or addr.is_private or addr.is_link_local)
+    except ValueError:
+        return clean_ip in ("localhost",)
+
+
 class PassportServer:
-    def __init__(self, host: str = "0.0.0.0", port: int = 8765, udp_port: int = 8765, plugin=None):
-        self.host = host
+    def __init__(self, host: str = "", port: int = 8765, udp_port: int = 8765, plugin=None):
+        cfg = plugin.get_config() if (plugin and hasattr(plugin, "get_config")) else {}
+        default_host = os.environ.get("PASSPORT_BIND_HOST") or cfg.get("bind_host") or "127.0.0.1"
+        self.host = host or default_host
         self.port = port
         self.udp_port = udp_port
         self.plugin = plugin
@@ -80,6 +97,31 @@ class PassportServer:
         
         self._dashboard_task: Optional[asyncio.Task] = None
         self._running = False
+
+    def _get_expected_token(self) -> str:
+        env_tok = (os.environ.get("PASSPORT_AUTH_TOKEN") or "").strip()
+        if env_tok:
+            return env_tok
+        if self.plugin and hasattr(self.plugin, "get_config"):
+            try:
+                return str((self.plugin.get_config() or {}).get("auth_token") or "").strip()
+            except Exception:
+                return ""
+        return ""
+
+    def _is_request_authorized(self, request: web.Request) -> bool:
+        expected = self._get_expected_token()
+        peer_ip = request.remote or ""
+        if expected:
+            auth_hdr = (request.headers.get("Authorization") or "").strip()
+            bearer = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else auth_hdr
+            q_tok = (request.query.get("token") or request.headers.get("X-Passport-Token") or "").strip()
+            import hmac
+            if (bearer and hmac.compare_digest(bearer, expected)) or (q_tok and hmac.compare_digest(q_tok, expected)):
+                return True
+            return False
+        # When no explicit token is configured, strictly block non-private public network peers
+        return _is_loopback_or_private_ip(peer_ip)
 
     async def start(self):
         """启动 aiohttp 异步 Web/WS 服务与 UDP 发现广播"""
@@ -182,6 +224,10 @@ class PassportServer:
 
     async def handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
         """处理硬件长连接全双工通信"""
+        if not self._is_request_authorized(request):
+            log.warning(f"[PassportBridge] 拒绝未授权 WebSocket 连接请求: {request.remote}")
+            raise web.HTTPForbidden(text="Unauthorized Passport client")
+
         ws = web.WebSocketResponse(heartbeat=15.0)
         await ws.prepare(request)
         
@@ -248,7 +294,7 @@ class PassportServer:
             raw_data = bytes(self.voice_buffers.pop(ws, bytearray()))
             if raw_data:
                 try:
-                    raw_pcm = decode_ima_adpcm(raw_data)
+                    raw_pcm = await asyncio.to_thread(decode_ima_adpcm, raw_data)
                 except Exception as e:
                     log.warning(f"[PassportBridge] ADPCM 解码异常，降级为原样 PCM: {e}")
                     raw_pcm = raw_data
@@ -269,9 +315,14 @@ class PassportServer:
                     fut.set_result(result == "approved")
 
     async def _handle_client_binary(self, ws: web.WebSocketResponse, data: bytes):
-        """接收实时 PCM 音频数据帧 (16kHz 16bit 单声道)"""
-        if ws in self.voice_buffers:
-            self.voice_buffers[ws].extend(data)
+        """接收实时 PCM 音频数据帧 (16kHz 16bit 单声道)，严格限制单次录音缓冲上限防止 OOM"""
+        if ws in self.voice_buffers and data:
+            buf = self.voice_buffers[ws]
+            remaining = _MAX_VOICE_BUFFER_BYTES - len(buf)
+            if remaining > 0:
+                buf.extend(data[:remaining])
+            else:
+                log.warning(f"[PassportBridge] 单次语音缓冲已达 {_MAX_VOICE_BUFFER_BYTES}B 硬上限，忽略溢出帧")
 
     async def _process_button_event(self, ws: web.WebSocketResponse, btn: str, action: str):
         """物理按键事件响应逻辑"""
@@ -283,7 +334,7 @@ class PassportServer:
                 raw_data = bytes(self.voice_buffers.pop(ws, bytearray()))
                 if raw_data:
                     try:
-                        raw_pcm = decode_ima_adpcm(raw_data)
+                        raw_pcm = await asyncio.to_thread(decode_ima_adpcm, raw_data)
                     except Exception:
                         raw_pcm = raw_data
                     if len(raw_pcm) > 3200:
@@ -369,7 +420,7 @@ class PassportServer:
                             }
                         ]
                     }
-                    send_card_to_chat_sdk(chat_id, checkin_card)
+                    await asyncio.to_thread(send_card_to_chat_sdk, chat_id, checkin_card)
                 return
 
             elif act_type == "emergency_stop":
@@ -390,7 +441,7 @@ class PassportServer:
                             }
                         ]
                     }
-                    send_card_to_chat_sdk(chat_id, stop_card)
+                    await asyncio.to_thread(send_card_to_chat_sdk, chat_id, stop_card)
                 return
 
             elif act_type == "start_pomodoro":
@@ -417,7 +468,7 @@ class PassportServer:
                             }
                         ]
                     }
-                    send_card_to_chat_sdk(chat_id, bc_card)
+                    await asyncio.to_thread(send_card_to_chat_sdk, chat_id, bc_card)
                 return
 
             elif act_type == "bitable_capture":
@@ -560,12 +611,17 @@ class PassportServer:
                         }
                     ]
                 }
-                send_card_to_chat_sdk(chat_id, sec_card)
+                await asyncio.to_thread(send_card_to_chat_sdk, chat_id, sec_card)
 
     async def _trigger_emergency_stop(self):
         """执行紧急终止所有任务"""
         import signal
-        for process in list(app_state.running_processes.values()):
+        procs = (
+            app_state.snapshot_all_tracked_subprocesses()
+            if hasattr(app_state, "snapshot_all_tracked_subprocesses")
+            else list(app_state.running_processes.values())
+        )
+        for process in procs:
             try:
                 pgid = os.getpgid(process.pid)
                 os.killpg(pgid, signal.SIGKILL)
@@ -575,6 +631,8 @@ class PassportServer:
                 except Exception:
                     pass
         app_state.running_processes.clear()
+        if hasattr(app_state, "active_subprocess_pids"):
+            app_state.active_subprocess_pids.clear()
 
     async def _process_recorded_audio(self, ws: web.WebSocketResponse, pcm_bytes: bytes):
         """将 PCM 音频转录为文字，唤醒 Agent 并回传语音与飞书卡片"""
@@ -966,15 +1024,23 @@ class PassportServer:
         return web.json_response(data)
 
     async def handle_api_tts(self, request: web.Request) -> web.Response:
-        """HTTP 音频静态访问"""
-        file_id = request.match_info.get("file_id")
-        file_path = os.path.join(tempfile.gettempdir(), f"{file_id}.mp3")
-        if os.path.exists(file_path):
+        """HTTP 音频静态访问（严格限制安全文件标识符防止目录穿越）"""
+        if not self._is_request_authorized(request):
+            return web.Response(status=403, text="Forbidden")
+        import re
+        file_id = request.match_info.get("file_id") or ""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", file_id):
+            return web.Response(status=400, text="Invalid file_id")
+        base_tmp = os.path.realpath(tempfile.gettempdir())
+        file_path = os.path.realpath(os.path.join(base_tmp, f"{file_id}.mp3"))
+        if file_path.startswith(base_tmp + os.sep) and os.path.isfile(file_path):
             return web.FileResponse(file_path)
         return web.Response(status=404, text="File Not Found")
 
     async def handle_api_alert(self, request: web.Request) -> web.Response:
         """HTTP 发送硬件告警测试接口"""
+        if not self._is_request_authorized(request):
+            return web.json_response({"ok": False, "error": "Unauthorized"}, status=403)
         try:
             body = await request.json()
             title = body.get("title", "系统通知")
@@ -1000,13 +1066,13 @@ class PassportServer:
             "title": title,
             "details": details
         }
-        for ws in list(self.active_websockets):
-            await self.send_json(ws, msg)
-
         try:
+            for ws in list(self.active_websockets):
+                await self.send_json(ws, msg)
             approved = await asyncio.wait_for(fut, timeout=timeout_sec)
-            return approved
+            return bool(approved)
         except asyncio.TimeoutError:
             log.warning(f"[PassportBridge] 物理 2FA 鉴权超时 (action_id={action_id})")
-            self.pending_2fa_futures.pop(action_id, None)
             return False
+        finally:
+            self.pending_2fa_futures.pop(action_id, None)

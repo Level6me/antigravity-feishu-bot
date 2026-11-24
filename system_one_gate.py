@@ -484,6 +484,7 @@ async def evaluate_message_gate(
     context: Optional[str] = "",
     timeout_seconds: float = 4.0,
     chat_id: str = "default",
+    trusted_internal_resume: bool = False,
 ) -> TypeSafeDecision:
     """Evaluate user message with Hybrid Mathematical Decision Model (HMDM) + TypeSafe System One (Jev).
     
@@ -493,17 +494,18 @@ async def evaluate_message_gate(
     """
     start_hmdm_t = time.perf_counter()
 
-    # 0a. 系统内部授权接力 / 暂停续跑消息白名单旁路（已由管理员在审批卡片确认或点击继续，不再对历史回显文本做危险拦截）
+    # 0a. 系统内部授权接力 / 暂停续跑消息白名单旁路：
+    # 严格要求调用栈显式传入受控内存令牌 `trusted_internal_resume=True`，绝不单独信任用户输入的纯文本前缀！
     clean_u_head = (user_text or "").lstrip()
-    if clean_u_head.startswith(("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]")):
+    if trusted_internal_resume and clean_u_head.startswith(("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]")):
         try:
             from math_decision_model import math_decision_engine
             math_decision_engine.reset_session_risk(chat_id)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f"[TypeSafe] reset_session_risk skipped: {e}")
         elapsed_hmdm = (time.perf_counter() - start_hmdm_t) * 1000.0
         log.info(
-            f"[TypeSafe FastPath] Internal authorized resume bypass in {elapsed_hmdm:.2f}ms for chat {chat_id}"
+            f"[TypeSafe FastPath] Verified internal authorized resume bypass in {elapsed_hmdm:.2f}ms for chat {chat_id}"
         )
         return TypeSafeDecision(
             is_dangerous=False,
@@ -524,6 +526,34 @@ async def evaluate_message_gate(
             local_entropy=0.10,
             math_tier="High",
             math_reason="Tier=High(C*=1.45), Plan=True, Sec=L0(R=0.00), AuthorizedResume=True",
+        )
+
+    # 0b. 本地灾难性系统擦除命令硬拦截（防止低熵单条破坏指令或伪造前缀在本地 HMDM 路径漏检）
+    _text_no_code = re.sub(r'```.*?```', '', user_text or '', flags=re.DOTALL)
+    _text_no_code = re.sub(r'`[^`]+`', '', _text_no_code)
+    if any(
+        re.search(pat, _text_no_code, re.IGNORECASE)
+        for pat in (
+            r"\brm\s+-[a-z]*r[a-z]*f\s+/(?:\s|$|\*|--no-preserve-root)",
+            r"\bdd\s+if=\s*/dev/(?:zero|urandom)\s+of=\s*/dev/(?:sd|nvme|vd|mmcblk)",
+            r"\bmkfs\.[a-z0-9]+\s+/dev/",
+            r":\(\)\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:",
+        )
+    ):
+        elapsed_crit = (time.perf_counter() - start_hmdm_t) * 1000.0
+        return TypeSafeDecision(
+            is_dangerous=True,
+            danger_prob=0.99,
+            intent="code_agent",
+            intent_confidence=0.99,
+            complexity_score=1.0,
+            needs_terminal=True,
+            is_operation=True,
+            action_type="execute_task",
+            latency_ms=round(elapsed_crit, 2),
+            is_fallback=False,
+            raw_answers={"fast_path": "local_critical_destructive_block"},
+            security_level="L3",
         )
 
     # Sync Markov dialog state if context indicates a pending task proposal
@@ -945,7 +975,19 @@ async def evaluate_output_guard(
 
     start_t = time.perf_counter()
     try:
-        sample_text = response_text[:1500] if len(response_text) > 1500 else response_text
+        if len(response_text) <= 1800:
+            sample_text = response_text
+        else:
+            # Multi-window sampling (head + first high-sensitivity match window + tail) so secrets/commands past char 1500 are never missed
+            head_part = response_text[:700]
+            tail_part = response_text[-700:]
+            mid_part = ""
+            m_mid = _OUTPUT_NEEDS_JEV_AUDIT_RE.search(response_text, 600, max(600, len(response_text) - 600))
+            if m_mid:
+                w_start = max(0, m_mid.start() - 250)
+                w_end = min(len(response_text), m_mid.end() + 350)
+                mid_part = f"\n...[HIGH_RISK_WINDOW]...\n{response_text[w_start:w_end]}"
+            sample_text = f"{head_part}{mid_part}\n...[TAIL]...\n{tail_part}"
         questions = {
             "secret_leak": Noul(
                 instructions="Does this generated message inadvertently reveal raw private secrets, production passwords, active OAuth tokens, or unmasked private keys?"
@@ -1378,6 +1420,14 @@ def infer_effort_from_model(model_name: str, fallback_effort: str = "medium") ->
     """Infer normalized agy --effort value from model suffix or fallback."""
     from utils.model_tiers import infer_effort_from_model_dynamic
     return infer_effort_from_model_dynamic(model_name, fallback_effort=fallback_effort)
+_ENV_UPDATE_LOCK = __import__("threading").Lock()
+
+
+def _sanitize_env_value(val: str) -> str:
+    """Strip CR/LF/NUL control characters to prevent .env newline variable injection."""
+    return re.sub(r"[\r\n\x00]+", "", (val or "").strip())
+
+
 def update_typesafe_env(
     api_key: Optional[str] = None,
     enabled: Optional[bool] = None,
@@ -1387,74 +1437,88 @@ def update_typesafe_env(
     auto_mode: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Persist updated TypeSafe settings to .env and synchronize runtime objects."""
+    import tempfile
     import config
     from config import BASE_DIR
 
     env_path = os.path.join(BASE_DIR, ".env")
-    env_lines = []
-    if os.path.exists(env_path):
-        with open(env_path, "r", encoding="utf-8") as f:
-            env_lines = f.readlines()
+    with _ENV_UPDATE_LOCK:
+        env_lines = []
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                env_lines = f.readlines()
 
-    updates = {}
-    if api_key is not None:
-        updates["TYPESAFE_API_KEY"] = api_key.strip()
-        config.TYPESAFE_API_KEY = api_key.strip()
-        os.environ["TYPESAFE_API_KEY"] = api_key.strip()
-    if enabled is not None:
-        updates["TYPESAFE_ENABLED"] = "true" if enabled else "false"
-        config.TYPESAFE_ENABLED = bool(enabled)
-        os.environ["TYPESAFE_ENABLED"] = "true" if enabled else "false"
-    if model is not None:
-        updates["TYPESAFE_MODEL"] = model.strip()
-        config.TYPESAFE_MODEL = model.strip()
-        os.environ["TYPESAFE_MODEL"] = model.strip()
-    if base_url is not None:
-        updates["TYPESAFE_BASE_URL"] = base_url.strip()
-        config.TYPESAFE_BASE_URL = base_url.strip()
-        os.environ["TYPESAFE_BASE_URL"] = base_url.strip()
-    if tier is not None:
-        norm_tier = tier.strip().lower()
-        if norm_tier in ("gateway", "sentry", "copilot"):
-            updates["TYPESAFE_TIER"] = norm_tier
-            config.TYPESAFE_TIER = norm_tier
-            os.environ["TYPESAFE_TIER"] = norm_tier
-    if auto_mode is not None:
-        updates["TYPESAFE_AUTO_MODE"] = "true" if auto_mode else "false"
-        config.TYPESAFE_AUTO_MODE = bool(auto_mode)
-        os.environ["TYPESAFE_AUTO_MODE"] = "true" if auto_mode else "false"
+        updates = {}
+        if api_key is not None:
+            clean_key = _sanitize_env_value(api_key)
+            updates["TYPESAFE_API_KEY"] = clean_key
+            config.TYPESAFE_API_KEY = clean_key
+            os.environ["TYPESAFE_API_KEY"] = clean_key
+        if enabled is not None:
+            updates["TYPESAFE_ENABLED"] = "true" if enabled else "false"
+            config.TYPESAFE_ENABLED = bool(enabled)
+            os.environ["TYPESAFE_ENABLED"] = "true" if enabled else "false"
+        if model is not None:
+            clean_model = _sanitize_env_value(model)
+            updates["TYPESAFE_MODEL"] = clean_model
+            config.TYPESAFE_MODEL = clean_model
+            os.environ["TYPESAFE_MODEL"] = clean_model
+        if base_url is not None:
+            clean_url = _sanitize_env_value(base_url)
+            updates["TYPESAFE_BASE_URL"] = clean_url
+            config.TYPESAFE_BASE_URL = clean_url
+            os.environ["TYPESAFE_BASE_URL"] = clean_url
+        if tier is not None:
+            norm_tier = _sanitize_env_value(tier).lower()
+            if norm_tier in ("gateway", "sentry", "copilot"):
+                updates["TYPESAFE_TIER"] = norm_tier
+                config.TYPESAFE_TIER = norm_tier
+                os.environ["TYPESAFE_TIER"] = norm_tier
+        if auto_mode is not None:
+            updates["TYPESAFE_AUTO_MODE"] = "true" if auto_mode else "false"
+            config.TYPESAFE_AUTO_MODE = bool(auto_mode)
+            os.environ["TYPESAFE_AUTO_MODE"] = "true" if auto_mode else "false"
 
+        # Invalidate client so next call recreates it with new config
+        global _async_client
+        _async_client = None
 
-    # Invalidate client so next call recreates it with new config
-    global _async_client
-    _async_client = None
+        # Update or append keys in env_lines
+        found_keys = set()
+        new_lines = []
+        for line in env_lines:
+            matched_key = None
+            for k in updates:
+                if line.startswith(f"{k}=") or line.startswith(f"export {k}="):
+                    matched_key = k
+                    break
+            if matched_key:
+                new_lines.append(f"{matched_key}={updates[matched_key]}\n")
+                found_keys.add(matched_key)
+            else:
+                new_lines.append(line)
 
-    # Update or append keys in env_lines
-    found_keys = set()
-    new_lines = []
-    for line in env_lines:
-        matched_key = None
-        for k in updates:
-            if line.startswith(f"{k}=") or line.startswith(f"export {k}="):
-                matched_key = k
-                break
-        if matched_key:
-            new_lines.append(f"{matched_key}={updates[matched_key]}\n")
-            found_keys.add(matched_key)
-        else:
-            new_lines.append(line)
+        for k, v in updates.items():
+            if k not in found_keys:
+                if new_lines and not new_lines[-1].endswith("\n"):
+                    new_lines[-1] += "\n"
+                new_lines.append(f"{k}={v}\n")
 
-    for k, v in updates.items():
-        if k not in found_keys:
-            if new_lines and not new_lines[-1].endswith("\n"):
-                new_lines[-1] += "\n"
-            new_lines.append(f"{k}={v}\n")
-
-    # Atomic file write
-    temp_env = env_path + ".tmp"
-    with open(temp_env, "w", encoding="utf-8") as f:
-        f.writelines(new_lines)
-    os.replace(temp_env, env_path)
+        # Safe atomic file write via unique temp file
+        parent_dir = os.path.dirname(os.path.abspath(env_path)) or "."
+        fd, temp_env = tempfile.mkstemp(dir=parent_dir, prefix=".env_tmp_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_env, env_path)
+        except Exception:
+            try:
+                os.remove(temp_env)
+            except Exception:
+                pass
+            raise
 
     log.info(f"[TypeSafe] Updated configuration in .env: {list(updates.keys())}")
     return get_typesafe_config_state()

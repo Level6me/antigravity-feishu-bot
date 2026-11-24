@@ -14,10 +14,21 @@ async def _execute_project_creation(input_text, ideal_path, parent_path, is_git_
         reply_text = f"🔄 正在为您克隆 Git 仓库 `{input_text}`，请稍候..."
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         try:
-            subprocess.run(["git", "clone", input_text, new_project_path], capture_output=True, text=True, check=True, timeout=120)
+            await asyncio.to_thread(
+                subprocess.run,
+                ["git", "clone", input_text, new_project_path],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=120,
+            )
             reply_text = f"✅ Git 仓库克隆成功！\n📂 已将当前项目切换为：`{dir_name}`"
         except subprocess.CalledProcessError as e:
             reply_text = f"❌ 克隆失败：{e.stderr}"
+            await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
+            return True, input_text
+        except subprocess.TimeoutExpired:
+            reply_text = "❌ 克隆超时（超过 120 秒），请检查网络连接或仓库地址。"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
             return True, input_text
     else:
@@ -42,14 +53,35 @@ async def _execute_project_creation(input_text, ideal_path, parent_path, is_git_
 async def _handle_create_project(user_text, message_id, chat_id, session_data, resolution=None):
     from config import WORKSPACE_ROOT, get_global_memory_path, get_oauth_token_path
     import re, os, asyncio, shutil
-    from lark_client import send_interactive_card_sdk
+    from lark_client import send_interactive_card_sdk, send_reply_sdk
     
+    if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: send_reply_sdk(message_id, "🔒 权限不足：当前会话无工作区目录切换/创建权限 (`SCOPE_PROJECT`)。")
+        )
+        return True, user_text
+
     input_text = user_text.strip()
     ws_root = session_data.get("workspace_root")
-    parent_path = ws_root if ws_root and os.path.exists(ws_root) else WORKSPACE_ROOT
+    parent_path = os.path.abspath(os.path.expanduser(ws_root if ws_root and os.path.exists(ws_root) else WORKSPACE_ROOT))
+    forbidden_sys_dirs = ("/etc", "/root", "/proc", "/sys", "/boot", "/dev", "/var/log")
     
     # Check if the input is an existing local directory
     expanded_path = os.path.abspath(os.path.expanduser(input_text))
+    real_expanded = os.path.realpath(expanded_path)
+    if not is_admin(chat_id) and any(
+        p == d or p.startswith(d + "/")
+        for p in (expanded_path, real_expanded)
+        for d in forbidden_sys_dirs
+    ):
+        session_data.pop("pending_command", None)
+        from database import save_session_async
+        await save_session_async(chat_id, session_data)
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: send_reply_sdk(message_id, f"🔒 安全拦截：禁止非管理员绑定系统敏感目录 `{expanded_path}`。")
+        )
+        return True, user_text
+
     if os.path.isdir(expanded_path):
         session_data["project"] = expanded_path
         
@@ -65,35 +97,42 @@ async def _handle_create_project(user_text, message_id, chat_id, session_data, r
         
         dir_name = os.path.basename(expanded_path) or expanded_path
         reply_text = f"📂 已检测到现有项目目录，直接为您切换至该工作区：`{dir_name}`"
-        from lark_client import send_reply_sdk
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
 
     git_pattern = re.compile(r'^(https?://|git@|git://)[^\s]+$', re.IGNORECASE)
-    is_git_url = bool(git_pattern.match(input_text)) or input_text.endswith(".git")
+    is_git_url = bool(git_pattern.match(input_text)) or (input_text.endswith(".git") and "/" in input_text)
     
     if is_git_url:
-        repo_name = input_text.split("/")[-1].replace(".git", "")
-        if not repo_name:
-            repo_name = "repo"
-        clean_dir_name = repo_name
+        raw_tail = input_text.rstrip("/").split("/")[-1]
+        repo_name = raw_tail[:-4] if raw_tail.lower().endswith(".git") else raw_tail
+        clean_dir_name = re.sub(r'[^a-zA-Z0-9._\-\u4e00-\u9fa5]', '_', repo_name).strip(".")
+        if not clean_dir_name or clean_dir_name in (".", ".."):
+            clean_dir_name = "repo"
     else:
-        clean_dir_name = re.sub(r'[^a-zA-Z0-9_一-龥]', '_', input_text)[:20]
-        if not clean_dir_name:
+        clean_dir_name = re.sub(r'[^a-zA-Z0-9_一-龥]', '_', input_text)[:20].strip(".")
+        if not clean_dir_name or clean_dir_name in (".", ".."):
             clean_dir_name = "project"
             
-    ideal_path = os.path.join(parent_path, clean_dir_name)
+    ideal_path = os.path.abspath(os.path.join(parent_path, clean_dir_name))
+    real_parent = os.path.realpath(parent_path)
+    if ideal_path == parent_path or not ideal_path.startswith(parent_path + os.sep):
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: send_reply_sdk(message_id, "❌ 非法的项目目录名称，已安全拦截。")
+        )
+        return True, user_text
     
     if os.path.exists(ideal_path) and resolution is None:
+        safe_choice_arg = re.sub(r'[\r\n]+', ' ', input_text).strip()
         conflict_card = {
             "config": {"wide_screen_mode": True},
             "header": {"title": {"tag": "plain_text", "content": "⚠️ 项目名称冲突"}, "template": "yellow"},
             "elements": [
                 {"tag": "markdown", "content": f"目标路径下已存在同名项目：`{clean_dir_name}`\n请选择后续操作："},
                 {"tag": "action", "actions": [
-                    {"tag": "button", "text": {"tag": "plain_text", "content": "1. 增加后缀保留新项目"}, "type": "primary", "value": {"action": "user_choice", "choice": f"/newproj_resolve keep {input_text}", "label": "保留并增加后缀"}},
-                    {"tag": "button", "text": {"tag": "plain_text", "content": "2. 覆盖原有项目"}, "type": "danger", "value": {"action": "user_choice", "choice": f"/newproj_resolve replace {input_text}", "label": "覆盖原项目"}},
-                    {"tag": "button", "text": {"tag": "plain_text", "content": "3. 取消并切换至旧项目"}, "type": "default", "value": {"action": "user_choice", "choice": f"/newproj_resolve cancel {input_text}", "label": "取消并切换"}}
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "1. 增加后缀保留新项目"}, "type": "primary", "value": {"action": "user_choice", "choice": f"/newproj_resolve keep {safe_choice_arg}", "label": "保留并增加后缀"}},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "2. 覆盖原有项目"}, "type": "danger", "value": {"action": "user_choice", "choice": f"/newproj_resolve replace {safe_choice_arg}", "label": "覆盖原项目"}},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "3. 取消并切换至旧项目"}, "type": "default", "value": {"action": "user_choice", "choice": f"/newproj_resolve cancel {safe_choice_arg}", "label": "取消并切换"}}
                 ]}
             ]
         }
@@ -103,9 +142,10 @@ async def _handle_create_project(user_text, message_id, chat_id, session_data, r
     if resolution == "keep":
         import hashlib
         proj_hash = hashlib.md5(input_text.encode()).hexdigest()[:6]
-        ideal_path = os.path.join(parent_path, f"{clean_dir_name}_{proj_hash}")
+        ideal_path = os.path.abspath(os.path.join(parent_path, f"{clean_dir_name}_{proj_hash}"))
     elif resolution == "replace":
-        if os.path.exists(ideal_path):
+        real_ideal = os.path.realpath(ideal_path)
+        if os.path.exists(ideal_path) and real_ideal != real_parent and real_ideal.startswith(real_parent + os.sep):
             shutil.rmtree(ideal_path, ignore_errors=True)
     elif resolution == "cancel":
         session_data["project"] = ideal_path
@@ -113,7 +153,6 @@ async def _handle_create_project(user_text, message_id, chat_id, session_data, r
         from database import save_session_async
         await save_session_async(chat_id, session_data)
         reply_text = f"📂 已取消新建，直接为您切换至现有同名项目：`{clean_dir_name}`"
-        from lark_client import send_reply_sdk
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(message_id, reply_text))
         return True, user_text
 
@@ -215,8 +254,15 @@ async def _fetch_models_from_cli(timeout_sec: int = 25) -> list:
 
 async def get_available_models_cached(force_refresh: bool = False) -> list:
     global _MODEL_CACHE, _MODEL_CACHE_TIME, _MODEL_FETCH_LOCK
-    if _MODEL_FETCH_LOCK is None:
-        _MODEL_FETCH_LOCK = asyncio.Lock()
+    if not isinstance(_MODEL_FETCH_LOCK, dict):
+        _MODEL_FETCH_LOCK = {}
+    loop_key = id(asyncio.get_running_loop())
+    fetch_lock = _MODEL_FETCH_LOCK.get(loop_key)
+    if fetch_lock is None:
+        if len(_MODEL_FETCH_LOCK) > 64:
+            _MODEL_FETCH_LOCK.clear()
+        fetch_lock = asyncio.Lock()
+        _MODEL_FETCH_LOCK[loop_key] = fetch_lock
 
     now = time.time()
     if not _MODEL_CACHE:
@@ -230,9 +276,9 @@ async def get_available_models_cached(force_refresh: bool = False) -> list:
 
     # 2. 已有旧缓存但已过期：先返回旧缓存保证即时响应，后台异步静默刷新 (Stale-While-Revalidate)
     if _MODEL_CACHE and not force_refresh:
-        if not _MODEL_FETCH_LOCK.locked():
+        if not fetch_lock.locked():
             async def _bg_refresh():
-                async with _MODEL_FETCH_LOCK:
+                async with fetch_lock:
                     new_models = await _fetch_models_from_cli(timeout_sec=30)
                     if new_models:
                         global _MODEL_CACHE, _MODEL_CACHE_TIME
@@ -244,7 +290,7 @@ async def get_available_models_cached(force_refresh: bool = False) -> list:
         return list(_MODEL_CACHE)
 
     # 3. 强制刷新或冷启动无任何缓存：执行同步等待拉取
-    async with _MODEL_FETCH_LOCK:
+    async with fetch_lock:
         if not force_refresh and _MODEL_CACHE and (time.time() - _MODEL_CACHE_TIME < _MODEL_CACHE_TTL):
             return list(_MODEL_CACHE)
 
@@ -285,7 +331,8 @@ def get_system_status_card_data():
             cpu = bot_info['monit']['cpu']
             mem_mb = round(bot_info['monit']['memory'] / (1024 * 1024), 1)
         else:
-            return 0, 0, "Unknown", "offline", 0, "No process found"
+            import stats as _st
+            return 0, 0, "Unknown", "offline", 0, "No process found", "未知", _st.get_stats()
             
         import time
         now = time.time() * 1000
@@ -483,7 +530,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
 
         elif pending_command == PendingCommand.CRON_ADD.value:
             raw_input = user_text.strip()
-            parts = [p.strip() for p in re.split(r'[|｜]', raw_input) if p.strip()]
+            parts = [p.strip() for p in re.split(r'[|｜]', raw_input, maxsplit=2) if p.strip()]
             if len(parts) < 3:
                 reply_text = "❌ **格式无效！**\n\n请按规范发送 3 段数据，用竖线 `|` 隔开：\n`任务名称 | 触发规则(如 0 9 * * * 或 600s) | 执行 Prompt`\n\n例如：`定时检查存储 | 0 9 * * * | 检查树莓派 iSCSI 运行状态`"
             else:
@@ -494,7 +541,7 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                 now_ts = int(time.time())
                 next_run = compute_next_run(expr, task_type, now_ts)
                 
-                task_id = f"task_usr_{now_ts}"
+                task_id = f"task_usr_{now_ts}_{uuid.uuid4().hex[:6]}"
                 task_data = {
                     'id': task_id,
                     'chat_id': chat_id,
@@ -707,14 +754,21 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
             # Kill the subprocess
             try:
                 if chat_id in running_processes:
-                    process = running_processes.pop(chat_id, None)
+                    process = running_processes.get(chat_id)
                     if process:
                         try:
                             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
                         except Exception:
-                            process.kill()
-            except Exception:
-                pass
+                            try:
+                                process.kill()
+                            except Exception:
+                                pass
+                    if hasattr(app_state, "unregister_subprocess"):
+                        app_state.unregister_subprocess(chat_id, process)
+                    else:
+                        running_processes.pop(chat_id, None)
+            except Exception as stop_kill_err:
+                log.debug(f"[commands] /stop subprocess kill warning: {stop_kill_err}")
             
             # Cancel the worker task to fully release the queue lock
             if chat_workers and chat_id in chat_workers:

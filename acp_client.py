@@ -88,28 +88,34 @@ def build_acp_prompt_blocks(prompt_text: str, extra_image_paths: Optional[List[s
 
     seen = set()
     attached = 0
-    downloads_root = os.path.abspath(os.path.join(config.BASE_DIR, "downloads"))
+    downloads_root = os.path.realpath(os.path.abspath(os.path.join(config.BASE_DIR, "downloads")))
+    real_tmp_root = os.path.realpath("/tmp")
     for raw_p in candidate_paths:
         if attached >= _MAX_INLINE_IMAGES_PER_TURN:
             break
         if not raw_p:
             continue
         abs_p = os.path.abspath(raw_p)
-        if abs_p in seen or not os.path.isfile(abs_p):
+        real_p = os.path.realpath(abs_p)
+        if real_p in seen or not os.path.isfile(real_p):
             continue
-        # Security boundary: only inline images from bot downloads/ or /tmp/
-        if not (abs_p.startswith(downloads_root + os.sep) or abs_p.startswith("/tmp/")):
+        # Security boundary: resolve symlinks so /tmp/link -> /outside/secret.png cannot bypass directory check
+        if not (
+            real_p.startswith(downloads_root + os.sep)
+            or real_p.startswith(real_tmp_root + os.sep)
+            or real_p.startswith("/tmp/")
+        ):
             continue
-        ext = os.path.splitext(abs_p)[1].lower()
+        ext = os.path.splitext(real_p)[1].lower()
         if ext not in _IMAGE_EXTS:
             continue
         try:
-            fsize = os.path.getsize(abs_p)
+            fsize = os.path.getsize(real_p)
             if fsize <= 0 or fsize > _MAX_INLINE_IMAGE_BYTES:
                 continue
-            with open(abs_p, "rb") as f:
+            with open(real_p, "rb") as f:
                 b64_data = base64.b64encode(f.read()).decode("ascii")
-            mime_type, _ = mimetypes.guess_type(abs_p)
+            mime_type, _ = mimetypes.guess_type(real_p)
             if not mime_type or not mime_type.startswith("image/"):
                 mime_type = "image/jpeg" if ext in (".jpg", ".jpeg") else f"image/{ext.lstrip('.')}"
             blocks.append({
@@ -117,10 +123,10 @@ def build_acp_prompt_blocks(prompt_text: str, extra_image_paths: Optional[List[s
                 "data": b64_data,
                 "mimeType": mime_type,
             })
-            seen.add(abs_p)
+            seen.add(real_p)
             attached += 1
         except Exception as e:
-            log.debug(f"[ACP] Skipping inline image {abs_p}: {e}")
+            log.debug(f"[ACP] Skipping inline image {real_p}: {e}")
 
     return blocks
 
@@ -444,8 +450,10 @@ class AcpPersistentSession:
         extra_dirs: Optional[List[str]] = None,
         permission_notifier: Optional[Callable[[str, str, Dict[str, Any]], Awaitable[bool]]] = None,
         async_update_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
+        owner_chat_id: Optional[str] = None,
     ):
         self.chat_id = chat_id
+        self.owner_chat_id = owner_chat_id or chat_id
         self.model = model
         self.effort = effort or "medium"
         self.sandbox_enabled = sandbox_enabled
@@ -471,6 +479,7 @@ class AcpPersistentSession:
         self._active_turn_tool_calls: Dict[str, Dict[str, Any]] = {}
         self._active_turn_pending_bg_tasks: set = set()
         self._queued_steer_rpc_ids: Dict[int, str] = {}
+        self._steer_turn_text_chunks: List[str] = []
         self._idle_text_chunks: List[str] = []
         self._idle_flush_task: Optional[asyncio.Task] = None
         self.agent_capabilities: Dict[str, Any] = {}
@@ -515,7 +524,7 @@ class AcpPersistentSession:
         if self.sandbox_enabled:
             cmd_args.append("--sandbox")
 
-        is_admin_chat = is_admin(self.chat_id)
+        is_admin_chat = is_admin(self.owner_chat_id)
         if DANGEROUSLY_SKIP_PERMISSIONS and is_admin_chat:
             cmd_args.append("--dangerously-skip-permissions")
 
@@ -563,7 +572,10 @@ class AcpPersistentSession:
         self.process = proc
         self.spawn_time = time.time()
         self.last_active_time = time.time()
-        app_state.running_processes[self.chat_id] = self.process
+        if hasattr(app_state, "register_subprocess"):
+            app_state.register_subprocess(self.chat_id, self.process)
+        else:
+            app_state.running_processes[self.chat_id] = self.process
 
         self._stderr_drain_task = asyncio.create_task(self._drain_stderr())
         self._stdout_reader_task = asyncio.create_task(self._read_stdout_loop())
@@ -778,7 +790,13 @@ class AcpPersistentSession:
                 self._active_prompt_rpc_id = None
                 self._active_turn_tool_calls.clear()
                 self._active_turn_pending_bg_tasks.clear()
-                self._in_turn = False
+                # Keep `_in_turn = True` if follow-up `steer()` prompts are still in flight on stdin
+                if self._queued_steer_rpc_ids:
+                    self._turn_waiting_for_steer = True
+                    self._in_turn = True
+                else:
+                    self._turn_waiting_for_steer = False
+                    self._in_turn = False
 
         return AcpTurnEventStream(queue, cleanup_cb=_cleanup)
 
@@ -821,16 +839,21 @@ class AcpPersistentSession:
 
     async def _decide_permission(self, params: Dict[str, Any], options: List[Dict[str, Any]]) -> Optional[str]:
         """Resolve an ACP permission request via auto-policy or Feishu interactive card."""
-        def _pick_option(preferred_kinds: Tuple[str, ...]) -> Optional[str]:
+        def _pick_option(preferred_kinds: Tuple[str, ...], fallback_first: bool = False) -> Optional[str]:
             for kind in preferred_kinds:
                 for opt in options:
                     if (opt.get("kind") or "").lower() == kind and opt.get("optionId"):
                         return opt["optionId"]
-            return options[0].get("optionId") if options else None
+            if fallback_first and options:
+                return options[0].get("optionId")
+            return None
 
+        target_owner_chat = self.owner_chat_id or self.chat_id
         # Admin with DANGEROUSLY_SKIP_PERMISSIONS auto-approves unless interactive override is forced
-        if DANGEROUSLY_SKIP_PERMISSIONS and is_admin(self.chat_id):
-            return _pick_option(("allow_once", "allow_always"))
+        if DANGEROUSLY_SKIP_PERMISSIONS and is_admin(target_owner_chat):
+            return _pick_option(("allow_once", "allow_always", "allow"), fallback_first=True)
+
+        reject_kinds = ("reject_once", "reject_always", "deny", "deny_once", "deny_always", "cancel", "reject")
 
         # Interactive Feishu card bridge when notifier is configured
         if getattr(config, "ACP_INTERACTIVE_PERMISSIONS", True) and self._permission_notifier:
@@ -839,25 +862,25 @@ class AcpPersistentSession:
             fut: asyncio.Future = loop.create_future()
             _PENDING_PERMISSIONS[perm_token] = {
                 "future": fut,
-                "chat_id": self.chat_id,
+                "chat_id": target_owner_chat,
                 "options": options,
                 "created_at": time.time(),
             }
             try:
-                sent = await self._permission_notifier(self.chat_id, perm_token, params)
+                sent = await self._permission_notifier(target_owner_chat, perm_token, params)
                 if sent:
                     try:
                         return await asyncio.wait_for(fut, timeout=180.0)
                     except asyncio.TimeoutError:
-                        log.warning(f"[ACP] Permission card timed out for {self.chat_id}, rejecting safely.")
-                        return _pick_option(("reject_once", "reject_always"))
+                        log.warning(f"[ACP] Permission card timed out for {target_owner_chat}, rejecting safely.")
+                        return _pick_option(reject_kinds, fallback_first=False)
             except Exception as e:
                 log.warning(f"[ACP] Permission notifier error: {e}")
             finally:
                 _PENDING_PERMISSIONS.pop(perm_token, None)
 
-        # Safe fallback: deny when non-admin & no interactive approval occurred
-        return _pick_option(("reject_once", "reject_always"))
+        # Safe fallback: deny when non-admin & no interactive approval occurred (returns None -> outcome='cancelled' if no explicit reject kind)
+        return _pick_option(reject_kinds, fallback_first=False)
 
     async def _flush_idle_updates(self):
         await asyncio.sleep(1.2)
@@ -868,19 +891,27 @@ class AcpPersistentSession:
         self._idle_text_chunks.clear()
         if payload:
             try:
-                await self._async_update_callback(self.chat_id, payload)
+                await self._async_update_callback(self.owner_chat_id or self.chat_id, payload)
             except Exception as e:
                 log.warning(f"[ACP] Async background update callback failed: {e}")
 
     async def _read_stdout_loop(self):
-        decoder = codecs.getincrementaldecoder("utf-8")()
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         buf = ""
+        _MAX_STDOUT_LINE_BUF = 16 * 1024 * 1024
         try:
             while self.process and self.process.stdout:
                 chunk = await self.process.stdout.read(8192)
                 if not chunk:
+                    tail = decoder.decode(b"", final=True)
+                    if tail:
+                        buf += tail
                     break
                 buf += decoder.decode(chunk)
+                if len(buf) > _MAX_STDOUT_LINE_BUF and "\n" not in buf:
+                    log.warning(f"[ACP] Dropping oversized single-line stdout buffer ({len(buf)} bytes) for {self.chat_id}")
+                    buf = ""
+                    continue
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
                     line = line.strip()
@@ -893,6 +924,13 @@ class AcpPersistentSession:
                             await self._active_turn_queue.put({"event": "raw_log", "text": line})
                         continue
                     await self._dispatch_incoming_message(msg)
+            if buf.strip():
+                try:
+                    msg = json.loads(buf.strip())
+                    await self._dispatch_incoming_message(msg)
+                except Exception:
+                    if self._active_turn_queue is not None:
+                        await self._active_turn_queue.put({"event": "raw_log", "text": buf.strip()})
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -958,6 +996,9 @@ class AcpPersistentSession:
                     if stream_ev.get("event") == "message":
                         self._active_turn_text_chunks.append(stream_ev.get("content", ""))
                     await self._active_turn_queue.put(stream_ev)
+                elif self._queued_steer_rpc_ids and stream_ev.get("event") == "message":
+                    # Buffer cohesive text for an in-flight queued `steer()` prompt until its RPC result arrives
+                    self._steer_turn_text_chunks.append(stream_ev.get("content", ""))
                 elif stream_ev.get("event") == "message" and self._async_update_callback:
                     # Background subagent / task wake-up outside active turn
                     self._idle_text_chunks.append(stream_ev.get("content", ""))
@@ -974,7 +1015,7 @@ class AcpPersistentSession:
                 self._active_prompt_rpc_id = None
                 if "error" in msg and msg["error"]:
                     self._active_turn_queue = None
-                    self._in_turn = False
+                    self._in_turn = bool(self._queued_steer_rpc_ids)
                     err = msg["error"]
                     err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
                     await q.put({
@@ -989,7 +1030,7 @@ class AcpPersistentSession:
                     stop_reason = res.get("stopReason", "end_turn")
                     if stop_reason == "cancelled":
                         self._active_turn_queue = None
-                        self._in_turn = False
+                        self._in_turn = bool(self._queued_steer_rpc_ids)
                         await q.put({"event": "cancelled", "message": "Turn cancelled"})
                     else:
                         # Keep `_active_turn_queue` attached until `turn_stream.aclose()` so
@@ -1008,6 +1049,12 @@ class AcpPersistentSession:
 
             if rpc_id in self._queued_steer_rpc_ids:
                 steer_preview = self._queued_steer_rpc_ids.pop(rpc_id, "")
+                steer_body = "".join(self._steer_turn_text_chunks).strip()
+                self._steer_turn_text_chunks.clear()
+                if not self._queued_steer_rpc_ids and getattr(self, "_turn_waiting_for_steer", False):
+                    self._turn_waiting_for_steer = False
+                    self._in_turn = False
+                target_cb_chat = self.owner_chat_id or self.chat_id
                 if "error" in msg and msg["error"]:
                     err = msg["error"]
                     err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
@@ -1018,12 +1065,12 @@ class AcpPersistentSession:
                         try:
                             self._spawn_tracked_task(
                                 self._async_update_callback(
-                                    self.chat_id,
+                                    target_cb_chat,
                                     f"⚠️ 排队追加指令执行失败（{steer_preview[:60]}）：{err_msg}",
                                 )
                             )
-                        except Exception:
-                            pass
+                        except Exception as cb_err:
+                            log.debug(f"[ACP] steer error callback failed: {cb_err}")
                 else:
                     res = msg.get("result") or {}
                     if isinstance(res.get("usage"), dict):
@@ -1033,6 +1080,13 @@ class AcpPersistentSession:
                         f"[ACP] Queued follow-up prompt (rpc_id={rpc_id}) completed for {self.chat_id} "
                         f"(stopReason={stop_reason})"
                     )
+                    if steer_body and self._async_update_callback and self._active_turn_queue is None:
+                        try:
+                            self._spawn_tracked_task(
+                                self._async_update_callback(target_cb_chat, steer_body)
+                            )
+                        except Exception as cb_err:
+                            log.debug(f"[ACP] steer completion callback failed: {cb_err}")
                 return
 
             fut = self._pending_rpc.get(rpc_id)
@@ -1073,8 +1127,6 @@ class AcpPersistentSession:
 
         proc = self.process
         self.process = None
-        if app_state.running_processes.get(self.chat_id) is proc:
-            app_state.running_processes.pop(self.chat_id, None)
         if proc:
             try:
                 descendant_pids = [p for p in snapshot_process_group_pids(proc.pid) if p != proc.pid]
@@ -1105,6 +1157,11 @@ class AcpPersistentSession:
                     pass
             except Exception as e:
                 log.warning(f"[ACP] Error terminating process for {self.chat_id}: {e}")
+            finally:
+                if hasattr(app_state, "unregister_subprocess"):
+                    app_state.unregister_subprocess(self.chat_id, proc)
+                elif app_state.running_processes.get(self.chat_id) is proc:
+                    app_state.running_processes.pop(self.chat_id, None)
 
     async def close(self):
         self._closing = True

@@ -97,17 +97,37 @@ _SEEN_MESSAGE_IDS_MAX = 1000
 _SEEN_LOCK = threading.Lock()
 
 
-def _mark_seen(message_id: str, chat_id: str, create_time=None) -> bool:
-    """内存 LRU + SQLite 双层去重：先查内存，再落库（12h 窗口，重启后仍生效）。"""
+def _check_and_mark_mem_seen(message_id: str) -> bool:
+    """First-stage in-memory LRU check + SQLite seen check without premature DB write."""
     if not message_id:
         return True
+    from database import is_message_seen
     with _SEEN_LOCK:
         if message_id in _SEEN_MESSAGE_IDS:
             _SEEN_MESSAGE_IDS.move_to_end(message_id)
             return False
+        if is_message_seen(message_id):
+            _SEEN_MESSAGE_IDS[message_id] = None
+            if len(_SEEN_MESSAGE_IDS) > _SEEN_MESSAGE_IDS_MAX:
+                _SEEN_MESSAGE_IDS.popitem(last=False)
+            return False
         _SEEN_MESSAGE_IDS[message_id] = None
         if len(_SEEN_MESSAGE_IDS) > _SEEN_MESSAGE_IDS_MAX:
             _SEEN_MESSAGE_IDS.popitem(last=False)
+    return True
+
+
+def _unmark_mem_seen(message_id: str) -> None:
+    if not message_id:
+        return
+    with _SEEN_LOCK:
+        _SEEN_MESSAGE_IDS.pop(message_id, None)
+
+
+def _mark_seen(message_id: str, chat_id: str, create_time=None) -> bool:
+    """内存 LRU + SQLite 双层去重：先查内存，再落库（12h 窗口，重启后仍生效）。"""
+    if not _check_and_mark_mem_seen(message_id):
+        return False
     return mark_message_seen(message_id, chat_id, create_time)
 
 
@@ -132,7 +152,7 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     create_time = data.event.message.create_time
     if create_time:
         create_time = int(create_time) // 1000
-    if not _mark_seen(message_id, chat_id, create_time):
+    if not _check_and_mark_mem_seen(message_id):
         log.warning(f"[DEDUP] Ignoring duplicate message_id={message_id} chat_id={chat_id}")
         return
     
@@ -148,6 +168,7 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
         if ALLOWED_CHATS and chat_id in ALLOWED_CHATS:
             is_allowed = True
         if not is_allowed:
+            mark_message_seen(message_id, chat_id, create_time)
             log.warning(f"Unauthorized message event ignored. chat_id: {chat_id}, sender_id: {sender_open_id}")
             return
 
@@ -160,6 +181,7 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
             if app_state.main_loop and app_state.main_loop.is_running():
                 asyncio.run_coroutine_threadsafe(_admin_welcome(), app_state.main_loop)
         else:
+            mark_message_seen(message_id, chat_id, create_time)
             # No admin yet and this is not a bindable p2p chat → silent.
             log.info(f"[auth] Bootstrap pending; ignoring message from chat {chat_id}")
             return
@@ -167,9 +189,11 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     # Permission gate
     role = get_role(chat_id, sender_open_id)
     if role == "banned":
+        mark_message_seen(message_id, chat_id, create_time)
         log.info(f"[auth] Banned chat {chat_id} message ignored")
         return
     if role in ("guest", "pending"):
+        mark_message_seen(message_id, chat_id, create_time)
         async def _guest_async():
             await _handle_guest_message(chat_id, chat_type, sender_open_id, role, message_type, content_raw)
         if app_state.main_loop and app_state.main_loop.is_running():
@@ -178,6 +202,7 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
 
     # Authorized chats: apply rate limiting (admins exempt).
     if role == "user" and not allow_message(chat_id):
+        mark_message_seen(message_id, chat_id, create_time)
         async def _rate_hint():
             await send_card_to_chat_async(chat_id, CardBuilder.build_rate_limit_card())
         if app_state.main_loop and app_state.main_loop.is_running():
@@ -185,9 +210,13 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
         return
         
     if app_state.main_loop and app_state.main_loop.is_running():
+        if not mark_message_seen(message_id, chat_id, create_time):
+            log.warning(f"[DEDUP] Ignoring DB-duplicate message_id={message_id} chat_id={chat_id}")
+            return
         asyncio.run_coroutine_threadsafe(
             handle_message_async(message_id, chat_id, message_type, content_raw, sender_open_id=sender_open_id),
             app_state.main_loop,
         )
     else:
-        log.error("main_loop is not running!")
+        _unmark_mem_seen(message_id)
+        log.error("main_loop is not running! Unmarked message_id so Feishu retry can recover.")

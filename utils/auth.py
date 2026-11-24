@@ -82,32 +82,57 @@ def is_bootstrapped() -> bool:
 
 
 def try_bootstrap_admin(chat_id: str, chat_type: str) -> bool:
-    """Bind the first p2p chat as the admin. Group chats can never bootstrap."""
-    if get_bot_meta("admin_chat_id"):
+    """Atomically bind the first p2p chat as the admin inside a single transaction. Group chats can never bootstrap."""
+    if not chat_id or chat_type != "p2p":
         return False
-    if chat_type != "p2p":
-        return False
+    from database import _auth_write_lock, get_db
     now = _now()
-    set_bot_meta("admin_chat_id", chat_id)
-    set_bot_meta("bootstrap_done", "1")
-    save_auth_session({
-        "chat_id": chat_id,
-        "chat_type": chat_type,
-        "display_name": "管理员",
-        "role": ROLE_ADMIN,
-        "scopes": [],
-        "created_at": now,
-        "updated_at": now,
-    })
-    return True
+    with _auth_write_lock:
+        conn = get_db()
+        try:
+            conn.isolation_level = None
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                cursor.execute("SELECT value FROM bot_meta WHERE key = 'admin_chat_id'")
+                if cursor.fetchone():
+                    cursor.execute("ROLLBACK")
+                    return False
+                cursor.execute(
+                    "INSERT INTO bot_meta (key, value) VALUES ('admin_chat_id', ?)",
+                    (chat_id,),
+                )
+                cursor.execute(
+                    "INSERT OR REPLACE INTO bot_meta (key, value) VALUES ('bootstrap_done', '1')"
+                )
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO auth_sessions (
+                        chat_id, chat_type, display_name, sender_open_id, role, scopes,
+                        created_at, updated_at, granted_by, request_count, last_request_at, last_hint_at, last_message
+                    ) VALUES (?, ?, '管理员', '', ?, '[]', ?, ?, 'bootstrap', 0, 0, 0, '')
+                    """,
+                    (chat_id, chat_type, ROLE_ADMIN, now, now),
+                )
+                cursor.execute("COMMIT")
+                return True
+            except Exception:
+                cursor.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
 
 
 def get_role(chat_id: str, sender_open_id: str = "") -> str:
     """Return the effective role for a chat, materializing legacy whitelist
     matches into a persisted `user` session (dev tier) on first contact."""
+    if not chat_id:
+        return ROLE_GUEST
     sess = get_auth_session(chat_id)
     if sess:
         return sess.get("role") or ROLE_GUEST
+    if get_bot_meta("admin_chat_id") == chat_id:
+        return ROLE_ADMIN
 
     if _legacy_allowed(chat_id, sender_open_id):
         now = _now()

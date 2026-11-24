@@ -347,7 +347,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     )
 
                 simulated_content = json.dumps({"text": orig_q}, ensure_ascii=False)
-                await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
+                try:
+                    await _handle_message_async_internal(
+                        card_message_id, chat_id, "text", simulated_content, trusted_internal_resume=True
+                    )
+                except TypeError:
+                    await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
 
             asyncio.run_coroutine_threadsafe(_do_capacity_resume(), app_state.main_loop)
 
@@ -715,7 +720,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                         f"{action_guide}"
                     )
                     simulated_content = json.dumps({"text": resume_prompt}, ensure_ascii=False)
-                    await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
+                    try:
+                        await _handle_message_async_internal(
+                            card_message_id, chat_id, "text", simulated_content, trusted_internal_resume=True
+                        )
+                    except TypeError:
+                        await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
                     log.info(
                         f"[L3 Guard] Successfully triggered auto-resume for chat {chat_id} "
                         f"after approved execution (scope={scope}, status={final_status}, ret={ret_code})"
@@ -800,7 +810,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 cont_prompt += "请直接基于项目记忆胶囊与上述已完成进展继续推进剩余未完成的步骤，完成后输出完整结论，严禁从头重复已完成的探查！"
 
                 simulated_content = json.dumps({"text": cont_prompt}, ensure_ascii=False)
-                await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
+                try:
+                    await _handle_message_async_internal(
+                        card_message_id, chat_id, "text", simulated_content, trusted_internal_resume=True
+                    )
+                except TypeError:
+                    await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
 
             asyncio.run_coroutine_threadsafe(do_continue_long_task(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "🚀 已确认继续执行！正在为您接力推进剩余步骤..."}})

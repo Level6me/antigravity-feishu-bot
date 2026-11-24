@@ -170,6 +170,7 @@ class CronEngine:
                 session_data = dict(base_session_data)
                 session_data["conversation"] = ""
                 session_data["_isolated_pool_key"] = f"cron_{task_id}"
+                session_data["_owner_chat_id"] = chat_id
                 if task.get('project_path'):
                     session_data['project'] = task['project_path']
                 
@@ -229,10 +230,16 @@ class CronEngine:
                     )
                     log.info(f"[CronEngine] One-shot delay task '{name}' ({task_id}) completed and auto-removed (log preserved).")
                 else:
-                    next_run = compute_next_run(task['cron_expr'], task.get('task_type', 'cron'), now_ts)
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: update_cron_task_run(task_id, now_ts, next_run)
+                    latest_task = await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: get_cron_task(task_id)
                     )
+                    if latest_task:
+                        eff_expr = latest_task.get('cron_expr') or task['cron_expr']
+                        eff_type = latest_task.get('task_type') or task.get('task_type', 'cron')
+                        next_run = compute_next_run(eff_expr, eff_type, now_ts)
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: update_cron_task_run(task_id, now_ts, next_run)
+                        )
             except Exception as ex:
                 log.error(f"[CronEngine] Error in finally state update: {ex}")
             finally:

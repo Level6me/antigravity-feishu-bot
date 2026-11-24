@@ -109,13 +109,23 @@ def _sanitize_text(text: str) -> str:
         return s
 
 
+_SCHEMA_INIT_LOCK = __import__("threading").Lock()
+_INITIALIZED_DB_PATHS = set()
+
+
 def _get_conn(custom_root: Optional[str] = None) -> sqlite3.Connection:
     db_path = get_db_path(custom_root)
-    conn = sqlite3.connect(db_path, timeout=10.0)
+    real_db_path = os.path.abspath(db_path)
+    existed_before = os.path.exists(real_db_path) and os.path.getsize(real_db_path) > 0
+    conn = sqlite3.connect(real_db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA synchronous=NORMAL")
-    _init_schema(conn)
+    with _SCHEMA_INIT_LOCK:
+        if not existed_before or real_db_path not in _INITIALIZED_DB_PATHS:
+            conn.execute("PRAGMA journal_mode=WAL")
+            _init_schema(conn)
+            _INITIALIZED_DB_PATHS.add(real_db_path)
     return conn
 
 
@@ -594,14 +604,24 @@ def write_project_capsule(
     markdown_content: str,
     custom_root: Optional[str] = None,
 ) -> str:
+    import tempfile
     path = get_capsule_path(project_dir, custom_root)
     sanitized = _sanitize_text(markdown_content)
     if len(sanitized) > MAX_CAPSULE_CHARS:
         sanitized = sanitized[: MAX_CAPSULE_CHARS - 60] + "\n\n_(胶囊已自动精简至 6KB 安全上限内)_\n"
-    tmp_path = f"{path}.tmp.{os.getpid()}"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(sanitized)
-    os.replace(tmp_path, path)
+    parent_dir = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(parent_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=parent_dir, prefix=".capsule_tmp_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(sanitized)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
     return path
 
 

@@ -1054,7 +1054,11 @@ async def execute_antigravity(
     _session_baseline_snap = copy.deepcopy(session_data) if isinstance(session_data, dict) else {}
 
     async def _persist_session(timeout_sec: float = 2.0):
-        """Persist session_data using atomic 3-way merge in production while preserving unit-test save_session_async mocks."""
+        """Persist session_data using atomic 3-way merge in production while preserving unit-test save_session_async mocks.
+        Never persist isolated ephemeral sessions (e.g. cron tasks) into the user's primary chat_sessions record!
+        """
+        if isinstance(session_data, dict) and session_data.get("_isolated_pool_key"):
+            return
         if getattr(save_session_async, "__module__", "") == "database":
             from database import merge_and_save_session_async
             await asyncio.wait_for(
@@ -1214,6 +1218,27 @@ async def execute_antigravity(
         turn_stream = None
         sidecar_probe_task = None
         pool_key = session_data.get("_isolated_pool_key") or chat_id
+        owner_chat_id = session_data.get("_owner_chat_id") or chat_id
+
+        async def _deliver_card_reliably(card_obj, label_prefix: str = "card"):
+            if bot_reply_msg_id:
+                patched = await _feishu_call(
+                    lambda: patch_interactive_card_sdk(bot_reply_msg_id, card_obj),
+                    label=f"{label_prefix} patch",
+                )
+                if patched is not None:
+                    return patched
+            if message_id and str(message_id).startswith("om_"):
+                return await _feishu_call(
+                    lambda: send_interactive_card_sdk(message_id, card_obj),
+                    label=f"{label_prefix} reply",
+                )
+            from lark_client import send_card_to_chat_sdk
+            return await _feishu_call(
+                lambda: send_card_to_chat_sdk(owner_chat_id, card_obj),
+                label=f"{label_prefix} send_to_chat",
+            )
+
         try:
             from session_pool import session_pool
             conv_id_to_resume = session_data.get("conversation", "") if not is_new_conversation else ""
@@ -1223,10 +1248,11 @@ async def execute_antigravity(
 
             async def _acp_permission_notifier(target_chat_id: str, perm_token: str, params: dict) -> bool:
                 try:
+                    eff_target = owner_chat_id if str(target_chat_id).startswith("cron_") else target_chat_id
                     perm_card = CardBuilder.build_acp_permission_card(perm_token, params)
                     from lark_client import send_card_to_chat_sdk
                     mid = await _feishu_call(
-                        lambda: send_card_to_chat_sdk(target_chat_id, perm_card),
+                        lambda: send_card_to_chat_sdk(eff_target, perm_card),
                         label="acp permission card",
                     )
                     return bool(mid)
@@ -1236,6 +1262,7 @@ async def execute_antigravity(
 
             async def _acp_async_update_cb(target_chat_id: str, async_text: str):
                 try:
+                    eff_target = owner_chat_id if str(target_chat_id).startswith("cron_") else target_chat_id
                     cleaned_async = extract_final_chinese_response(async_text or "").strip()
                     if not cleaned_async:
                         return
@@ -1247,7 +1274,7 @@ async def execute_antigravity(
                         session_data=session_data,
                     )
                     await _feishu_call(
-                        lambda: send_card_to_chat_sdk(target_chat_id, bg_card),
+                        lambda: send_card_to_chat_sdk(eff_target, bg_card),
                         label="acp async update card",
                     )
                 except Exception as ae:
@@ -1265,6 +1292,7 @@ async def execute_antigravity(
                     transport=preferred_transport,
                     permission_notifier=_acp_permission_notifier,
                     async_update_callback=_acp_async_update_cb,
+                    owner_chat_id=owner_chat_id,
                 )
             except TypeError:
                 # Backward compatibility with lightweight mocks in unit tests
@@ -1539,13 +1567,13 @@ async def execute_antigravity(
                         conv_id = ev.get("conversation_id")
                         if conv_id:
                             from session_pool import session_pool
-                            session_pool.update_conversation_id(chat_id, conv_id)
+                            session_pool.update_conversation_id(pool_key, conv_id)
                             if session_data.get("conversation") != conv_id:
                                 session_data["conversation"] = conv_id
                                 try:
                                     await _persist_session(timeout_sec=2.0)
-                                except Exception:
-                                    pass
+                                except Exception as ps_err:
+                                    log.debug(f"[Executor] persist_session on init skipped: {ps_err}")
                                 path = get_transcript_path(conv_id)
                                 if os.path.exists(path):
                                     target_transcript_path = path
@@ -2198,7 +2226,21 @@ async def execute_antigravity(
                     await sess.close()
                     stderr_text = "⚠️ 执行超时 (12小时)：后台超大型任务已达到系统设定的 12 小时最高保护上限。"
                     session_data["last_execution_error"] = True
-                    return {"has_reply": True, "reply_text": stderr_text, "is_error": True}
+                    timeout_card = CardBuilder.build_ai_response(
+                        stderr_text,
+                        current_model=session_data.get("model", "Default"),
+                        current_project=session_data.get("project", "默认"),
+                        is_error=True,
+                        session_data=session_data,
+                    )
+                    await _deliver_card_reliably(timeout_card, "hard-timeout-12h")
+                    return {
+                        "has_reply": True,
+                        "returncode": -15,
+                        "is_error": True,
+                        "is_quota_error": False,
+                        "is_capacity_error": False,
+                    }
 
                 has_active_tool = bool(current_tool_action or stream_action or last_tool_action or completed_tool_steps or has_tool_in_flight)
                 effective_warning_threshold = TOOL_QUIET_WARNING_THRESHOLD if has_active_tool else BASE_QUIET_WARNING_THRESHOLD
@@ -2364,16 +2406,7 @@ async def execute_antigravity(
                     project_dir=typesafe_blocked_info.get("cwd", session_data.get("project", "")),
                     call_id=typesafe_blocked_info.get("call_id", "")
                 )
-                if bot_reply_msg_id:
-                    await _feishu_call(
-                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, confirm_card),
-                        label="patch l3 confirm card"
-                    )
-                else:
-                    await _feishu_call(
-                        lambda: send_interactive_card_sdk(message_id, confirm_card),
-                        label="send l3 confirm card"
-                    )
+                await _deliver_card_reliably(confirm_card, "l3-confirm-card")
                 return {
                     "has_reply": True,
                     "returncode": 0,
@@ -2487,16 +2520,7 @@ async def execute_antigravity(
                     current_step_idx=current_plan_idx,
                     min_pct=task_max_progress_pct,
                 )
-                if bot_reply_msg_id:
-                    await _feishu_call(
-                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, pause_card),
-                        label="patch budget pause card"
-                    )
-                else:
-                    await _feishu_call(
-                        lambda: send_interactive_card_sdk(message_id, pause_card),
-                        label="send budget pause card"
-                    )
+                await _deliver_card_reliably(pause_card, "budget-pause-card")
                 return {
                     "has_reply": True,
                     "returncode": 0,
@@ -2753,16 +2777,7 @@ async def execute_antigravity(
                             current_project=proj_dir,
                             error_detail=stream_error_msg or combined_err_text[:200],
                         )
-                        if bot_reply_msg_id:
-                            await _feishu_call(
-                                lambda: patch_interactive_card_sdk(bot_reply_msg_id, cap_card),
-                                label="patch capacity choice card",
-                            )
-                        else:
-                            await _feishu_call(
-                                lambda: send_interactive_card_sdk(message_id, cap_card),
-                                label="send capacity choice card",
-                            )
+                        await _deliver_card_reliably(cap_card, "capacity-choice-card")
                         return {
                             "has_reply": True,
                             "returncode": 0,
@@ -3293,12 +3308,12 @@ async def execute_antigravity(
             if sess_locked and 'sess' in dir() and sess.lock.locked():
                 sess.lock.release()
             if session_data.get("_isolated_pool_key"):
-                running_processes.pop(pool_key, None)
                 try:
                     from session_pool import session_pool
                     await session_pool.reset_session(pool_key)
-                except Exception:
-                    pass
+                except Exception as iso_err:
+                    log.debug(f"[Executor] reset isolated session {pool_key} warning: {iso_err}")
+                running_processes.pop(pool_key, None)
             if os.path.exists(log_file_path):
                 try:
                     await _sync_conversation_id_from_log(log_file_path)

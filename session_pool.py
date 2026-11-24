@@ -146,8 +146,10 @@ class PersistentSession:
         sandbox_enabled: bool = False,
         agent_mode: str = "auto",
         extra_dirs: Optional[List[str]] = None,
+        owner_chat_id: Optional[str] = None,
     ):
         self.chat_id = chat_id
+        self.owner_chat_id = owner_chat_id or chat_id
         self.model = model
         self.effort = effort if effort in _ALLOWED_EFFORTS else "medium"
         self.sandbox_enabled = sandbox_enabled
@@ -222,7 +224,7 @@ class PersistentSession:
             settings_json = build_session_settings_json(self.agent_mode, self.sandbox_enabled, self.project_dir)
             cmd_args.extend(["--settings", settings_json])
 
-        is_admin_chat = is_admin(self.chat_id)
+        is_admin_chat = is_admin(self.owner_chat_id)
         if DANGEROUSLY_SKIP_PERMISSIONS and is_admin_chat and self.agent_mode != "plan":
             cmd_args.append("--dangerously-skip-permissions")
 
@@ -273,7 +275,10 @@ class PersistentSession:
         self._decoder = codecs.getincrementaldecoder('utf-8')()
         self._line_buffer = ""
         self.last_active_time = time.time()
-        app_state.running_processes[self.chat_id] = self.process
+        if hasattr(app_state, "register_subprocess"):
+            app_state.register_subprocess(self.chat_id, self.process)
+        else:
+            app_state.running_processes[self.chat_id] = self.process
 
         # Start background stderr drain to prevent OS pipe buffer deadlock.
         # If stderr fills up (~64KB), the process blocks on write and stdout stalls too.
@@ -387,8 +392,6 @@ class PersistentSession:
                 self._stderr_drain_task = None
             proc = self.process
             self.process = None
-            if app_state.running_processes.get(self.chat_id) is proc:
-                app_state.running_processes.pop(self.chat_id, None)
             if proc:
                 try:
                     # Non-blocking pure /proc descendant PID discovery (never blocks asyncio event loop with subprocess.check_output)
@@ -421,6 +424,11 @@ class PersistentSession:
                         pass
                 except Exception as e:
                     log.warning(f"[SessionPool] Error terminating process for {self.chat_id}: {e}")
+                finally:
+                    if hasattr(app_state, "unregister_subprocess"):
+                        app_state.unregister_subprocess(self.chat_id, proc)
+                    elif app_state.running_processes.get(self.chat_id) is proc:
+                        app_state.running_processes.pop(self.chat_id, None)
 
 class SessionPool:
     """Manages active persistent sessions across chats (ACP + stream-json dual transport)."""
@@ -453,6 +461,7 @@ class SessionPool:
         extra_dirs: List[str],
         permission_notifier: Optional[Callable[[str, str, Dict[str, Any]], Awaitable[bool]]] = None,
         async_update_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
+        owner_chat_id: Optional[str] = None,
     ):
         if transport == "acp":
             from acp_client import AcpPersistentSession
@@ -467,6 +476,7 @@ class SessionPool:
                 extra_dirs=extra_dirs,
                 permission_notifier=permission_notifier,
                 async_update_callback=async_update_callback,
+                owner_chat_id=owner_chat_id,
             )
         return PersistentSession(
             chat_id=chat_id,
@@ -477,6 +487,7 @@ class SessionPool:
             sandbox_enabled=sandbox_enabled,
             agent_mode=agent_mode,
             extra_dirs=extra_dirs,
+            owner_chat_id=owner_chat_id,
         )
 
     def get_or_create(
@@ -491,6 +502,7 @@ class SessionPool:
         transport: Optional[str] = None,
         permission_notifier: Optional[Callable[[str, str, Dict[str, Any]], Awaitable[bool]]] = None,
         async_update_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
+        owner_chat_id: Optional[str] = None,
     ):
         sess = self._sessions.get(chat_id)
         desired_transport = self._resolve_transport(transport)
@@ -503,8 +515,8 @@ class SessionPool:
         normalized_extra_dirs = sorted({os.path.abspath(d) for d in (extra_dirs or []) if d and os.path.isdir(d)})
 
         # Enforce CLI sandbox both when Co-Pilot mode is active AND when a non-admin user lacks SCOPE_SHELL
-        real_chat_id = str(chat_id).split("cron_")[-1] if str(chat_id).startswith("cron_") else str(chat_id)
-        user_lacks_shell = not is_admin(real_chat_id) and not has_scope(real_chat_id, SCOPE_SHELL)
+        eff_owner_chat = owner_chat_id or (str(chat_id).split("cron_")[-1] if str(chat_id).startswith("cron_") else str(chat_id))
+        user_lacks_shell = not is_admin(eff_owner_chat) and not has_scope(eff_owner_chat, SCOPE_SHELL)
         sandbox_enabled = bool((config.TYPESAFE_ENABLED and config.TYPESAFE_TIER == "copilot") or user_lacks_shell)
 
         sess_dead = sess is None or sess.is_dead_or_closing()
@@ -603,6 +615,7 @@ class SessionPool:
                 extra_dirs=normalized_extra_dirs,
                 permission_notifier=permission_notifier,
                 async_update_callback=async_update_callback,
+                owner_chat_id=eff_owner_chat,
             )
             self._sessions[chat_id] = sess
         else:

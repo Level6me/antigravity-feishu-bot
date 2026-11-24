@@ -292,48 +292,60 @@ def extract_and_upload_resources(
                     safe_prefixes.append(abs_d)
                     project_safe_dirs.append(abs_d)
 
-    def _is_under_dir(abs_path, directory):
-        d = os.path.abspath(directory)
-        return abs_path == d or abs_path.startswith(d + os.sep)
+    def _is_under_dir(target_path, directory):
+        d = os.path.realpath(os.path.abspath(directory))
+        tp = os.path.realpath(os.path.abspath(target_path))
+        return tp == d or tp.startswith(d + os.sep)
 
-    def _is_hidden_home_subdir(abs_path):
-        if not _is_under_dir(abs_path, home_dir) or abs_path == home_dir:
+    real_home_dir = os.path.realpath(home_dir)
+
+    def _is_hidden_home_subdir(target_path):
+        tp = os.path.realpath(os.path.abspath(target_path))
+        if not _is_under_dir(tp, real_home_dir) or tp == real_home_dir:
             return False
-        if _is_under_dir(abs_path, brain_dir):
+        if _is_under_dir(tp, brain_dir):
             return False
-        rel = os.path.relpath(abs_path, home_dir)
+        rel = os.path.relpath(tp, real_home_dir)
         parts = rel.split(os.sep)
         return any(part.startswith(".") for part in parts[:-1])
 
     def is_safe_path(path):
         try:
-            abs_path = os.path.abspath(os.path.expanduser(path))
-            if abs_path == home_dir:
+            expanded = os.path.expanduser(path)
+            abs_path = os.path.abspath(expanded)
+            real_path = os.path.realpath(abs_path)
+            if abs_path == home_dir or real_path == real_home_dir:
                 return False
-            if is_sensitive_upload_path(abs_path):
+            if is_sensitive_upload_path(abs_path) or is_sensitive_upload_path(real_path):
                 return False
             for prefix in safe_prefixes:
-                if _is_under_dir(abs_path, prefix):
+                if _is_under_dir(real_path, prefix):
                     return True
-            if allow_home_deliverables and _is_under_dir(abs_path, home_dir) and not _is_hidden_home_subdir(abs_path):
+            if allow_home_deliverables and _is_under_dir(real_path, real_home_dir) and not _is_hidden_home_subdir(real_path):
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f"[Multimodal] is_safe_path check error for {path}: {e}")
         return False
 
     cleaned_text = _strip_markdown_code(text)
     images = _extract_local_image_paths(cleaned_text, base_dirs=additional_safe_dirs)
     candidates = _collect_file_candidates(text, base_dirs=additional_safe_dirs)
 
-    # Also scan inside artifact/explicitly-delivered .md files for images
+    # Also scan inside artifact/explicitly-delivered .md files for images (only if safe & bounded size)
     for cand in candidates:
         abs_file = cand["abs_file"]
         is_brain_md = _is_under_dir(abs_file, brain_dir)
-        if abs_file.lower().endswith(".md") and (is_brain_md or cand["has_explicit_marker"]) and os.path.isfile(abs_file):
+        if (
+            abs_file.lower().endswith(".md")
+            and (is_brain_md or cand["has_explicit_marker"])
+            and os.path.isfile(abs_file)
+            and is_safe_path(abs_file)
+        ):
             try:
-                with open(abs_file, "r", encoding="utf-8") as f:
-                    md_content = f.read()
-                    images.extend(_extract_local_image_paths(md_content, base_dirs=[os.path.dirname(abs_file)]))
+                if os.path.getsize(abs_file) <= 2 * 1024 * 1024:
+                    with open(abs_file, "r", encoding="utf-8", errors="replace") as f:
+                        md_content = f.read()
+                        images.extend(_extract_local_image_paths(md_content, base_dirs=[os.path.dirname(abs_file)]))
             except Exception as e:
                 log.error(f"[Multimodal] Error scanning md file: {e}")
 

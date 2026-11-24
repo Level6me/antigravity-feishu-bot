@@ -92,9 +92,13 @@ class SystemUpdaterPlugin(BasePlugin):
                     stashed = False
                     if has_local_changes:
                         stash_res = subprocess.run(
-                            ["git", "stash", "push", "-m", "system_updater_auto_stash"],
+                            ["git", "-c", "user.name=bot", "-c", "user.email=bot@local", "stash", "push", "-m", "system_updater_auto_stash"],
                             capture_output=True, text=True, check=False, timeout=15, env=custom_env, cwd=BASE_DIR
                         )
+                        if stash_res.returncode != 0:
+                            raise RuntimeError(
+                                f"检测到本地未提交修改但自动暂存 (git stash) 失败，为防止丢失本地代码已中止升级：{(stash_res.stderr or stash_res.stdout).strip()[:200]}"
+                            )
                         stashed = "Saved working directory" in (stash_res.stdout + stash_res.stderr)
 
                     def _rollback_to_orig():
@@ -161,7 +165,12 @@ class SystemUpdaterPlugin(BasePlugin):
                     pip_bin = os.path.join(BASE_DIR, "venv", "bin", "pip")
                     if os.path.exists(pip_bin):
                         pip_cmd = [pip_bin, "install", "-r", os.path.join(BASE_DIR, "requirements.txt")]
-                        subprocess.run(pip_cmd, capture_output=True, text=True, timeout=60, cwd=BASE_DIR)
+                        pip_res = subprocess.run(pip_cmd, capture_output=True, text=True, timeout=60, cwd=BASE_DIR)
+                        if pip_res.returncode != 0:
+                            pip_err = (pip_res.stderr or pip_res.stdout or "pip install error").strip()[:300]
+                            log.error(f"pip install failed after update: {pip_err}, rolling back to {orig_head}")
+                            _rollback_to_orig()
+                            raise RuntimeError(f"新版本依赖安装失败，已安全回滚至原版本 `{orig_head[:7]}`：{pip_err}")
 
                     save_pending_update_notice(chat_id, message_id, old_version)
                     pending_file = os.path.join(BASE_DIR, ".update_pending.json")

@@ -16,15 +16,14 @@ def backup_database_if_due():
     if not os.path.exists(DB_FILE):
         return
 
-    # Prune cron_logs older than 30 days and completed one-shot delay tasks to prevent unbounded SQLite growth
+    # Prune cron_logs older than 30 days and archive-then-delete completed one-shot delay tasks
     try:
+        from database import cleanup_completed_delay_tasks
+        cleanup_completed_delay_tasks(chat_id=None, include_paused=False)
         cutoff_ts = int(time.time()) - 30 * 86400
         conn = sqlite3.connect(DB_FILE, timeout=DB_TIMEOUT)
         try:
             conn.execute("DELETE FROM cron_logs WHERE executed_at > 0 AND executed_at < ?", (cutoff_ts,))
-            conn.execute(
-                "DELETE FROM cron_tasks WHERE task_type = 'delay' AND is_active = 0 AND (run_count > 0 OR last_run_at > 0)"
-            )
             conn.commit()
         finally:
             conn.close()
