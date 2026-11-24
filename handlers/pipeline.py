@@ -217,11 +217,32 @@ def filter_relevant_notes(notes: list, query: str, context: str = "") -> list:
     return filtered
 
 
+_pipeline_bg_tasks = set()
+
+
+def _track_bg_task(task: asyncio.Task) -> asyncio.Task:
+    _pipeline_bg_tasks.add(task)
+    def _done(t: asyncio.Task):
+        _pipeline_bg_tasks.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                log.warning(f"[Pipeline] Background task failed: {exc}")
+    task.add_done_callback(_done)
+    return task
+
+
 async def process_chat_queue(chat_id):
-    queue = chat_queues[chat_id]
+    queue = chat_queues.get(chat_id)
+    if queue is None:
+        chat_workers.pop(chat_id, None)
+        return
+    current_worker = asyncio.current_task()
+    was_cancelled = False
     try:
         while not queue.empty():
             task = await queue.get()
+            done_evt = task.pop("_done_event", None)
             task_done_cleanly = False
             try:
                 await _process_single_task(chat_id, task)
@@ -229,6 +250,7 @@ async def process_chat_queue(chat_id):
                 task_done_cleanly = True
             except asyncio.CancelledError:
                 # 收到取消异常（如服务重启或被中断），不删除 pending_task，保留在数据库中供重启后 restore 恢复
+                was_cancelled = True
                 raise
             except Exception as e:
                 stats.record_failure()
@@ -236,11 +258,14 @@ async def process_chat_queue(chat_id):
                 task_done_cleanly = True
             finally:
                 queue.task_done()
+                if isinstance(done_evt, asyncio.Event):
+                    done_evt.set()
                 if task_done_cleanly:
                     created_at = task.get("created_at")
                     if created_at:
                         delete_pending_task(chat_id, created_at)
     except asyncio.CancelledError:
+        was_cancelled = True
         log.info(f"Chat worker for {chat_id} was cancelled")
         try:
             from plugin_manager import plugin_manager
@@ -248,12 +273,15 @@ async def process_chat_queue(chat_id):
         except Exception as e:
             log.error(f"Error dispatching task stop on worker cancellation: {e}")
     finally:
-        chat_workers.pop(chat_id, None)
-        # 回收空闲的队列条目，防止 chat_queues 随 chat_id 数量单调增长
-        # 仅在队列为空时 pop，避免与并发入队产生竞态
+        if chat_workers.get(chat_id) is current_worker:
+            chat_workers.pop(chat_id, None)
         q = chat_queues.get(chat_id)
-        if q is not None and q.empty():
-            chat_queues.pop(chat_id, None)
+        if q is not None:
+            if q.empty():
+                chat_queues.pop(chat_id, None)
+            elif not was_cancelled and (chat_id not in chat_workers or chat_workers[chat_id].done()):
+                # 二次防竞态兜底：若退出瞬间有新任务刚入队且无活跃 worker，立即自动续接消费
+                chat_workers[chat_id] = asyncio.create_task(process_chat_queue(chat_id))
 
 
 async def _finalize_fastpath_turn(message_id: str, chat_id: str, session_data: dict, is_error: bool = False, result_text: str = ""):
@@ -407,7 +435,6 @@ async def _process_single_task(chat_id, task):
     recent_context = get_recent_conversation_context(session_data)
 
     # Use HMDM (<0.3ms) to predict effort before prewarming so we don't spawn and immediately kill a mismatched process
-    prewarm_task = None
     prewarmed_model = session_data.get("model", "Default")
     prewarmed_effort = infer_effort_from_model(prewarmed_model, session_data.get("reasoning_effort", "medium"))
     try:
@@ -687,17 +714,18 @@ async def _process_single_task(chat_id, task):
         log.warning(f"[Pipeline] Proactive session relay check failed: {e}")
 
     # For model-backed requests, warm the exact selected model/effort before prompt construction.
+    # Keep conv_id_to_resume aligned with executor.py so resumed tasks never overwrite an active conversation_id with an empty session!
     try:
-        if prewarm_task:
-            await prewarm_task
         from session_pool import session_pool
         proj_val = session_data.get("project")
         cwd_dir = proj_val if (proj_val and os.path.isdir(proj_val) and proj_val not in ["默认", "Default"]) else None
-        conv_id_to_resume = session_data.get("conversation", "") if not is_resumed else ""
-        prewarm_task = asyncio.create_task(
-            session_pool.prewarm(
-                chat_id, selected_model, cwd_dir,
-                conversation_id=conv_id_to_resume, effort=selected_effort
+        conv_id_to_resume = session_data.get("conversation", "")
+        _track_bg_task(
+            asyncio.create_task(
+                session_pool.prewarm(
+                    chat_id, selected_model, cwd_dir,
+                    conversation_id=conv_id_to_resume, effort=selected_effort
+                )
             )
         )
     except Exception as e:
@@ -987,7 +1015,11 @@ async def _process_single_task(chat_id, task):
     final_prompt = user_text
     is_new_conversation = not session_data.get("conversation")
     if is_new_conversation and not is_lightweight_chat:
-        memories = await get_profile_async(chat_id)
+        sender_profile_key = task.get("sender_open_id") or chat_id
+        try:
+            memories = await get_profile_async(sender_profile_key, fallback_chat_id=chat_id)
+        except TypeError:
+            memories = await get_profile_async(chat_id)
         if memories:
             memory_block = "\n".join([f"- {m}" for m in memories])
             final_prompt = f"[System Context: User preferences:]\n{memory_block}\n\n[User's Message:]\n{user_text}"

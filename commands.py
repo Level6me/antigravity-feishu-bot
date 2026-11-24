@@ -163,8 +163,22 @@ def load_model_cache_from_disk() -> list:
 
 def save_model_cache_to_disk(models: list):
     try:
-        with open(_MODEL_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"timestamp": time.time(), "models": models}, f, ensure_ascii=False, indent=2)
+        import tempfile
+        parent = os.path.dirname(os.path.abspath(_MODEL_CACHE_FILE)) or "."
+        os.makedirs(parent, exist_ok=True)
+        fd, tmp_p = tempfile.mkstemp(dir=parent, prefix=".model_cache_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"timestamp": time.time(), "models": models}, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_p, _MODEL_CACHE_FILE)
+        except Exception:
+            try:
+                os.remove(tmp_p)
+            except Exception:
+                pass
+            raise
     except Exception as e:
         log.warning(f"[ModelCache] Failed to save disk cache: {e}")
 
@@ -172,6 +186,7 @@ async def _fetch_models_from_cli(timeout_sec: int = 25) -> list:
     if not ANTIGRAVITY_BIN or not os.path.exists(ANTIGRAVITY_BIN):
         log.warning(f"[ModelCache] ANTIGRAVITY_BIN invalid or not found: {ANTIGRAVITY_BIN}")
         return []
+    fetch_proc = None
     try:
         fetch_proc = await asyncio.create_subprocess_exec(
             ANTIGRAVITY_BIN, "models",
@@ -187,10 +202,12 @@ async def _fetch_models_from_cli(timeout_sec: int = 25) -> list:
         else:
             log.warning(f"[ModelCache] Empty output from CLI, stderr: {stderr.decode()[:200]}")
     except asyncio.TimeoutError:
-        try:
-            fetch_proc.kill()
-        except Exception:
-            pass
+        if fetch_proc is not None:
+            try:
+                fetch_proc.kill()
+                await asyncio.wait_for(fetch_proc.wait(), timeout=2.0)
+            except Exception:
+                pass
         log.warning(f"[ModelCache] Fetch models timed out after {timeout_sec}s")
     except Exception as e:
         log.warning(f"[ModelCache] Fetch models failed: {e}")
@@ -694,9 +711,9 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
                     if process:
                         try:
                             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                        except:
+                        except Exception:
                             process.kill()
-            except:
+            except Exception:
                 pass
             
             # Cancel the worker task to fully release the queue lock

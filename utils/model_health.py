@@ -426,6 +426,9 @@ async def probe_model_capacity(
                 "cached": True,
             }
 
+    if m_key not in _PROBE_LOCKS and len(_PROBE_LOCKS) > 256:
+        for _k in [k for k, lk in list(_PROBE_LOCKS.items()) if not lk.locked()][:64]:
+            _PROBE_LOCKS.pop(_k, None)
     lock = _PROBE_LOCKS.setdefault(m_key, asyncio.Lock())
     async with lock:
         # Re-check cache after acquiring singleflight lock

@@ -79,6 +79,21 @@ def split_text_into_chunks(text, max_chunk_size=20000):
     
     lines = text.split("\n")
     for line in lines:
+        # 硬边界兜底：若单行无换行文本本身超过 max_chunk_size，按定长切片拆分，防止单块突破飞书 20KB 限制
+        if len(line) > max_chunk_size:
+            if current_chunk:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = []
+                current_length = 0
+            for start_idx in range(0, len(line), max_chunk_size):
+                sub_line = line[start_idx:start_idx + max_chunk_size]
+                if len(sub_line) == max_chunk_size:
+                    chunks.append(sub_line)
+                else:
+                    current_chunk = [sub_line]
+                    current_length = len(sub_line) + 1
+            continue
+
         line_len = len(line) + 1
         if current_length + line_len > max_chunk_size and current_chunk:
             chunks.append("\n".join(current_chunk))
@@ -100,7 +115,9 @@ def _build_paginated_text_chunks(text, max_chunk_size=20000):
         return []
     if len(text) <= max_chunk_size:
         return [text]
-    raw_chunks = split_text_into_chunks(text, max_chunk_size)
+    header_reserve = min(64, max(16, max_chunk_size // 10))
+    body_budget = max(16, max_chunk_size - header_reserve)
+    raw_chunks = split_text_into_chunks(text, body_budget)
     total = len(raw_chunks)
     return [f"📄 **[第 {idx + 1}/{total} 页]**\n\n{c}" for idx, c in enumerate(raw_chunks)]
 
@@ -139,7 +156,8 @@ def send_interactive_card_sdk(message_id, card_content):
         return None
     try:
         return json.loads(resp.raw.content).get("data", {}).get("message_id")
-    except:
+    except Exception as e:
+        log.warning(f"[send_interactive_card_sdk] Failed to parse response message_id: {e}")
         return None
 
 @with_retry(max_retries=4, initial_delay=0.6)

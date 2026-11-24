@@ -909,13 +909,29 @@ class AcpPersistentSession:
                 await self._active_turn_queue.put({"event": "process_exit", "returncode": rc})
             self._in_turn = False
 
+    def _spawn_tracked_task(self, coro) -> asyncio.Task:
+        bg = getattr(self, "_bg_tasks", None)
+        if bg is None:
+            bg = set()
+            self._bg_tasks = bg
+        t = asyncio.create_task(coro)
+        bg.add(t)
+        def _on_done(done_t: asyncio.Task):
+            bg.discard(done_t)
+            if not done_t.cancelled():
+                exc = done_t.exception()
+                if exc:
+                    log.warning(f"[ACP] Background task error for {self.chat_id}: {exc}")
+        t.add_done_callback(_on_done)
+        return t
+
     async def _dispatch_incoming_message(self, msg: Dict[str, Any]):
         if not isinstance(msg, dict):
             return
 
         # 1. Server-initiated RPC request (has both `method` and `id`)
         if "method" in msg and "id" in msg:
-            asyncio.create_task(self._handle_server_request(msg))
+            self._spawn_tracked_task(self._handle_server_request(msg))
             return
 
         # 2. Server notification (`method` without `id`)
@@ -1000,7 +1016,7 @@ class AcpPersistentSession:
                     )
                     if self._async_update_callback and self._active_turn_queue is None:
                         try:
-                            asyncio.create_task(
+                            self._spawn_tracked_task(
                                 self._async_update_callback(
                                     self.chat_id,
                                     f"⚠️ 排队追加指令执行失败（{steer_preview[:60]}）：{err_msg}",

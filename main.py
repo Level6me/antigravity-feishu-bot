@@ -59,23 +59,41 @@ from lark_oapi.core.json import JSON as _WsJSON
 from lark_oapi.core.const import UTF_8 as _UTF8
 
 
+def _safe_ws_header(headers, key: str, default: str = "") -> str:
+    try:
+        val = _ws_client_mod._get_by_key(headers, key)
+        return val if val is not None else default
+    except Exception:
+        return default
+
+
 async def _patched_handle_data_frame(self, frame):
-    hs = frame.headers
-    msg_id = _ws_client_mod._get_by_key(hs, HEADER_MESSAGE_ID)
-    trace_id = _ws_client_mod._get_by_key(hs, HEADER_TRACE_ID)
-    sum_ = _ws_client_mod._get_by_key(hs, HEADER_SUM)
-    seq = _ws_client_mod._get_by_key(hs, HEADER_SEQ)
-    type_ = _ws_client_mod._get_by_key(hs, HEADER_TYPE)
+    hs = getattr(frame, "headers", None) or []
+    msg_id = _safe_ws_header(hs, HEADER_MESSAGE_ID, "")
+    trace_id = _safe_ws_header(hs, HEADER_TRACE_ID, "")
+    sum_ = _safe_ws_header(hs, HEADER_SUM, "1")
+    seq = _safe_ws_header(hs, HEADER_SEQ, "0")
+    type_ = _safe_ws_header(hs, HEADER_TYPE, "")
 
     pl = frame.payload
-    if int(sum_) > 1:
-        pl = self._combine(msg_id, int(sum_), int(seq), pl)
-        if pl is None:
+    resp = _WsResponse(code=http.HTTPStatus.OK)
+    message_type = None
+    try:
+        total_parts = int(sum_) if (sum_ is not None and str(sum_).strip() != "") else 1
+        seq_num = int(seq) if (seq is not None and str(seq).strip() != "") else 0
+        if total_parts > 1:
+            pl = self._combine(msg_id, total_parts, seq_num, pl)
+            if pl is None:
+                return
+
+        try:
+            message_type = _WsMessageType(type_)
+        except ValueError:
+            _ws_client_mod.logger.debug(
+                self._fmt_log("Ignoring unsupported WS frame type: {}, msg_id: {}", type_, msg_id)
+            )
             return
 
-    message_type = _WsMessageType(type_)
-    resp = _WsResponse(code=http.HTTPStatus.OK)
-    try:
         start = int(round(time.time() * 1000))
         if message_type == _WsMessageType.CARD:
             _ws_client_mod.logger.info(
@@ -93,10 +111,11 @@ async def _patched_handle_data_frame(self, frame):
         if result is not None:
             resp.data = base64.b64encode(_WsJSON.marshal(result).encode(_UTF8))
     except Exception as e:
+        m_type_val = message_type.value if message_type is not None else str(type_)
         _ws_client_mod.logger.error(
             self._fmt_log(
                 "handle message failed, message_type: {}, message_id: {}, trace_id: {}, err: {}",
-                message_type.value,
+                m_type_val,
                 msg_id,
                 trace_id,
                 e,
@@ -104,7 +123,7 @@ async def _patched_handle_data_frame(self, frame):
         )
         # 输出 payload 摘要，便于定位 CARD 帧结构与 SDK 预期不一致的问题
         try:
-            preview = pl.decode("utf-8", errors="replace")[:300]
+            preview = (pl or b"").decode("utf-8", errors="replace")[:300]
             _ws_client_mod.logger.error(f"payload preview: {preview}")
         except Exception:
             pass
@@ -179,8 +198,8 @@ async def main():
     plugin_manager.register_system_commands(DEFAULT_SYSTEM_COMMANDS)
     plugin_manager.load_all_plugins()
 
-    # Start background GC task
-    asyncio.create_task(garbage_collector())
+    # Start background GC task (keep strong reference to avoid premature GC)
+    app_state._gc_task = asyncio.create_task(garbage_collector())
 
     # Start background Cron scheduler engine
     from cron_engine import cron_engine
@@ -188,6 +207,16 @@ async def main():
 
     # Restore queued tasks persisted across a previous process lifetime
     await restore_pending_tasks()
+
+    loop = asyncio.get_running_loop()
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(
+                _sig,
+                lambda s=_sig: asyncio.create_task(_async_graceful_shutdown(s)),
+            )
+        except (NotImplementedError, RuntimeError):
+            signal.signal(_sig, cleanup)
 
     event_handler = (
         lark.EventDispatcherHandler.builder("", "")
@@ -203,7 +232,6 @@ async def main():
         log_level=lark.LogLevel.INFO,
     )
 
-    loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, cli.start)
 
 
@@ -237,14 +265,15 @@ async def restore_pending_tasks():
             )
             try:
                 if bot_reply_msg_id:
-                    await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(bot_reply_msg_id, err_card))
+                    await loop.run_in_executor(None, lambda m=bot_reply_msg_id, c=err_card: patch_interactive_card_sdk(m, c))
                 elif message_id:
-                    await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, err_card))
+                    await loop.run_in_executor(None, lambda m=message_id, c=err_card: send_interactive_card_sdk(m, c))
             except Exception as e:
                 log.error(f"[restore] Failed to send abort notification: {e}")
             continue
 
-        # 标记为断点恢复任务，递增重试计数并持久化
+        # 标记为断点恢复任务，保持原始 created_at 主键稳定并递增重试计数后持久化
+        task["created_at"] = created_at
         task["retry_count"] = retry_count + 1
         task["resumed"] = True
         save_pending_task(chat_id, task)
@@ -263,26 +292,68 @@ async def restore_pending_tasks():
     log.info(f"[restore] recovered {total} pending tasks across {len(recovered)} chats for automatic resumption")
 
 
-def cleanup(signum, frame):
-    log.warning("Gracefully shutting down... killing zombie processes")
-    try:
-        from plugin_manager import plugin_manager
-        plugin_manager.dispatch_service_restarting()
-    except Exception:
-        pass
-    for process in app_state.running_processes.values():
+_shutdown_in_progress = False
+
+
+def _kill_tracked_subprocesses_snapshot():
+    """Safely terminate all tracked subprocess groups over a snapshot copy without logging reentrancy."""
+    for process in list(app_state.running_processes.values()):
+        if not process:
+            continue
         try:
             pgid = os.getpgid(process.pid)
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except Exception as e:
-            log.error(f"Failed to kill process group {process.pid}: {e}")
+        except Exception:
             try:
                 process.kill()
             except Exception:
                 pass
-    sys.exit(0)
+
+
+async def _async_graceful_shutdown(signum):
+    """Event-loop safe graceful shutdown handler (avoids POSIX signal logging lock deadlocks)."""
+    global _shutdown_in_progress
+    if _shutdown_in_progress:
+        return
+    _shutdown_in_progress = True
+    log.warning(f"Gracefully shutting down on signal {signum}... stopping schedulers and subprocesses")
+    try:
+        from cron_engine import cron_engine
+        cron_engine.stop()
+    except Exception:
+        pass
+    try:
+        from plugin_manager import plugin_manager
+        await asyncio.to_thread(plugin_manager.dispatch_service_restarting)
+    except Exception:
+        pass
+    try:
+        from session_pool import session_pool
+        for cid in list(session_pool._sessions.keys()):
+            try:
+                await asyncio.wait_for(session_pool.reset_session(cid), timeout=2.0)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    _kill_tracked_subprocesses_snapshot()
+    os._exit(0)
+
+
+def cleanup(signum, frame):
+    """Async-signal-safe fallback handler: never calls Python logging locks inside signal frame."""
+    global _shutdown_in_progress
+    if _shutdown_in_progress:
+        os._exit(0)
+    _shutdown_in_progress = True
+    try:
+        os.write(2, b"[FeishuBot] Signal received, terminating subprocess groups...\n")
+    except Exception:
+        pass
+    _kill_tracked_subprocesses_snapshot()
+    os._exit(0)
 
 
 if __name__ == "__main__":

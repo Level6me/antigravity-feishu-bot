@@ -284,14 +284,30 @@ class PersistentSession:
         if not self.is_alive():
             await self.start()
 
+        prev_reader = getattr(self, "_active_reader_task", None)
+        if prev_reader is not None and not prev_reader.done():
+            prev_reader.cancel()
+            try:
+                await prev_reader
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._active_reader_task = None
+
+        write_lock = getattr(self, "_write_lock", None)
+        if write_lock is None:
+            write_lock = asyncio.Lock()
+            self._write_lock = write_lock
+
         self.clear_recent_stderr()
         self.last_active_time = time.time()
         req = json.dumps({"event": "user", "message": {"content": prompt_text}}) + "\n"
-        self.process.stdin.write(req.encode("utf-8"))
-        await self.process.stdin.drain()
+        async with write_lock:
+            self.process.stdin.write(req.encode("utf-8"))
+            await self.process.stdin.drain()
 
         queue = asyncio.Queue()
         reader_task = asyncio.create_task(self._read_turn_stdout(queue))
+        self._active_reader_task = reader_task
         return TurnEventStream(queue, reader_task)
 
     async def _read_turn_stdout(self, queue: asyncio.Queue):
@@ -350,9 +366,17 @@ class PersistentSession:
             pass
 
     async def close(self):
-        """Gracefully terminate the warm process."""
+        """Gracefully terminate the warm process and reap its exit status."""
         self._closing = True
         async with self._start_lock:
+            active_reader = getattr(self, "_active_reader_task", None)
+            if active_reader and not active_reader.done():
+                active_reader.cancel()
+                try:
+                    await active_reader
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._active_reader_task = None
             # Cancel stderr drain first
             if self._stderr_drain_task and not self._stderr_drain_task.done():
                 self._stderr_drain_task.cancel()
@@ -391,6 +415,10 @@ class PersistentSession:
                                 os.kill(d_pid, signal.SIGKILL)
                             except Exception:
                                 pass
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=2.0)
+                    except Exception:
+                        pass
                 except Exception as e:
                     log.warning(f"[SessionPool] Error terminating process for {self.chat_id}: {e}")
 
@@ -537,11 +565,21 @@ class SessionPool:
             or conv_mismatch
             or token_ttl_expired
         ):
-            if sess:
+            bg_set = getattr(self, "_bg_close_tasks", None)
+            if bg_set is None:
+                bg_set = set()
+                self._bg_close_tasks = bg_set
+
+            def _schedule_close(s_obj):
                 try:
-                    asyncio.get_running_loop().create_task(sess.close())
+                    t = asyncio.get_running_loop().create_task(s_obj.close())
+                    bg_set.add(t)
+                    t.add_done_callback(lambda done_t: (bg_set.discard(done_t), done_t.exception() if not done_t.cancelled() else None))
                 except RuntimeError:
                     pass
+
+            if sess:
+                _schedule_close(sess)
             # Evict excess idle unlocked sessions to bound total memory footprint on low-RAM hosts
             max_warm = int(getattr(config, "MAX_WARM_SESSIONS", 2) or 2)
             idle_candidates = [
@@ -552,10 +590,7 @@ class SessionPool:
                 idle_candidates.sort(key=lambda item: item[1].last_active_time)
                 for evict_cid, evict_sess in idle_candidates[:len(idle_candidates) - max_warm + 1]:
                     self._sessions.pop(evict_cid, None)
-                    try:
-                        asyncio.get_running_loop().create_task(evict_sess.close())
-                    except RuntimeError:
-                        pass
+                    _schedule_close(evict_sess)
             sess = self._create_session(
                 transport=desired_transport,
                 chat_id=chat_id,

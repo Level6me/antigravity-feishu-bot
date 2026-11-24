@@ -1,9 +1,11 @@
 import os
+import copy
 import json
 import time
 import sqlite3
 import threading
 import asyncio
+from contextlib import closing
 import aiosqlite
 from logger import log
 
@@ -138,7 +140,7 @@ def init_db():
     conn.close()
 
 def migrate_from_json():
-    with get_db() as conn:
+    with closing(get_db()) as conn:
         cursor = conn.cursor()
         if os.path.exists("chat_sessions.json"):
             try:
@@ -168,6 +170,10 @@ migrate_from_json()
 # 线程安全的会话锁缓存，设置有界淘汰上限，避免无限制增长造成内存泄漏
 _session_locks = {}
 _session_locks_guard = threading.Lock()
+_db_session_rw_lock = threading.RLock()
+_auth_write_lock = threading.RLock()
+_profile_locks = {}
+_profile_locks_guard = threading.Lock()
 
 def _get_session_lock(chat_id: str) -> asyncio.Lock:
     with _session_locks_guard:
@@ -182,7 +188,30 @@ def _get_session_lock(chat_id: str) -> asyncio.Lock:
             _session_locks[chat_id] = lock
         return lock
 
+def _get_profile_lock(profile_key: str) -> asyncio.Lock:
+    with _profile_locks_guard:
+        lock = _profile_locks.get(profile_key)
+        if lock is None:
+            if len(_profile_locks) > 2000:
+                idle_keys = [k for k, l in _profile_locks.items() if not l.locked()]
+                for k in idle_keys[:500]:
+                    _profile_locks.pop(k, None)
+            lock = asyncio.Lock()
+            _profile_locks[profile_key] = lock
+        return lock
+
 from config import DEFAULT_MODEL
+
+def _normalize_session_dict(raw_json: str) -> dict:
+    try:
+        data = json.loads(raw_json) if raw_json else {}
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    if not data.get('model') or data.get('model') in ['Gemini 3.5 Flash', 'Gemini 3.5 Flash (Medium)']:
+        data['model'] = DEFAULT_MODEL
+    return data
 
 async def get_session_async(chat_id):
     async with _get_session_lock(chat_id):
@@ -192,70 +221,128 @@ async def get_session_async(chat_id):
             async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    data = json.loads(row['data'])
-                    if not data.get('model') or data.get('model') in ['Gemini 3.5 Flash', 'Gemini 3.5 Flash (Medium)']:
-                        data['model'] = DEFAULT_MODEL
-                    return data
+                    return _normalize_session_dict(row['data'])
                 return {"conversation": "", "model": DEFAULT_MODEL, "role": "无", "project": "默认"}
 
 async def save_session_async(chat_id, data):
     async with _get_session_lock(chat_id):
+        with _db_session_rw_lock:
+            async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
+                await db.execute('PRAGMA busy_timeout=5000')
+                await db.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data, ensure_ascii=False)))
+                await db.commit()
+
+async def merge_and_save_session_async(chat_id: str, data: dict, baseline: dict = None):
+    """Three-way atomic merge for long-running turns so concurrent user edits (e.g. /model, /note, /dir) are never overwritten."""
+    if baseline is None:
+        await save_session_async(chat_id, data)
+        return
+    async with _get_session_lock(chat_id):
+        with _db_session_rw_lock:
+            async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
+                await db.execute('PRAGMA busy_timeout=5000')
+                db.row_factory = aiosqlite.Row
+                await db.execute('BEGIN IMMEDIATE')
+                try:
+                    async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
+                        row = await cursor.fetchone()
+                    db_latest = _normalize_session_dict(row['data']) if row else {}
+                    merged = {}
+                    all_keys = set(db_latest.keys()) | set(baseline.keys()) | set(data.keys())
+                    for k in all_keys:
+                        in_local = k in data
+                        in_base = k in baseline
+                        local_changed = (in_local != in_base) or (in_local and data[k] != baseline[k])
+                        if local_changed:
+                            if in_local:
+                                merged[k] = data[k]
+                        else:
+                            if k in db_latest:
+                                merged[k] = copy.deepcopy(db_latest[k])
+                    await db.execute(
+                        'INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)',
+                        (chat_id, json.dumps(merged, ensure_ascii=False)),
+                    )
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    raise
+                data.clear()
+                data.update(copy.deepcopy(merged))
+                baseline.clear()
+                baseline.update(copy.deepcopy(merged))
+
+async def get_profile_async(user_id, fallback_chat_id=None):
+    primary_key = str(user_id or fallback_chat_id or "")
+    if not primary_key:
+        return []
+    async with _get_profile_lock(primary_key):
         async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
             await db.execute('PRAGMA busy_timeout=5000')
-            await db.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
-            await db.commit()
-
-async def get_profile_async(user_id):
-    async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT data FROM user_profiles WHERE user_id = ?', (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                return json.loads(row['data'])
-            return []
+            db.row_factory = aiosqlite.Row
+            merged_items = []
+            keys_to_query = [primary_key]
+            if fallback_chat_id and str(fallback_chat_id) != primary_key:
+                keys_to_query.append(str(fallback_chat_id))
+            for qk in keys_to_query:
+                async with db.execute('SELECT data FROM user_profiles WHERE user_id = ?', (qk,)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        try:
+                            items = json.loads(row['data'])
+                            if isinstance(items, list):
+                                for it in items:
+                                    if it not in merged_items:
+                                        merged_items.append(it)
+                        except Exception:
+                            pass
+            return merged_items
 
 async def save_profile_async(user_id, data):
-    async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
-        await db.execute('INSERT OR REPLACE INTO user_profiles (user_id, data) VALUES (?, ?)', (user_id, json.dumps(data)))
-        await db.commit()
+    primary_key = str(user_id or "")
+    if not primary_key:
+        return
+    async with _get_profile_lock(primary_key):
+        async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
+            await db.execute('PRAGMA busy_timeout=5000')
+            await db.execute('INSERT OR REPLACE INTO user_profiles (user_id, data) VALUES (?, ?)', (primary_key, json.dumps(data, ensure_ascii=False)))
+            await db.commit()
 
 def load_sessions():
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT chat_id, data FROM chat_sessions')
-        rows = cursor.fetchall()
+    with _db_session_rw_lock:
+        with closing(get_db()) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT chat_id, data FROM chat_sessions')
+            rows = cursor.fetchall()
     sessions = {}
     for row in rows:
-        data = json.loads(row['data'])
-        if not data.get('model') or data.get('model') in ['Gemini 3.5 Flash', 'Gemini 3.5 Flash (Medium)']:
-            data['model'] = DEFAULT_MODEL
-        sessions[row['chat_id']] = data
+        sessions[row['chat_id']] = _normalize_session_dict(row['data'])
     return sessions
 
 def save_sessions(sessions):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        for chat_id, data in sessions.items():
-            cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
-        conn.commit()
+    with _db_session_rw_lock:
+        with closing(get_db()) as conn:
+            cursor = conn.cursor()
+            for chat_id, data in sessions.items():
+                cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data, ensure_ascii=False)))
+            conn.commit()
 
 def get_session_sync(chat_id):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,))
-        row = cursor.fetchone()
+    with _db_session_rw_lock:
+        with closing(get_db()) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,))
+            row = cursor.fetchone()
     if row:
-        data = json.loads(row['data'])
-        if not data.get('model') or data.get('model') in ['Gemini 3.5 Flash', 'Gemini 3.5 Flash (Medium)']:
-            data['model'] = DEFAULT_MODEL
-        return data
+        return _normalize_session_dict(row['data'])
     return {"conversation": "", "model": DEFAULT_MODEL, "role": "无", "project": "默认"}
 
 def save_session_sync(chat_id, data):
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data)))
-        conn.commit()
+    with _db_session_rw_lock:
+        with closing(get_db()) as conn:
+            cursor = conn.cursor()
+            cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data, ensure_ascii=False)))
+            conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -316,42 +403,49 @@ def get_auth_session(chat_id: str):
 
 
 def save_auth_session(session: dict):
-    """INSERT OR REPLACE an auth_sessions record. Accepts either the full
-    dict (with 'scopes' as list) or a partial dict (missing fields keep DB
-    defaults / existing values)."""
-    existing = get_auth_session(session.get("chat_id", ""))
-    merged = dict(existing or {})
-    merged.update(session)
-    merged.setdefault("chat_id", "")
-    merged.setdefault("chat_type", "p2p")
-    merged.setdefault("display_name", "")
-    merged.setdefault("sender_open_id", "")
-    merged.setdefault("role", "guest")
-    merged.setdefault("scopes", [])
-    merged.setdefault("created_at", 0)
-    merged.setdefault("updated_at", 0)
-    merged.setdefault("granted_by", "")
-    merged.setdefault("request_count", 0)
-    merged.setdefault("last_request_at", 0)
-    merged.setdefault("last_hint_at", 0)
-    merged.setdefault("last_message", "")
+    """Atomically INSERT OR REPLACE an auth_sessions record inside a single BEGIN IMMEDIATE transaction."""
+    chat_id_val = session.get("chat_id", "")
+    with _auth_write_lock:
+        conn = get_db()
+        try:
+            conn.isolation_level = None
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                cursor.execute('SELECT * FROM auth_sessions WHERE chat_id = ?', (chat_id_val,))
+                existing = _auth_row_to_dict(cursor.fetchone())
+                merged = dict(existing or {})
+                merged.update(session)
+                merged.setdefault("chat_id", "")
+                merged.setdefault("chat_type", "p2p")
+                merged.setdefault("display_name", "")
+                merged.setdefault("sender_open_id", "")
+                merged.setdefault("role", "guest")
+                merged.setdefault("scopes", [])
+                merged.setdefault("created_at", 0)
+                merged.setdefault("updated_at", 0)
+                merged.setdefault("granted_by", "")
+                merged.setdefault("request_count", 0)
+                merged.setdefault("last_request_at", 0)
+                merged.setdefault("last_hint_at", 0)
+                merged.setdefault("last_message", "")
 
-    if isinstance(merged["scopes"], (list, tuple, set)):
-        merged["scopes"] = json.dumps(list(merged["scopes"]), ensure_ascii=False)
-    elif not isinstance(merged["scopes"], str):
-        merged["scopes"] = json.dumps(merged["scopes"], ensure_ascii=False)
+                if isinstance(merged["scopes"], (list, tuple, set)):
+                    merged["scopes"] = json.dumps(list(merged["scopes"]), ensure_ascii=False)
+                elif not isinstance(merged["scopes"], str):
+                    merged["scopes"] = json.dumps(merged["scopes"], ensure_ascii=False)
 
-    conn = get_db()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            f'INSERT OR REPLACE INTO auth_sessions ({", ".join(_AUTH_COLUMNS)}) '
-            f'VALUES ({", ".join(["?"] * len(_AUTH_COLUMNS))})',
-            [merged.get(c, 0 if c in ("created_at", "updated_at", "request_count", "last_request_at", "last_hint_at") else "") for c in _AUTH_COLUMNS],
-        )
-        conn.commit()
-    finally:
-        conn.close()
+                cursor.execute(
+                    f'INSERT OR REPLACE INTO auth_sessions ({", ".join(_AUTH_COLUMNS)}) '
+                    f'VALUES ({", ".join(["?"] * len(_AUTH_COLUMNS))})',
+                    [merged.get(c, 0 if c in ("created_at", "updated_at", "request_count", "last_request_at", "last_hint_at") else "") for c in _AUTH_COLUMNS],
+                )
+                cursor.execute("COMMIT")
+            except Exception:
+                cursor.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
 
 
 def list_auth_sessions():
@@ -419,8 +513,36 @@ def is_message_seen(message_id: str) -> bool:
 # Pending task persistence (queue survives restarts)
 # ---------------------------------------------------------------------------
 
+_last_pending_ts = 0
+_pending_ts_lock = threading.Lock()
+
+
+def allocate_pending_task_ts() -> int:
+    """Return a strictly monotonic millisecond timestamp so concurrent tasks in the same ms never collide."""
+    global _last_pending_ts
+    with _pending_ts_lock:
+        now_ms = int(time.time() * 1000)
+        if now_ms <= _last_pending_ts:
+            now_ms = _last_pending_ts + 1
+        _last_pending_ts = now_ms
+        return now_ms
+
+
+def _bump_pending_ts_floor(ts_val: int) -> None:
+    global _last_pending_ts
+    with _pending_ts_lock:
+        if ts_val > _last_pending_ts:
+            _last_pending_ts = ts_val
+
+
 def save_pending_task(chat_id: str, task: dict):
-    created_at = task.get("created_at") or int(time.time() * 1000)
+    raw_ts = task.get("created_at")
+    if raw_ts:
+        created_at = int(raw_ts)
+        _bump_pending_ts_floor(created_at)
+    else:
+        created_at = allocate_pending_task_ts()
+    task["created_at"] = created_at
     conn = get_db()
     try:
         cursor = conn.cursor()
@@ -446,8 +568,8 @@ def delete_pending_task(chat_id: str, created_at):
             (chat_id, int(created_at)),
         )
         conn.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"[pending] delete_pending_task failed for {chat_id} ({created_at}): {e}")
     finally:
         conn.close()
 
@@ -460,8 +582,8 @@ def clear_pending_tasks_for_chat(chat_id: str):
         cursor = conn.cursor()
         cursor.execute('DELETE FROM pending_tasks WHERE chat_id = ?', (chat_id,))
         conn.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"[pending] clear_pending_tasks_for_chat failed for {chat_id}: {e}")
     finally:
         conn.close()
 
@@ -476,11 +598,18 @@ def load_pending_tasks():
         for row in rows:
             try:
                 task = json.loads(row["task"])
-            except (json.JSONDecodeError, TypeError):
+                if not isinstance(task, dict):
+                    continue
+            except (json.JSONDecodeError, TypeError) as parse_err:
+                log.warning(f"[pending] Skipping malformed pending task row for {row['chat_id']}: {parse_err}")
                 continue
-            result.append((row["chat_id"], task, row["created_at"]))
+            row_ts = int(row["created_at"])
+            task["created_at"] = row_ts
+            _bump_pending_ts_floor(row_ts)
+            result.append((row["chat_id"], task, row_ts))
         return result
-    except Exception:
+    except Exception as e:
+        log.error(f"[pending] load_pending_tasks failed: {e}")
         return []
     finally:
         conn.close()
@@ -879,14 +1008,14 @@ def clear_cron_logs(chat_id: str = None) -> int:
 
 def save_pending_update_notice(chat_id, message_id, old_version=""):
     data = json.dumps({"chat_id": chat_id, "message_id": message_id, "old_version": old_version, "timestamp": time.time()})
-    with get_db() as conn:
+    with closing(get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute('INSERT OR REPLACE INTO bot_meta (key, value) VALUES (?, ?)', ('pending_update_notice', data))
         conn.commit()
 
 
 def get_and_clear_pending_update_notice():
-    with get_db() as conn:
+    with closing(get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT value FROM bot_meta WHERE key = ?', ('pending_update_notice',))
         row = cursor.fetchone()
@@ -895,7 +1024,7 @@ def get_and_clear_pending_update_notice():
             conn.commit()
             try:
                 return json.loads(row['value'])
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"[update_notice] Failed to parse pending_update_notice JSON: {e}")
     return None
 

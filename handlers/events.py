@@ -1,6 +1,7 @@
 """Feishu WebSocket IM event entrypoints."""
 import asyncio
 import json
+import threading
 import time
 from collections import OrderedDict
 
@@ -90,19 +91,23 @@ async def _handle_guest_message(chat_id, chat_type, sender_open_id, role, messag
         await send_card_to_chat_async(chat_id, CardBuilder.build_auth_hint_card())
 
 # 有界 LRU 集合：防止飞书 WebSocket 重连重发导致同一条消息被处理两次
-# 1000 条足够覆盖网络抖动窗口内的消息量，内存占用可忽略
+# 1000 条足够覆盖网络抖动窗口内的消息量，内存占用可忽略（加线程锁保护 SDK 多工作线程并发回调）
 _SEEN_MESSAGE_IDS = OrderedDict()
 _SEEN_MESSAGE_IDS_MAX = 1000
+_SEEN_LOCK = threading.Lock()
 
 
 def _mark_seen(message_id: str, chat_id: str, create_time=None) -> bool:
     """内存 LRU + SQLite 双层去重：先查内存，再落库（12h 窗口，重启后仍生效）。"""
-    if message_id in _SEEN_MESSAGE_IDS:
-        _SEEN_MESSAGE_IDS.move_to_end(message_id)
-        return False
-    _SEEN_MESSAGE_IDS[message_id] = None
-    if len(_SEEN_MESSAGE_IDS) > _SEEN_MESSAGE_IDS_MAX:
-        _SEEN_MESSAGE_IDS.popitem(last=False)
+    if not message_id:
+        return True
+    with _SEEN_LOCK:
+        if message_id in _SEEN_MESSAGE_IDS:
+            _SEEN_MESSAGE_IDS.move_to_end(message_id)
+            return False
+        _SEEN_MESSAGE_IDS[message_id] = None
+        if len(_SEEN_MESSAGE_IDS) > _SEEN_MESSAGE_IDS_MAX:
+            _SEEN_MESSAGE_IDS.popitem(last=False)
     return mark_message_seen(message_id, chat_id, create_time)
 
 
@@ -180,6 +185,9 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
         return
         
     if app_state.main_loop and app_state.main_loop.is_running():
-        asyncio.run_coroutine_threadsafe(handle_message_async(message_id, chat_id, message_type, content_raw), app_state.main_loop)
+        asyncio.run_coroutine_threadsafe(
+            handle_message_async(message_id, chat_id, message_type, content_raw, sender_open_id=sender_open_id),
+            app_state.main_loop,
+        )
     else:
         log.error("main_loop is not running!")

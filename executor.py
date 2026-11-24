@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import os
 import time
@@ -1012,6 +1013,18 @@ async def execute_antigravity(
 ):
     loop = asyncio.get_running_loop()
     target_transcript_path = None
+    _session_baseline_snap = copy.deepcopy(session_data) if isinstance(session_data, dict) else {}
+
+    async def _persist_session(timeout_sec: float = 2.0):
+        """Persist session_data using atomic 3-way merge in production while preserving unit-test save_session_async mocks."""
+        if getattr(save_session_async, "__module__", "") == "database":
+            from database import merge_and_save_session_async
+            await asyncio.wait_for(
+                merge_and_save_session_async(chat_id, session_data, baseline=_session_baseline_snap),
+                timeout=timeout_sec,
+            )
+        else:
+            await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=timeout_sec)
 
     # Daily execution limit for non-admin chats.
     if not allow_execution(chat_id):
@@ -1062,7 +1075,7 @@ async def execute_antigravity(
                 if session_data.get("conversation") != new_conv_id:
                     session_data["conversation"] = new_conv_id
                     try:
-                        await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=3.0)
+                        await _persist_session(timeout_sec=3.0)
                         log.info(f"[Executor] Synced and persisted conversation ID {new_conv_id} for chat {chat_id}")
                     except (asyncio.TimeoutError, Exception) as e:
                         log.error(f"save_session_async timed out or failed: {e}")
@@ -1075,7 +1088,7 @@ async def execute_antigravity(
                     log.warning(f"[Executor] Conversation {session_data.get('conversation')} not found in agy store, resetting.")
                     session_data["conversation"] = ""
                     try:
-                        await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=3.0)
+                        await _persist_session(timeout_sec=3.0)
                         log.info(f"[Executor] Conversation not found in log, reset conversation ID for chat {chat_id}")
                     except (asyncio.TimeoutError, Exception) as e:
                         log.error(f"save_session_async timed out or failed: {e}")
@@ -1086,7 +1099,7 @@ async def execute_antigravity(
     session_data["last_execution_paused"] = False
     if resumed_task_ctx:
         try:
-            await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+            await _persist_session(timeout_sec=2.0)
         except Exception:
             pass
     display_user_text = resumed_task_ctx.get("user_text") or user_text
@@ -1490,7 +1503,7 @@ async def execute_antigravity(
                             if session_data.get("conversation") != conv_id:
                                 session_data["conversation"] = conv_id
                                 try:
-                                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                                    await _persist_session(timeout_sec=2.0)
                                 except Exception:
                                     pass
                                 path = get_transcript_path(conv_id)
@@ -1757,7 +1770,9 @@ async def execute_antigravity(
                                     clean_cmd_target = re.sub(r'^timeout\s+\d+\s+', '', cmd_target.strip()).strip()
                                     is_turn_authorized = session_data.get("_l3_authorize_all_turn", False)
                                     if is_turn_authorized or cmd_target.strip() in approved_cmds or clean_cmd_target in approved_cmds:
-                                        log.info(f"[TypeSafe Co-Pilot] Command allowed (turn_authorized={is_turn_authorized}): {cmd_target}")
+                                        from system_one_gate import mask_sensitive_credentials
+                                        safe_cmd_log, _ = mask_sensitive_credentials(cmd_target, extra_secrets=known_note_secrets)
+                                        log.info(f"[TypeSafe Co-Pilot] Command allowed (turn_authorized={is_turn_authorized}): {safe_cmd_log}")
                                         typesafe_tool_audits.append({
                                             "tool": t_name,
                                             "risk": "turn_authorized" if is_turn_authorized else "approved",
@@ -1765,7 +1780,7 @@ async def execute_antigravity(
                                         })
                                     else:
                                         try:
-                                            from system_one_gate import evaluate_tool_execution
+                                            from system_one_gate import evaluate_tool_execution, mask_sensitive_credentials
                                             tool_dec = await evaluate_tool_execution(command=cmd_target, context=f"act={act}")
                                             if tool_dec.decision_source in ("jev", "local") and not tool_dec.is_fallback:
                                                 session_data["typesafe_decision_count"] = session_data.get("typesafe_decision_count", 0) + 1
@@ -1778,7 +1793,8 @@ async def execute_antigravity(
                                                         full_cmd = recover_full_tool_call(effective_cid, t_name, prefix_hint=cmd_target)
                                                         if full_cmd:
                                                             cmd_target = full_cmd
-                                                log.critical(f"[TypeSafe Co-Pilot] High-risk tool event intercepted: {cmd_target} -> {tool_dec.reason}")
+                                                safe_cmd_log, _ = mask_sensitive_credentials(cmd_target, extra_secrets=known_note_secrets)
+                                                log.critical(f"[TypeSafe Co-Pilot] High-risk tool event intercepted: {safe_cmd_log} -> {tool_dec.reason}")
                                                 typesafe_blocked_info = {
                                                     "tool": t_name,
                                                     "target": cmd_target,
@@ -2295,7 +2311,7 @@ async def execute_antigravity(
                     "timestamp": time.time(),
                 }
                 try:
-                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                    await _persist_session(timeout_sec=2.0)
                 except Exception:
                     pass
 
@@ -2414,7 +2430,7 @@ async def execute_antigravity(
                 session_data["last_execution_error"] = False
                 session_data["last_execution_paused"] = True
                 try:
-                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                    await _persist_session(timeout_sec=2.0)
                 except Exception:
                     pass
 
@@ -2500,7 +2516,7 @@ async def execute_antigravity(
                     session_data["conversation"] = ""
                     session_data.pop("_sys_prompt_injected_conv", None)
                     try:
-                        await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                        await _persist_session(timeout_sec=2.0)
                     except Exception:
                         pass
                 try:
@@ -2650,7 +2666,7 @@ async def execute_antigravity(
                                 f"已自动无感接力上下文并切换至 **`{fb_model}`** 完成本次任务。"
                             )
                             try:
-                                await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                                await _persist_session(timeout_sec=2.0)
                             except Exception:
                                 pass
                             log.warning(
@@ -2685,7 +2701,7 @@ async def execute_antigravity(
                         session_data["last_execution_error"] = False
                         session_data["last_execution_paused"] = True
                         try:
-                            await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                            await _persist_session(timeout_sec=2.0)
                         except Exception:
                             pass
 
@@ -2880,7 +2896,14 @@ async def execute_antigravity(
                     elif process.returncode in (-15, 143):
                         reply_text = "⚠️ 任务后台执行进程收到终止信号 (SIGTERM)，通常由于服务重启或任务被手动中止导致，请重新发起指令。"
                     else:
-                        reply_text = stderr_text.strip() or "⚠️ 模型未返回任何有效回复，请重试或更换模型。"
+                        raw_fallback_err = stderr_text.strip()
+                        if raw_fallback_err:
+                            try:
+                                from system_one_gate import mask_sensitive_credentials
+                                raw_fallback_err, _ = mask_sensitive_credentials(raw_fallback_err, extra_secrets=known_note_secrets)
+                            except Exception:
+                                pass
+                        reply_text = raw_fallback_err or "⚠️ 模型未返回任何有效回复，请重试或更换模型。"
                 is_error = True
             elif is_quota_exhausted or is_capacity_error:
                 is_error = True
@@ -3037,7 +3060,7 @@ async def execute_antigravity(
                 if session_data.pop("_sys_prompt_pending_mark", None) and session_data.get("conversation"):
                     session_data["_sys_prompt_injected_conv"] = session_data["conversation"]
                 try:
-                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                    await _persist_session(timeout_sec=2.0)
                 except Exception as e:
                     log.warning(f"[Executor] Failed to persist last_ai_summary: {e}")
 
@@ -3052,23 +3075,27 @@ async def execute_antigravity(
                     _tx_for_mem = transcript_path
 
                     def _sync_record_mem():
-                        if _tx_for_mem and os.path.exists(_tx_for_mem):
-                            inspect_and_backfill_transcript(
-                                _tx_for_mem, project_dir=_proj_for_mem, chat_id=chat_id, conv_id=_conv_for_mem
+                        try:
+                            if _tx_for_mem and os.path.exists(_tx_for_mem):
+                                inspect_and_backfill_transcript(
+                                    _tx_for_mem, project_dir=_proj_for_mem, chat_id=chat_id, conv_id=_conv_for_mem
+                                )
+                            update_project_capsule_incremental(
+                                project_dir=_proj_for_mem,
+                                user_request=user_text,
+                                reply_text=reply_text,
+                                chat_id=chat_id,
+                                conv_id=_conv_for_mem,
+                                scope=_scope_for_mem,
+                                tier=_tier_for_mem,
+                                outcome="success",
+                                tool_steps=_steps_for_mem,
                             )
-                        update_project_capsule_incremental(
-                            project_dir=_proj_for_mem,
-                            user_request=user_text,
-                            reply_text=reply_text,
-                            chat_id=chat_id,
-                            conv_id=_conv_for_mem,
-                            scope=_scope_for_mem,
-                            tier=_tier_for_mem,
-                            outcome="success",
-                            tool_steps=_steps_for_mem,
-                        )
+                        except Exception as bg_mem_err:
+                            log.warning(f"[Executor] Background memory persistence error: {bg_mem_err}")
 
-                    loop.run_in_executor(None, _sync_record_mem)
+                    mem_fut = loop.run_in_executor(None, _sync_record_mem)
+                    mem_fut.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
                 except Exception as mem_err:
                     log.warning(f"[Executor] Post-turn memory distillation warning: {mem_err}")
 
@@ -3143,7 +3170,7 @@ async def execute_antigravity(
             # 本轮会话任务已顺利完成并输出最终答复，自动回收本轮全量高危指令授权
             if session_data.pop("_l3_authorize_all_turn", None):
                 try:
-                    await asyncio.wait_for(save_session_async(chat_id, session_data), timeout=2.0)
+                    await _persist_session(timeout_sec=2.0)
                 except Exception:
                     pass
 

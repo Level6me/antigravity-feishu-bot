@@ -211,6 +211,7 @@ class PassportServer:
             self.active_websockets.discard(ws)
             self.device_info.pop(ws, None)
             self.voice_buffers.pop(ws, None)
+            self.tts_interrupted.pop(ws, None)
             log.info(f"[PassportBridge] 硬件客户端断开连接: {peer}")
             
         return ws
@@ -428,21 +429,29 @@ class PassportServer:
             # 通用命令执行
             output_msg = ""
             if cmd:
+                import signal
                 proc = None
                 try:
                     proc = await asyncio.create_subprocess_shell(
                         cmd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
-                        cwd=os.getcwd()
+                        cwd=os.getcwd(),
+                        start_new_session=True,
                     )
                     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
                     output_msg = (stdout.decode('utf-8', errors='ignore') or stderr.decode('utf-8', errors='ignore')).strip()
                 except asyncio.TimeoutError:
                     if proc and proc.returncode is None:
                         try:
-                            proc.kill()
-                            await proc.wait()
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except Exception:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                        try:
+                            await asyncio.wait_for(proc.wait(), timeout=2.0)
                         except Exception:
                             pass
                     output_msg = "执行超时 (15s)"
@@ -464,7 +473,7 @@ class PassportServer:
                         }
                     ]
                 }
-                send_card_to_chat_sdk(chat_id, card)
+                await asyncio.to_thread(send_card_to_chat_sdk, chat_id, card)
             return
 
         # 默认开箱即用动作
@@ -486,20 +495,35 @@ class PassportServer:
                         }
                     ]
                 }
-                send_card_to_chat_sdk(chat_id, checkin_card)
+                await asyncio.to_thread(send_card_to_chat_sdk, chat_id, checkin_card)
 
         elif macro_name == "up_double_click":
             # 宏 2: Up 双击 -> Git 代码库状态巡检
+            import signal
+            proc = None
             try:
                 proc = await asyncio.create_subprocess_shell(
                     "git branch --show-current && git status -s && git log -1 --oneline",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=os.getcwd()
+                    cwd=os.getcwd(),
+                    start_new_session=True,
                 )
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
                 git_info = stdout.decode('utf-8', errors='ignore').strip()
             except Exception as e:
+                if proc is not None and proc.returncode is None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=2.0)
+                    except Exception:
+                        pass
                 git_info = f"巡检失败: {e}"
 
             await self.broadcast_alert("Git 巡检完毕", "代码库状态已生成", level="info", duration_sec=4)
@@ -517,7 +541,7 @@ class PassportServer:
                         }
                     ]
                 }
-                send_card_to_chat_sdk(chat_id, git_card)
+                await asyncio.to_thread(send_card_to_chat_sdk, chat_id, git_card)
 
         elif macro_name == "down_double_click":
             # 宏 3: Down 双击 -> 工位防窥与安全锁屏 / 扩展动作
@@ -688,44 +712,63 @@ class PassportServer:
         # 3. 从数据库中查询最近活跃的真实会话
         try:
             import sqlite3
+            from contextlib import closing
             try:
                 from database import DB_FILE as db_path
             except ImportError:
                 db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "antigravity_bot.db"))
             if os.path.exists(db_path):
-                conn = sqlite3.connect(db_path)
-                c = conn.cursor()
-                row = c.execute("SELECT chat_id FROM chat_sessions LIMIT 1").fetchone()
-                if row and row[0]:
-                    chat_id = row[0]
-                    if self.plugin:
-                        cfg = self.plugin.get_config()
-                        cfg["bound_chat_id"] = chat_id
-                        self.plugin.save_config(cfg)
-                        log.info(f"[PassportBridge] 自动绑定最近活跃飞书会话: {chat_id}")
-                conn.close()
+                with closing(sqlite3.connect(db_path, timeout=10.0)) as conn:
+                    c = conn.cursor()
+                    row = c.execute("SELECT chat_id FROM chat_sessions LIMIT 1").fetchone()
+                    if row and row[0]:
+                        chat_id = row[0]
+                        if self.plugin:
+                            cfg = self.plugin.get_config()
+                            cfg["bound_chat_id"] = chat_id
+                            self.plugin.save_config(cfg)
+                            log.info(f"[PassportBridge] 自动绑定最近活跃飞书会话: {chat_id}")
         except Exception as e:
             log.warning(f"[PassportBridge] 自动解析活跃会话失败: {e}")
 
         return chat_id or ""
 
     async def _query_ai_agent(self, prompt: str, chat_id: str) -> str:
-        """调用飞书 Antigravity Agent 主工程流水线进行真实执行"""
-        from handlers.pipeline import _process_single_task
-        from database import get_session_async
+        """通过飞书主工程会话队列串行调度硬件语音任务，避免与飞书在线对话产生并发竞态"""
+        import app_state
+        from handlers.pipeline import process_chat_queue
+        from database import allocate_pending_task_ts, get_session_async
         try:
+            done_evt = asyncio.Event()
+            created_ts = allocate_pending_task_ts()
             task_payload = {
-                "message_id": f"hw_{int(time.time()*1000)}",
+                "message_id": f"hw_{created_ts}",
                 "message_type": "text",
                 "content_json": {},
                 "content_raw": prompt,
                 "raw_text": prompt,
-                "created_at": int(time.time() * 1000),
-                "from_hardware": True
+                "created_at": created_ts,
+                "from_hardware": True,
+                "_done_event": done_evt,
             }
-            log.info(f"[PassportBridge] 将硬件语音任务派发至飞书主工程流水线 (chat_id: {chat_id}, prompt: {prompt})")
-            await _process_single_task(chat_id, task_payload)
-            
+            try:
+                from system_one_gate import mask_sensitive_credentials
+                safe_prompt, _ = mask_sensitive_credentials(str(prompt or ""))
+            except Exception:
+                safe_prompt = str(prompt or "")
+            log.info(f"[PassportBridge] 将硬件语音任务排入飞书主会话队列 (chat_id: {chat_id}, preview: {safe_prompt[:80]})")
+
+            queue = app_state.chat_queues.get(chat_id)
+            if queue is None:
+                queue = asyncio.Queue()
+                app_state.chat_queues[chat_id] = queue
+            worker_active = bool(chat_id in app_state.chat_workers and not app_state.chat_workers[chat_id].done())
+            queue.put_nowait(task_payload)
+            if not worker_active:
+                app_state.chat_workers[chat_id] = asyncio.create_task(process_chat_queue(chat_id))
+
+            await done_evt.wait()
+
             # 读取执行完成并持久化保存的 AI 摘要
             updated_session = await get_session_async(chat_id)
             ai_summary = updated_session.get("last_ai_summary", "")
@@ -760,7 +803,7 @@ class PassportServer:
         self.tts_interrupted[ws] = False
         try:
             communicate = edge_tts.Communicate(spoken_text, "zh-CN-XiaoxiaoNeural")
-            await communicate.save(mp3_path)
+            await asyncio.wait_for(communicate.save(mp3_path), timeout=25.0)
             
             if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
                 cmd = [
@@ -773,7 +816,15 @@ class PassportServer:
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL
                 )
-                await proc.wait()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                        await asyncio.wait_for(proc.wait(), timeout=2.0)
+                    except Exception:
+                        pass
+                    raise
 
                 if os.path.exists(pcm_path) and os.path.getsize(pcm_path) > 0:
                     with open(pcm_path, "rb") as f:
@@ -792,6 +843,7 @@ class PassportServer:
         except Exception as e:
             log.error(f"[PassportBridge] TTS 合成推流失败: {e}")
         finally:
+            self.tts_interrupted.pop(ws, None)
             for p in (mp3_path, pcm_path):
                 if os.path.exists(p):
                     try:

@@ -154,9 +154,7 @@ class CronEngine:
                 )
                 result_text = f"提醒已准时送达飞书：{prompt}"
             elif action_type == "shell":
-                import importlib
-                import plugins.cron_scheduler.executors as _exc
-                importlib.reload(_exc)
+                from plugins.cron_scheduler import executors as _exc
                 is_success, res_str, _ = await _exc.execute_task(task, send_card_to_chat_sdk)
                 is_error = not is_success
                 result_text = res_str
@@ -182,7 +180,7 @@ class CronEngine:
                 # Execute Agent task with empty message_id to send directly to chat
                 # execute_antigravity 内部已完整发送 start_card + typing indicator + final_card
                 # cron_engine 不再重复推送 result_card，避免用户收到两张卡片
-                await execute_antigravity(
+                exec_err = await execute_antigravity(
                     chat_id=chat_id,
                     user_text=prompt,
                     message_id="",
@@ -195,6 +193,7 @@ class CronEngine:
                     download_success=False,
                     running_processes=app_state.running_processes
                 )
+                is_error = bool(exec_err)
                 
                 # 仅提取 transcript 内容用于日志记录，不重复推送卡片
                 from config import get_transcript_path
@@ -204,7 +203,10 @@ class CronEngine:
                 transcript_path = get_transcript_path(conv_id) if conv_id else None
                 
                 extracted = extract_final_response_from_transcript(transcript_path) if (transcript_path and os.path.exists(transcript_path)) else None
-                result_text = extracted or "任务已成功触发执行完成。"
+                if is_error and not extracted:
+                    result_text = "定时 Agent 任务执行异常或未能生成有效回复。"
+                else:
+                    result_text = extracted or "任务已成功触发执行完成。"
             
         except Exception as e:
             is_error = True
@@ -214,8 +216,9 @@ class CronEngine:
             try:
                 duration_ms = int((time.time() - start_time) * 1000)
                 now_ts = int(time.time())
+                err_detail = result_text if is_error else ""
                 await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: record_cron_log(task_id, "failed" if is_error else "success", result_text, "", duration_ms, task_meta=task)
+                    None, lambda: record_cron_log(task_id, "failed" if is_error else "success", result_text, err_detail, duration_ms, task_meta=task)
                 )
 
                 # 一次性倒计时任务触发完毕后立即从任务主表移除（仅保留 cron_logs 审计日志）

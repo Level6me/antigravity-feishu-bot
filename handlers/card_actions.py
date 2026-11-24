@@ -508,6 +508,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 is_truncated = clean_cmd.endswith("…") or clean_cmd.endswith("...")
                 syntax_err = ""
                 if not is_non_shell_tool and not is_truncated and clean_cmd:
+                    sh_check = None
                     try:
                         sh_check = await asyncio.create_subprocess_exec(
                             shell_bin, "-n", "-c", clean_cmd,
@@ -518,6 +519,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                         if sh_check.returncode != 0:
                             syntax_err = chk_err.decode('utf-8', errors='replace').strip()
                     except Exception as e:
+                        if sh_check is not None and sh_check.returncode is None:
+                            try:
+                                sh_check.kill()
+                                await asyncio.wait_for(sh_check.wait(), timeout=1.0)
+                            except Exception:
+                                pass
                         log.warning(f"[L3 Guard] Syntax check helper exception: {e}")
 
                 is_unterminated_quote = bool(
@@ -545,6 +552,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     ret_code = 2
                 else:
                     try:
+                        import signal
                         exec_env = os.environ.copy()
                         cur_path = exec_env.get("PATH", "")
                         extra_paths = [
@@ -566,7 +574,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                             cwd=cwd if (cwd and os.path.isdir(cwd)) else None,
                             env=exec_env,
                             stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
+                            stderr=asyncio.subprocess.PIPE,
+                            start_new_session=True,
                         )
                         try:
                             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=wait_timeout_sec)
@@ -576,7 +585,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                             ret_code = proc.returncode
                         except asyncio.TimeoutError:
                             try:
-                                proc.kill()
+                                os.killpg(proc.pid, signal.SIGKILL)
+                            except Exception:
+                                try:
+                                    proc.kill()
+                                except Exception:
+                                    pass
+                            try:
+                                await asyncio.wait_for(proc.wait(), timeout=2.0)
                             except Exception:
                                 pass
                             out_text = f"执行超时 ({int(wait_timeout_sec)}s)，已被系统安全截断中止"

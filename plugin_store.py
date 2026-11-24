@@ -1,8 +1,11 @@
 """Plugin Store and Lifecycle Management for antigravity-feishu-bot."""
 
 import os
+import re
 import shutil
 import json
+import tempfile
+import threading
 import subprocess
 from logger import log
 from plugin_base import BasePlugin
@@ -10,6 +13,38 @@ from plugin_base import BasePlugin
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")
 SOURCES_FILE = os.path.join(BASE_DIR, "plugin_sources.json")
+_SAFE_PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _atomic_write_json(filepath: str, payload) -> None:
+    """Write JSON atomically via same-directory temp file + os.replace."""
+    parent = os.path.dirname(os.path.abspath(filepath)) or "."
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=parent, prefix=".tmp_json_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, filepath)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def _resolve_safe_plugin_dir(plugin_id: str) -> str:
+    """Validate plugin_id against path traversal and return resolved directory inside PLUGINS_DIR."""
+    pid = (plugin_id or "").strip()
+    if not pid or ".." in pid or "/" in pid or "\\" in pid or not _SAFE_PLUGIN_ID_RE.match(pid):
+        raise ValueError(f"非法插件标识符: {plugin_id!r}")
+    plugins_root = os.path.abspath(PLUGINS_DIR)
+    target_dir = os.path.abspath(os.path.join(plugins_root, pid))
+    if os.path.commonpath([plugins_root, target_dir]) != plugins_root or target_dir == plugins_root:
+        raise ValueError(f"插件路径越界拒绝访问: {plugin_id!r}")
+    return target_dir
 
 DEFAULT_SOURCES = [
     {
@@ -35,10 +70,9 @@ def load_plugin_sources() -> list:
 
 
 def save_plugin_sources(sources: list):
-    """Save plugin sources list to JSON file."""
+    """Save plugin sources list to JSON file atomically."""
     try:
-        with open(SOURCES_FILE, "w", encoding="utf-8") as f:
-            json.dump(sources, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(SOURCES_FILE, sources)
     except Exception as e:
         log.error(f"[PluginStore] Error saving sources: {e}")
 
@@ -71,7 +105,10 @@ def install_plugin_from_github(repo_url: str, custom_id: str = "") -> tuple[bool
         repo_name = repo_name[:-4]
 
     plugin_id = custom_id if custom_id else repo_name
-    target_dir = os.path.join(PLUGINS_DIR, plugin_id)
+    try:
+        target_dir = _resolve_safe_plugin_dir(plugin_id)
+    except ValueError as ve:
+        return False, str(ve)
 
     if os.path.exists(target_dir):
         return False, f"插件目录 `{plugin_id}` 已存在，若要重装请先卸载。"
@@ -181,10 +218,13 @@ def _restart_plugin_daemon_if_needed(target_dir: str):
         if daemon_script or plugin_id in ("cron_scheduler", "passport_bridge"):
             daemon_name = manifest.get("daemon_name") or ("feishu-cron-daemon" if plugin_id == "cron_scheduler" else ("passport-bridge" if plugin_id == "passport_bridge" else f"feishu-{plugin_id.replace('_', '-')}-daemon"))
             
-            # Check if PM2 daemon is already running
-            chk = subprocess.run(["pm2", "describe", daemon_name], capture_output=True, text=True)
+            # Check if PM2 daemon is already running (bounded timeout + reaped subprocesses)
+            chk = subprocess.run(["pm2", "describe", daemon_name], capture_output=True, text=True, timeout=10)
             if chk.returncode == 0:
-                subprocess.Popen(["pm2", "restart", daemon_name, "--update-env"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(
+                    ["pm2", "restart", daemon_name, "--update-env"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False
+                )
                 log.info(f"[PluginStore] Successfully restarted PM2 service {daemon_name}")
             elif daemon_script:
                 script_path = os.path.join(target_dir, daemon_script)
@@ -192,9 +232,9 @@ def _restart_plugin_daemon_if_needed(target_dir: str):
                     import sys
                     venv_python = os.path.join(BASE_DIR, "venv", "bin", "python3")
                     python_bin = venv_python if os.path.exists(venv_python) else sys.executable
-                    subprocess.Popen(
+                    subprocess.run(
                         ["pm2", "start", script_path, "--name", daemon_name, "--cwd", target_dir, "--interpreter", python_bin],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False
                     )
                     log.info(f"[PluginStore] Started new PM2 service {daemon_name} with script {script_path}")
     except Exception as e:
@@ -203,7 +243,10 @@ def _restart_plugin_daemon_if_needed(target_dir: str):
 
 def update_plugin(plugin_id: str) -> tuple[bool, str]:
     """Pull latest code for an installed git-based plugin or sync from official monorepo."""
-    target_dir = os.path.join(PLUGINS_DIR, plugin_id)
+    try:
+        target_dir = _resolve_safe_plugin_dir(plugin_id)
+    except ValueError as ve:
+        return False, str(ve)
     if not os.path.exists(target_dir):
         return False, f"插件 `{plugin_id}` 不存在。"
 
@@ -277,7 +320,10 @@ def update_plugin(plugin_id: str) -> tuple[bool, str]:
 
 def uninstall_plugin(plugin_id: str) -> tuple[bool, str]:
     """Remove plugin directory physically."""
-    target_dir = os.path.join(PLUGINS_DIR, plugin_id)
+    try:
+        target_dir = _resolve_safe_plugin_dir(plugin_id)
+    except ValueError as ve:
+        return False, str(ve)
     if not os.path.exists(target_dir):
         return False, f"插件 `{plugin_id}` 不存在。"
 
@@ -329,6 +375,7 @@ DEFAULT_FEATURED_PLUGINS = [
 
 CACHE_FILE = os.path.join(BASE_DIR, "remote_plugin_cache.json")
 _store_cache = {"timestamp": 0, "plugins": None}
+_store_cache_lock = threading.Lock()
 
 
 def load_remote_store_cache() -> list:
@@ -345,10 +392,9 @@ def load_remote_store_cache() -> list:
 
 
 def save_remote_store_cache(plugins: list):
-    """Save remote plugin store list to disk for permanent persistence."""
+    """Save remote plugin store list to disk atomically for permanent persistence."""
     try:
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(plugins, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(CACHE_FILE, plugins)
         log.info(f"[PluginStore] Saved {len(plugins)} remote plugins to {CACHE_FILE}")
     except Exception as e:
         log.error(f"[PluginStore] Error saving cache file {CACHE_FILE}: {e}")
@@ -359,12 +405,14 @@ def fetch_remote_store_plugins(force_refresh: bool = False) -> list:
     import urllib.request
 
     if not force_refresh:
-        if _store_cache["plugins"]:
-            return _store_cache["plugins"]
+        with _store_cache_lock:
+            if _store_cache["plugins"]:
+                return list(_store_cache["plugins"])
         disk_plugins = load_remote_store_cache()
         if disk_plugins:
-            _store_cache["plugins"] = disk_plugins
-            return disk_plugins
+            with _store_cache_lock:
+                _store_cache["plugins"] = list(disk_plugins)
+            return list(disk_plugins)
 
     url = "https://api.github.com/repos/Level6me/feishu-bot-plugin/contents/plugins"
     try:
@@ -389,7 +437,9 @@ def fetch_remote_store_plugins(force_refresh: bool = False) -> list:
                 for feat in DEFAULT_FEATURED_PLUGINS:
                     if feat.get("id") not in fetched_ids:
                         fetched.append(feat)
-                _store_cache["plugins"] = fetched
+                with _store_cache_lock:
+                    _store_cache["plugins"] = list(fetched)
+                    _store_cache["timestamp"] = os.path.getmtime(CACHE_FILE) if os.path.exists(CACHE_FILE) else 0
                 save_remote_store_cache(fetched)
                 log.info(f"[PluginStore] Refreshed remote store plugins: {len(fetched)} plugins found.")
                 return fetched
@@ -397,5 +447,6 @@ def fetch_remote_store_plugins(force_refresh: bool = False) -> list:
         log.warning(f"[PluginStore] Failed to scan GitHub plugins directory: {e}")
 
     disk_plugins = load_remote_store_cache()
-    _store_cache["plugins"] = disk_plugins
-    return disk_plugins
+    with _store_cache_lock:
+        _store_cache["plugins"] = list(disk_plugins)
+    return list(disk_plugins)

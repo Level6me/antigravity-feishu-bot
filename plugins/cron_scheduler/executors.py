@@ -234,12 +234,10 @@ async def execute_task(task: dict, send_card_func=None) -> Tuple[bool, str, int]
             except Exception as _e_sel:
                 log.warning(f"[executors] Proc net socket cleanup error: {_e_sel}")
 
-            import importlib
-            import plugin_manager as _pm_mod
-            importlib.reload(_pm_mod)
-            _pm_mod.plugin_manager.reload_plugins()
+            from plugin_manager import plugin_manager as _global_pm
+            _global_pm.reload_plugins()
 
-            new_pb = plugin_manager.plugins.get("passport_bridge")
+            new_pb = _global_pm.plugins.get("passport_bridge")
             if new_pb and hasattr(new_pb, "server") and new_pb.server:
                 app_state._active_passport_server = new_pb.server
 
@@ -263,10 +261,12 @@ async def execute_task(task: dict, send_card_func=None) -> Tuple[bool, str, int]
             if not cmd:
                 raise ValueError("Shell 任务未指定可执行命令")
             
+            import signal
             proc = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60.0)
@@ -279,9 +279,19 @@ async def execute_task(task: dict, send_card_func=None) -> Tuple[bool, str, int]
                     is_success = False
                     result_text = f"❌ 命令执行返回非零状态码 `{proc.returncode}`\n\n```bash\n{err_str or out_str}\n```"
             except asyncio.TimeoutError:
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except Exception:
+                    pass
                 is_success = False
-                result_text = "❌ 命令执行超时 (超过 60 秒限制)，已强制终止。"
+                result_text = "❌ 命令执行超时 (超过 60 秒限制)，已强制终止整个进程组。"
 
             if send_card_func and chat_id:
                 card = build_execution_report_card(task, result_text, is_error=not is_success, duration_ms=int((time.time() - start_time) * 1000))

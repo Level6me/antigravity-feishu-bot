@@ -5,7 +5,7 @@ import re
 import time
 
 from commands import handle_slash_command
-from database import get_session_async, save_pending_task
+from database import allocate_pending_task_ts, get_session_async, save_pending_task
 from lark_client import send_reply_sdk
 from logger import log
 import stats
@@ -18,10 +18,26 @@ chat_workers = app_state.chat_workers
 chat_media_batches = app_state.chat_media_batches
 
 
-async def handle_message_async(message_id, chat_id, message_type, content_raw):
+def _redact_for_log(text: str, max_len: int = 120) -> str:
+    if not text:
+        return ""
+    try:
+        from system_one_gate import mask_sensitive_credentials
+        masked, _ = mask_sensitive_credentials(str(text))
+    except Exception:
+        masked = re.sub(
+            r"\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b",
+            "[REDACTED]",
+            str(text),
+        )
+    masked = re.sub(r"[\r\n]+", " ", masked).strip()
+    return masked[:max_len] + ("..." if len(masked) > max_len else "")
+
+
+async def handle_message_async(message_id, chat_id, message_type, content_raw, sender_open_id=""):
     try:
         stats.record_request()
-        await _handle_message_async_internal(message_id, chat_id, message_type, content_raw)
+        await _handle_message_async_internal(message_id, chat_id, message_type, content_raw, sender_open_id=sender_open_id)
     except Exception as e:
         stats.record_failure()
         import traceback
@@ -39,7 +55,7 @@ async def handle_message_async(message_id, chat_id, message_type, content_raw):
                 log.warning(f"[handle_message_async] Failed to send fallback error reply: {reply_err}")
 
 
-async def _handle_message_async_internal(message_id, chat_id, message_type, content_raw):
+async def _handle_message_async_internal(message_id, chat_id, message_type, content_raw, sender_open_id=""):
     loop = asyncio.get_running_loop()
     bot_reply_msg_id = None
 
@@ -77,7 +93,11 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
 
     # Load sessions early for slash commands
     session_data = await get_session_async(chat_id)
-    log.info(f"Message received: chat_id={chat_id}, message_type={message_type}, raw_text='{raw_text}', pending_command='{session_data.get('pending_command')}'")
+    safe_preview = "[REDACTED_PENDING_INPUT]" if session_data.get("pending_command") else _redact_for_log(raw_text)
+    log.info(
+        f"Message received: chat_id={chat_id}, message_type={message_type}, "
+        f"preview='{safe_preview}', pending_command='{session_data.get('pending_command')}'"
+    )
 
     # Handle slash commands first (this allows /stop to bypass the lock)
     cleaned_text = raw_text
@@ -100,22 +120,33 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
         stats.record_success()
         return
 
-    # 辅助任务分发函数
+    # 辅助任务分发函数：入队与 worker 启动必须在同一事件循环 tick 内无 await 原子完成，
+    # 彻底杜绝 send_reply_sdk 网络等待期间旧 worker 退出 pop(chat_queues) 引发 KeyError 或任务无人消费卡死！
     async def dispatch_task(c_id, msg_id, m_type, c_json, c_raw, r_text):
-        if c_id not in chat_queues:
-            chat_queues[c_id] = asyncio.Queue()
-            
+        queue = chat_queues.get(c_id)
+        if queue is None:
+            queue = asyncio.Queue()
+            chat_queues[c_id] = queue
+
+        worker_was_active = bool(c_id in chat_workers and not chat_workers[c_id].done())
+        ahead_count = queue.qsize() + (1 if worker_was_active else 0)
+
         task_payload = {
             "message_id": msg_id,
             "message_type": m_type,
             "content_json": c_json,
             "content_raw": c_raw,
             "raw_text": r_text,
-            "created_at": int(time.time() * 1000),
+            "sender_open_id": sender_open_id or "",
+            "created_at": allocate_pending_task_ts(),
         }
-        
-        if c_id in chat_workers and not chat_workers[c_id].done():
-            qsize = chat_queues[c_id].qsize()
+
+        queue.put_nowait(task_payload)
+        save_pending_task(c_id, task_payload)
+        if not worker_was_active:
+            chat_workers[c_id] = asyncio.create_task(process_chat_queue(c_id))
+
+        if worker_was_active:
             steer_hint = ""
             try:
                 from session_pool import session_pool
@@ -124,14 +155,8 @@ async def _handle_message_async_internal(message_id, chat_id, message_type, cont
                     steer_hint = "\n💡 提示：当前会话运行在 ACP 引擎下，如需在当前回合结束后自动续接补充指令，也可发送 `/steer <追加指令>`（不会立即中断当前步骤，立即打断请用 `/stop`）。"
             except Exception:
                 pass
-            warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {qsize + 1} 个任务)...{steer_hint}"
+            warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {ahead_count} 个任务)...{steer_hint}"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(msg_id, warning_msg))
-            await chat_queues[c_id].put(task_payload)
-            save_pending_task(c_id, task_payload)
-        else:
-            await chat_queues[c_id].put(task_payload)
-            save_pending_task(c_id, task_payload)
-            chat_workers[c_id] = asyncio.create_task(process_chat_queue(c_id))
 
     # 方案四：多模态多图合并批处理防抖机制
     if message_type in ["image", "file", "audio", "media"]:
