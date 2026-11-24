@@ -805,6 +805,44 @@ def extract_final_chinese_response(text):
 
     return text
 
+
+_RE_STANDALONE_TASK_PLAN_LINE = re.compile(r'^\s*\[TASK_PLAN\]', re.IGNORECASE)
+_RE_CODE_FENCE_LINE = re.compile(r'^\s*(?:```|~~~)')
+
+
+def count_standalone_task_plan_directives(text: str = "") -> int:
+    """Count real standalone [TASK_PLAN] directive lines, ignoring inline/prose mentions and fenced code blocks."""
+    if not text:
+        return 0
+    count = 0
+    in_code_fence = False
+    for line in str(text).splitlines():
+        if _RE_CODE_FENCE_LINE.match(line):
+            in_code_fence = not in_code_fence
+            continue
+        if not in_code_fence and _RE_STANDALONE_TASK_PLAN_LINE.match(line):
+            count += 1
+    return count
+
+
+def detect_plan_only_or_empty_turn(raw_reply: str = "", cleaned_reply: str = "") -> str:
+    """Classify a turn whose cleaned user-facing reply is empty.
+
+    Returns:
+        ""             - cleaned reply is non-empty (normal turn)
+        "plan_only"    - model emitted only [TASK_PLAN] directive(s) and ended turn without tool calls or final text
+        "chatter_only" - model emitted only stripped thought/preamble chatter
+        "silent_empty" - model emitted nothing at all
+    """
+    if (cleaned_reply or "").strip():
+        return ""
+    raw = (raw_reply or "").strip()
+    if not raw:
+        return "silent_empty"
+    if _RE_TASK_PLAN_PAIR.search(raw) or _RE_TASK_PLAN_OPEN.search(raw):
+        return "plan_only"
+    return "chatter_only"
+
 _GEMINI_SAFETY_BLOCK_RE = re.compile(
     r"(?:This request was blocked by Gemini's filters|blocked by Gemini's filters|blocked by content safety filters|triggered by mistake on safe coding,\s*security)",
     re.IGNORECASE,
@@ -1325,6 +1363,8 @@ async def execute_antigravity(
                     retry_hint = f"⚡ 原模型服务端 503 算力不足，已自动无感接力上下文并切换至 `{session_data.get('model', '')}` 继续执行...\n\n{user_text}"
                 elif session_data.pop("_was_budget_retry", False):
                     retry_hint = f"🔄 首轮执行触及步数/耗时预算，已自动携记忆胶囊与已完成进度发起第 {attempt}/2 次收敛重试...\n\n{user_text}"
+                elif session_data.pop("_was_empty_reply_retry", False):
+                    retry_hint = f"🔄 检测到模型首轮仅输出规划/未返回正文，正在自动续推执行 (第 {attempt}/2 次)...\n\n{user_text}"
                 else:
                     retry_hint = f"🔄 首次发起因无响应挂死，正在自动为您重新发起第 {attempt}/2 次重试...\n\n{user_text}"
                 init_card = CardBuilder.build_typing_indicator(
@@ -1569,7 +1609,7 @@ async def execute_antigravity(
                                         task_explicit_plan_locked = True
                                     task_planned_steps = list(planned_steps)
                                     task_plan_idx = current_plan_idx
-                                if "[TASK_PLAN]" in delta and len(re.findall(r"\[TASK_PLAN\]", accumulated_text, re.IGNORECASE)) >= 3:
+                                if "[TASK_PLAN]" in delta.upper() and count_standalone_task_plan_directives(accumulated_text) >= 3:
                                     budget_intercepted = True
                                     budget_exceeded_reason = "单轮内连续重复输出 [TASK_PLAN] 规划 >= 3 次（疑似上下文压缩后重规划循环）"
                                     log.warning(f"[BudgetWatchdog] {budget_exceeded_reason} in chat {chat_id}; intercepting.")
@@ -2762,10 +2802,68 @@ async def execute_antigravity(
                 return {"has_reply": False, "returncode": process.returncode or -1, "is_error": True, "is_quota_error": False, "is_capacity_error": False}
             
             reply_text = final_reply or accumulated_text.strip() or ""
+            raw_reply_before_clean = reply_text
             reply_text = re.sub(r'^Warning: conversation ".*?" not found\.?\r?\n*', '', reply_text).strip()
             reply_text = re.sub(r'\[Message\] timestamp=.*?content=.*?(?=\n\n|\Z)', '', reply_text, flags=re.DOTALL).strip()
             if not is_quota_exhausted and not is_capacity_error and not typesafe_blocked_info:
                 reply_text = extract_final_chinese_response(reply_text)
+
+            # 静默/纯规划标签空回自愈：
+            # 当底层模型“正常结束回合”(stream_is_done=True 且无进程/流异常)，但仅输出了规划标签/思考过渡语或空内容、
+            # 导致清洗后 reply_text 为空时，保留热会话缓存并自动向模型追加一次续推指令，避免直接报错“模型未返回任何有效回复”。
+            empty_turn_kind = detect_plan_only_or_empty_turn(raw_reply_before_clean, reply_text)
+            if (
+                empty_turn_kind
+                and stream_is_done
+                and not has_abnormal_termination
+                and not is_quota_exhausted
+                and not is_capacity_error
+                and not typesafe_blocked_info
+                and not is_print_timeout
+                and attempt < 2
+                and not is_quota_error(combined_err_text)
+                and not is_model_capacity_error(combined_err_text)
+                and not detect_and_format_agent_system_error(combined_err_text, model_name=session_data.get("model", ""))
+            ):
+                log.warning(
+                    f"[Executor] Attempt {attempt} ended cleanly with empty reply "
+                    f"(kind={empty_turn_kind}, raw_len={len(raw_reply_before_clean)}, tools={len(completed_tool_steps)}) "
+                    f"in chat {chat_id}. Triggering automatic continuation nudge (attempt {attempt + 1})."
+                )
+                if empty_turn_kind == "plan_only":
+                    plan_summary = " -> ".join(planned_steps[:8]) if planned_steps else "既定排查与执行步骤"
+                    done_summary = " -> ".join(completed_tool_steps[-8:]) if completed_tool_steps else "尚无"
+                    nudge_ctx = (
+                        "\n[Empty-Turn Continuation Nudge / 纯规划空回自动续推 (Attempt 2/2)]\n"
+                        "- 检测结果：你上一轮仅输出了任务规划标签，但未发起任何工具调用也未输出最终结论就提前结束了回合。\n"
+                        f"- 已规划步骤：{plan_summary}\n"
+                        f"- 已完成工具步数 ({len(completed_tool_steps)}步)：{done_summary}\n"
+                        "- 【强制要求】：不要重复输出任务规划标签！请立即调用所需工具执行上述步骤，并在完成后直接输出完整的简体中文最终结论。\n"
+                        "[/Empty-Turn Continuation Nudge]\n"
+                    )
+                else:
+                    nudge_ctx = (
+                        "\n[Empty-Turn Continuation Nudge / 空回复自动续推 (Attempt 2/2)]\n"
+                        "- 检测结果：你上一轮未返回任何有效中文正文回复就结束了回合。\n"
+                        "- 【强制要求】：请立即执行所需操作或直接输出完整的简体中文最终结论，切勿仅输出思考过程或空回复。\n"
+                        "[/Empty-Turn Continuation Nudge]\n"
+                    )
+                session_data["_budget_retry_context"] = nudge_ctx
+                session_data["_was_empty_reply_retry"] = True
+                if not sess.is_alive():
+                    try:
+                        await sess.close()
+                    except Exception:
+                        pass
+                return {
+                    "has_reply": False,
+                    "returncode": -2,
+                    "is_error": True,
+                    "is_quota_error": False,
+                    "is_capacity_error": False,
+                    "empty_reply_auto_retry": True,
+                    "empty_turn_kind": empty_turn_kind,
+                }
 
             # 若成功提取到模型有效回复，说明本轮核心任务/文本已正常生成交付，不可判定为执行失败或追加故障诊断
             if reply_text and not is_quota_exhausted and not is_capacity_error:
@@ -2903,7 +3001,11 @@ async def execute_antigravity(
                                 raw_fallback_err, _ = mask_sensitive_credentials(raw_fallback_err, extra_secrets=known_note_secrets)
                             except Exception:
                                 pass
-                        reply_text = raw_fallback_err or "⚠️ 模型未返回任何有效回复，请重试或更换模型。"
+                            reply_text = raw_fallback_err
+                        elif empty_turn_kind == "plan_only":
+                            reply_text = "⚠️ 模型仅输出了任务规划但未发起工具调用或返回正文（常见于超长会话上下文），请重试、发送 /compact 压缩上下文或更换模型。"
+                        else:
+                            reply_text = "⚠️ 模型未返回任何有效回复，请重试或更换模型。"
                 is_error = True
             elif is_quota_exhausted or is_capacity_error:
                 is_error = True
@@ -3211,6 +3313,13 @@ async def execute_antigravity(
         res = await _run_single_attempt(attempt)
         if res.get("capacity_auto_fallback") and attempt < MAX_ATTEMPTS:
             log.info(f"[Executor] Executing capacity auto-fallback retry attempt {attempt + 1}/{MAX_ATTEMPTS} for chat {chat_id}...")
+            await asyncio.sleep(0.2)
+            continue
+        if res.get("empty_reply_auto_retry") and attempt < MAX_ATTEMPTS:
+            log.info(
+                f"[Executor] Executing automatic continuation nudge (attempt {attempt + 1}/{MAX_ATTEMPTS}) "
+                f"after {res.get('empty_turn_kind') or 'empty'} turn for chat {chat_id}..."
+            )
             await asyncio.sleep(0.2)
             continue
         if res.get("is_quota_error") or res.get("is_capacity_error") or res["has_reply"] or res["returncode"] == 0 or attempt == MAX_ATTEMPTS:
