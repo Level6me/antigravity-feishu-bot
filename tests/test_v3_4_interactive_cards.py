@@ -187,11 +187,34 @@ class TestV34InteractiveCards(unittest.IsolatedAsyncioTestCase):
             "gemini-3.8-flash-low Gemini 3.8 Flash (Low)",
             "gemini-3.8-flash-medium Gemini 3.8 Flash (Medium)",
             "gemini-3.8-flash-high Gemini 3.8 Flash (High)",
+            "gemini-4-argon-low Gemini 4 Argon (Low)",
+            "gemini-4-argon-high Gemini 4 Argon (High)",
+            "gemini-4-argon-medium Gemini 4 Argon (Medium)",
+            "gemini-4-hydrogen-low Gemini 4 Hydrogen (Low)",
+            "gemini-4-hydrogen-xhigh Gemini 4 Hydrogen (xHigh)",
+            "gemini-4-hydrogen-medium Gemini 4 Hydrogen (Medium)",
+            "gemini-4-hydrogen-high Gemini 4 Hydrogen (High)",
         ]
         m_card = CardBuilder.build_model_panel(models, "gemini-3.8-flash-high", agent_mode="plan")
         m_raw = json.dumps(m_card, ensure_ascii=False)
         self.assertIn("switch_agent_mode", m_raw)
-        self.assertIn("✅ High", m_raw)
+        # 1. Selected tier uses blue primary highlight without ✅ prefix
+        self.assertNotIn("✅ High", m_raw)
+        col_sets = [el for el in m_card["elements"] if el.get("tag") == "column_set"]
+        row_titles = [cs["columns"][0]["elements"][0]["content"] for cs in col_sets]
+        # 2. Gemini 3.8 Flash is placed directly below Gemini 4 Argon
+        argon_pos = next(i for i, t in enumerate(row_titles) if "Gemini 4 Argon" in t)
+        flash_pos = next(i for i, t in enumerate(row_titles) if "Gemini 3.8 Flash" in t)
+        self.assertEqual(flash_pos, argon_pos + 1)
+        # 3. Reasoning depth order is xHigh -> High -> Med -> Low
+        h_row = next(cs for cs in col_sets if "Gemini 4 Hydrogen" in cs["columns"][0]["elements"][0]["content"])
+        h_btn_labels = [c["elements"][0]["text"]["content"] for c in h_row["columns"][1:]]
+        self.assertEqual(h_btn_labels, ["xHigh", "High", "Med", "Low"])
+        f_row = col_sets[flash_pos]
+        f_btns = [c["elements"][0] for c in f_row["columns"][1:]]
+        self.assertEqual([b["text"]["content"] for b in f_btns], ["High", "Med", "Low"])
+        self.assertEqual(f_btns[0]["type"], "primary")  # High is selected -> blue highlight
+        self.assertEqual(f_btns[1]["type"], "default")
 
         h_common = CardBuilder.build_help_card(is_admin_user=False, active_tab="common")
         h_raw = json.dumps(h_common, ensure_ascii=False)

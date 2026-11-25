@@ -34,6 +34,13 @@ _TIER_SHORT_LABELS = {
     "xhigh": "xHigh",
     "max": "Max",
 }
+_TIER_DISPLAY_ORDER = {
+    "Max": 0,
+    "xHigh": 1,
+    "High": 2,
+    "Med": 3,
+    "Low": 4,
+}
 
 
 def _split_model_base_and_tier(m_id: str, m_label: str):
@@ -174,10 +181,27 @@ def build_model_panel(
                 family_order.append(base_id)
             family_buckets[base_id]["items"].append((m_id, m_label, tier_short))
 
+        # 将 Gemini 3.8 Flash 精准排布在 Gemini 4 Argon 正下方
+        if group_key == "gemini":
+            flash_38_ids = [
+                fid for fid in family_order
+                if "3.8" in fid.lower() and "flash" in fid.lower()
+            ]
+            if flash_38_ids and any("argon" in fid.lower() for fid in family_order):
+                reordered = [fid for fid in family_order if fid not in flash_38_ids]
+                argon_idx = next((i for i, fid in enumerate(reordered) if "argon" in fid.lower()), len(reordered) - 1)
+                for offset, fid in enumerate(flash_38_ids, start=1):
+                    reordered.insert(argon_idx + offset, fid)
+                family_order = reordered
+
         standalone_actions = []
         for base_id in family_order:
             bucket = family_buckets[base_id]
-            items = bucket["items"]
+            # 思考深度统一按 xHigh -> High -> Med -> Low（从高到低）排列
+            items = sorted(
+                bucket["items"],
+                key=lambda it: _TIER_DISPLAY_ORDER.get(it[2], 99),
+            )
             has_unhealthy_in_family = any(
                 isinstance((health_statuses or {}).get(mid.lower()), dict)
                 and (health_statuses or {})[mid.lower()].get("status") == "unhealthy"
@@ -202,9 +226,7 @@ def build_model_panel(
                     )
                     if is_current:
                         any_active_in_row = True
-                    h_info = (health_statuses or {}).get(m_id.lower(), {})
-                    h_status = h_info.get("status", "unknown") if isinstance(h_info, dict) else "unknown"
-                    prefix = "✅ " if is_current else ("🟢 " if h_status == "healthy" else "")
+                    # 选中档位仅用蓝色 primary 高亮，不加 ✅ 图标
                     row_btns.append({
                         "tag": "column",
                         "width": "auto",
@@ -212,7 +234,7 @@ def build_model_panel(
                             {
                                 "tag": "button",
                                 "size": "small",
-                                "text": {"tag": "plain_text", "content": f"{prefix}{t_short}"},
+                                "text": {"tag": "plain_text", "content": t_short},
                                 "type": "primary" if is_current else "default",
                                 "value": {"action": "switch_model", "model": m_id},
                             }
@@ -247,13 +269,13 @@ def build_model_panel(
                     h_info = (health_statuses or {}).get(m_id.lower(), {})
                     h_status = h_info.get("status", "unknown") if isinstance(h_info, dict) else "unknown"
                     if h_status == "unhealthy":
-                        display = f"{'✅ ' if is_current else ''}🔴 {m_label} (503拥堵)"
+                        display = f"🔴 {m_label} (503拥堵)"
                         btn_type = "danger"
                     elif h_status == "healthy":
-                        display = f"{'✅ ' if is_current else ''}🟢 {m_label}"
+                        display = f"🟢 {m_label}"
                         btn_type = "primary" if is_current else "default"
                     else:
-                        display = f"✅ {m_label}" if is_current else m_label
+                        display = m_label
                         btn_type = "primary" if is_current else "default"
                     standalone_actions.append({
                         "tag": "button",
