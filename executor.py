@@ -1259,7 +1259,11 @@ async def execute_antigravity(
         owner_chat_id = session_data.get("_owner_chat_id") or chat_id
 
         async def _deliver_card_reliably(card_obj, label_prefix: str = "card"):
-            if bot_reply_msg_id:
+            _ck = task_meta.get("_cardkit_ctrl") if isinstance(task_meta, dict) else None
+            if _ck and getattr(_ck, "active", False):
+                if await _ck.finalize(card_obj):
+                    return bot_reply_msg_id or True
+            elif bot_reply_msg_id:
                 patched = await _feishu_call(
                     lambda: patch_interactive_card_sdk(bot_reply_msg_id, card_obj),
                     label=f"{label_prefix} patch",
@@ -1444,7 +1448,7 @@ async def execute_antigravity(
             if bot_reply_msg_id:
                 if attempt > 1 or is_resumed:
                     if cardkit_ctrl and getattr(cardkit_ctrl, "active", False):
-                        await cardkit_ctrl.stream_card(init_card)
+                        await cardkit_ctrl.update_card_instant(init_card)
                     else:
                         await _feishu_call(
                             lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card),
@@ -2325,35 +2329,32 @@ async def execute_antigravity(
                 has_tool_in_flight = bool(current_tool_action or stream_action) or (waiting_for_bg_tasks and bool(bg_wait_pending_ids))
                 is_complex = bool(planned_steps or completed_tool_steps)
 
-                # 判定是否切换到打字机文本流式输出：
-                # 1. 如果工具正在执行中，绝对不切换，保持显示规划步骤/工具进度卡片；
-                # 2. 如果是纯问答无工具任务，只要有文本输出立即打字机流式呈现；
-                # 3. 如果是多步骤复杂任务，仅在所有工具执行完毕、且模型输出实质性长总结文本（>=120字）时才切换至打字机
+                # 仅在输出最终回复结果阶段开启打字机流式输出；思考提示、任务规划与工具进度卡片一律静默瞬刷（不使用打字机）：
+                # 1. 有任何运行中工具或后台任务等待时，绝不切换流式打字机；
+                # 2. 纯问答任务：过滤开头极短碎片（>=12字）后直接流式打字机输出最终回复；
+                # 3. 多步工程任务：须推进至最后规划阶段（或无剩余规划）且输出实质最终总结（>=80字）才开启打字机
                 is_streaming_text = False
                 guard_before_delivery = (
                     config.TYPESAFE_ENABLED
                     and config.TYPESAFE_TIER in ("sentry", "copilot")
                 )
+                in_final_plan_stage = (not planned_steps) or (current_plan_idx >= len(planned_steps) - 1)
                 if clean_partial and not has_tool_in_flight:
                     if is_voice_message:
-                        # 语音对话模式：流式生成期间不提前打字剧透，优先保证语音消息首先送达
                         is_streaming_text = False
                     elif guard_before_delivery:
                         from system_one_gate import mask_sensitive_credentials
                         clean_partial, _ = mask_sensitive_credentials(clean_partial, extra_secrets=known_note_secrets)
                         if _STREAM_GUARD_RISK_RE.search(clean_partial):
-                            # 仅当脱敏后仍命中高危破坏指令时才暂缓流式
                             is_streaming_text = False
-                        elif not is_complex:
+                        elif not is_complex and len(clean_partial) >= 12:
                             is_streaming_text = True
-                        else:
-                            if len(clean_partial) >= 120:
-                                is_streaming_text = True
-                    elif not is_complex:
+                        elif is_complex and in_final_plan_stage and len(clean_partial) >= 80:
+                            is_streaming_text = True
+                    elif not is_complex and len(clean_partial) >= 12:
                         is_streaming_text = True
-                    else:
-                        if len(clean_partial) >= 120:
-                            is_streaming_text = True
+                    elif is_complex and in_final_plan_stage and len(clean_partial) >= 80:
+                        is_streaming_text = True
 
                 desired_patch_interval = 0.20
                 if is_streaming_text:
@@ -2430,7 +2431,12 @@ async def execute_antigravity(
                         pass
                     if bot_reply_msg_id:
                         if cardkit_ctrl and getattr(cardkit_ctrl, "active", False):
-                            await cardkit_ctrl.stream_card(indicator_card)
+                            if is_streaming_text:
+                                # 仅在最终结果输出阶段启用 CardKit 原生打字机流式输出
+                                await cardkit_ctrl.stream_final_text(display_partial)
+                            else:
+                                # 思考计时、任务规划、工具调用进度与卡顿提示一律使用无打字机的瞬时整卡更新
+                                await cardkit_ctrl.update_card_instant(indicator_card)
                         elif not hasattr(patch_interactive_card_sdk, "_mock_name"):
                             from lark_client import async_patch_interactive_card
                             try:
@@ -3215,8 +3221,15 @@ async def execute_antigravity(
                 except Exception as e:
                     log.error(f"[Executor] Prioritized voice reply failed or timed out: {e}")
 
-            # 2. 语音消息已送达，紧接着让卡片启动打字机效果呈现完整文字
-            if not is_error and bot_reply_msg_id and reply_text:
+            # 2. 非 CardKit 降级路径下：语音消息送达或长最终结果收尾过渡（CardKit 路径统一由下方 finalize 原生打字机处理）
+            _active_ck_pre = locals().get("cardkit_ctrl")
+            if (
+                not (_active_ck_pre and getattr(_active_ck_pre, "active", False))
+                and not is_error
+                and bot_reply_msg_id
+                and reply_text
+                and (is_voice_message or len(reply_text) - last_streamed_length > 1500)
+            ):
                 try:
                     safe_start_index = 0 if is_voice_message else min(last_streamed_length, len(reply_text))
                     await _stream_typewriter_to_feishu(
@@ -3358,7 +3371,12 @@ async def execute_antigravity(
             if bot_reply_msg_id:
                 patch_ok = None
                 if active_ck_ctrl and getattr(active_ck_ctrl, "active", False):
-                    ck_done = await active_ck_ctrl.finalize(final_card)
+                    if not is_error and reply_text and getattr(active_ck_ctrl, "streaming_enabled", False) and len(reply_text) > last_streamed_length:
+                        await active_ck_ctrl.stream_final_text(reply_text)
+                    ck_done = await active_ck_ctrl.finalize(
+                        final_card,
+                        typewriter_text=(reply_text if (not is_error and reply_text and not getattr(active_ck_ctrl, "streaming_enabled", False)) else ""),
+                    )
                     if ck_done:
                         patch_ok = True
                     else:

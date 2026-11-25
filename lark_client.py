@@ -144,7 +144,12 @@ async def async_patch_interactive_card(message_id: str, card_content: dict, max_
 
 
 class CardKitStreamController:
-    """Feishu CardKit 2.0 Native 60fps Streaming Controller with zero-risk automatic fallback."""
+    """Feishu CardKit 2.0 Controller:
+    - Non-final states (thinking, task plan, tool progress, warnings) use `streaming_mode=False`
+      via `update_card_instant()` for crisp, zero-typewriter instant updates.
+    - ONLY final answer output activates `streaming_mode=True` via `stream_final_text()` for
+      smooth native 60fps typewriter streaming.
+    """
 
     def __init__(self, message_id: str, chat_id: str = ""):
         self.message_id = message_id
@@ -153,6 +158,7 @@ class CardKitStreamController:
         self.bot_reply_msg_id: str = ""
         self.seq: int = 1
         self.active: bool = False
+        self.streaming_enabled: bool = False
 
     @staticmethod
     def can_attempt() -> bool:
@@ -165,9 +171,7 @@ class CardKitStreamController:
         return bool(app_id and app_secret)
 
     async def create_and_send(self, init_card_v1: dict) -> str:
-        """Create a CardKit 2.0 streaming card entity and reply to `message_id` (or send to `chat_id`).
-        Returns `bot_reply_msg_id` on success, or empty string if unsupported/failed (triggering transparent fallback).
-        """
+        """Create a CardKit 2.0 card entity with `streaming_mode=False` (no typewriter on initial thinking card)."""
         if not self.can_attempt():
             return ""
         try:
@@ -176,7 +180,7 @@ class CardKitStreamController:
             if not token:
                 return ""
             client = _get_async_http_client()
-            v2_card = convert_card_v1_to_v2(init_card_v1, stream_element_id="stream_md", streaming_mode=True)
+            v2_card = convert_card_v1_to_v2(init_card_v1, stream_element_id="stream_md", streaming_mode=False)
             create_resp = await client.post(
                 "/open-apis/cardkit/v1/cards",
                 json={"type": "card_json", "data": _compact_json(v2_card)},
@@ -185,7 +189,6 @@ class CardKitStreamController:
             c_data = create_resp.json()
             c_code = c_data.get("code", -1)
             if c_code != 0:
-                # Permission missing (e.g. 99991672 cardkit:card:write not enabled) -> cache & fallback cleanly
                 if c_code in (99991672, 99991668) or "permission" in str(c_data.get("msg", "")).lower():
                     _CARDKIT_CAPABILITY_STATE["supported"] = False
                     log.info(
@@ -224,35 +227,14 @@ class CardKitStreamController:
                     self.card_id = card_id
                     self.bot_reply_msg_id = msg_id
                     self.active = True
+                    self.streaming_enabled = False
                     return msg_id
         except Exception as e:
             log.debug(f"[CardKit] create_and_send fallback: {e}")
         return ""
 
-    async def stream_card(self, indicator_card_v1: dict) -> bool:
-        """Stream markdown delta/full text into `stream_md` element via CardKit Streaming API."""
-        if not self.active or not self.card_id:
-            return False
-        try:
-            from cards.common import extract_primary_markdown_from_card
-            token = await _get_tenant_access_token_async()
-            if not token:
-                return False
-            md_text = extract_primary_markdown_from_card(indicator_card_v1)
-            self.seq += 1
-            client = _get_async_http_client()
-            resp = await client.put(
-                f"/open-apis/cardkit/v1/cards/{self.card_id}/elements/stream_md/content",
-                json={"content": md_text, "sequence": self.seq},
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            return resp.json().get("code") == 0
-        except Exception as e:
-            log.debug(f"[CardKit] stream_card warning: {e}")
-            return False
-
-    async def finalize(self, final_card_v1: dict) -> bool:
-        """Close `streaming_mode` and commit full final Card 2.0 (including interactive buttons & context bar)."""
+    async def update_card_instant(self, card_v1: dict) -> bool:
+        """Update intermediate state cards (thinking, tool steps, progress bars) INSTANTLY with `streaming_mode=False`."""
         if not self.active or not self.card_id:
             return False
         try:
@@ -261,15 +243,141 @@ class CardKitStreamController:
             if not token:
                 return False
             client = _get_async_http_client()
+            if self.streaming_enabled:
+                self.seq += 1
+                await client.patch(
+                    f"/open-apis/cardkit/v1/cards/{self.card_id}/settings",
+                    json={
+                        "settings": _compact_json({"config": {"streaming_mode": False}}),
+                        "sequence": self.seq,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                self.streaming_enabled = False
+
+            v2_card = convert_card_v1_to_v2(card_v1, stream_element_id="stream_md", streaming_mode=False)
             self.seq += 1
-            await client.patch(
-                f"/open-apis/cardkit/v1/cards/{self.card_id}/settings",
+            resp = await client.put(
+                f"/open-apis/cardkit/v1/cards/{self.card_id}",
                 json={
-                    "settings": _compact_json({"config": {"streaming_mode": False}}),
+                    "card": {"type": "card_json", "data": _compact_json(v2_card)},
                     "sequence": self.seq,
                 },
                 headers={"Authorization": f"Bearer {token}"},
             )
+            return resp.json().get("code") == 0
+        except Exception as e:
+            log.debug(f"[CardKit] update_card_instant warning: {e}")
+            return False
+
+    async def stream_final_text(self, text: str, header_title: str = "✨ AI 回复中...") -> bool:
+        """Enable `streaming_mode=True` on first final-answer chunk and stream pure prefix-appended Markdown
+        so ONLY the final response exhibits the smooth native typewriter effect."""
+        if not self.active or not self.card_id or not text:
+            return False
+        try:
+            from cards.common import sanitize_feishu_markdown
+            token = await _get_tenant_access_token_async()
+            if not token:
+                return False
+            client = _get_async_http_client()
+            clean_md = sanitize_feishu_markdown(text[:25000])
+
+            if not self.streaming_enabled:
+                shell_v2 = {
+                    "schema": "2.0",
+                    "config": {
+                        "wide_screen_mode": True,
+                        "update_multi": True,
+                        "streaming_mode": True,
+                        "summary": {"content": "[生成回复中...]"},
+                        "streaming_config": {
+                            "print_frequency_ms": {"default": 30},
+                            "print_step": {"default": 2},
+                        },
+                    },
+                    "header": {
+                        "template": "wathet",
+                        "title": {"tag": "plain_text", "content": header_title},
+                    },
+                    "body": {
+                        "elements": [
+                            {"tag": "markdown", "element_id": "stream_md", "content": ""},
+                        ]
+                    },
+                }
+                self.seq += 1
+                await client.put(
+                    f"/open-apis/cardkit/v1/cards/{self.card_id}",
+                    json={
+                        "card": {"type": "card_json", "data": _compact_json(shell_v2)},
+                        "sequence": self.seq,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                self.seq += 1
+                await client.patch(
+                    f"/open-apis/cardkit/v1/cards/{self.card_id}/settings",
+                    json={
+                        "settings": _compact_json({
+                            "config": {
+                                "streaming_mode": True,
+                                "streaming_config": {
+                                    "print_frequency_ms": {"default": 30},
+                                    "print_step": {"default": 2},
+                                },
+                            }
+                        }),
+                        "sequence": self.seq,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                self.streaming_enabled = True
+
+            self.seq += 1
+            resp = await client.put(
+                f"/open-apis/cardkit/v1/cards/{self.card_id}/elements/stream_md/content",
+                json={"content": clean_md, "sequence": self.seq},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            return resp.json().get("code") == 0
+        except Exception as e:
+            log.debug(f"[CardKit] stream_final_text warning: {e}")
+            return False
+
+    async def stream_card(self, indicator_card_v1: dict) -> bool:
+        """Backward-compatible alias: extracts primary markdown and streams as final text."""
+        from cards.common import extract_primary_markdown_from_card
+        return await self.stream_final_text(extract_primary_markdown_from_card(indicator_card_v1))
+
+    async def finalize(self, final_card_v1: dict, typewriter_text: str = "") -> bool:
+        """Commit final Card 2.0. If `typewriter_text` is provided and streaming hasn't run yet
+        (e.g. fast one-shot final reply), briefly plays the typewriter stream on the final result before sealing."""
+        if not self.active or not self.card_id:
+            return False
+        try:
+            from cards.common import convert_card_v1_to_v2
+            token = await _get_tenant_access_token_async()
+            if not token:
+                return False
+            client = _get_async_http_client()
+
+            if typewriter_text and not self.streaming_enabled:
+                await self.stream_final_text(typewriter_text)
+                await asyncio.sleep(min(0.35, max(0.15, len(typewriter_text) * 0.0015)))
+
+            if self.streaming_enabled:
+                self.seq += 1
+                await client.patch(
+                    f"/open-apis/cardkit/v1/cards/{self.card_id}/settings",
+                    json={
+                        "settings": _compact_json({"config": {"streaming_mode": False}}),
+                        "sequence": self.seq,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                self.streaming_enabled = False
+
             v2_final = convert_card_v1_to_v2(final_card_v1, stream_element_id="stream_md", streaming_mode=False)
             self.seq += 1
             upd_resp = await client.put(
@@ -286,6 +394,7 @@ class CardKitStreamController:
         except Exception as e:
             log.warning(f"[CardKit] finalize failed, caller will send fallback reply: {e}")
             self.active = False
+            self.streaming_enabled = False
             return False
 
 

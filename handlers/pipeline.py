@@ -539,7 +539,11 @@ async def _process_single_task(chat_id, task):
     if decision.is_dangerous and not is_internal_resume:
         log.warning(f"[Security] Intercepted dangerous request: '{user_text}' (prob={decision.danger_prob:.2f})")
         warn_card = CardBuilder.build_security_warning(user_text)
-        if bot_reply_msg_id:
+        _ck_early = task.get("_cardkit_ctrl")
+        if _ck_early and getattr(_ck_early, "active", False):
+            if not await _ck_early.finalize(warn_card):
+                await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, warn_card))
+        elif bot_reply_msg_id:
             await app_state.run_feishu_sync(loop, lambda: patch_interactive_card_sdk(bot_reply_msg_id, warn_card))
         else:
             await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, warn_card))
@@ -574,9 +578,14 @@ async def _process_single_task(chat_id, task):
             model=cfg["model"],
             base_url=cfg["base_url"],
             test_result=res,
-            tier=cfg.get("tier")
+            tier=cfg.get("tier"),
+            auto_mode=cfg.get("auto_mode"),
         )
-        if bot_reply_msg_id:
+        _ck_ts = task.get("_cardkit_ctrl")
+        if _ck_ts and getattr(_ck_ts, "active", False):
+            if not await _ck_ts.finalize(ts_card):
+                await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, ts_card))
+        elif bot_reply_msg_id:
             await app_state.run_feishu_sync(loop, lambda: patch_interactive_card_sdk(bot_reply_msg_id, ts_card))
         else:
             await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, ts_card))

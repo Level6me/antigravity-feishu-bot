@@ -246,6 +246,78 @@ class TestV34InteractiveCards(unittest.IsolatedAsyncioTestCase):
         finally:
             app_state.main_loop = old_loop
 
+    async def test_10_typewriter_streaming_only_on_final_result(self):
+        from lark_client import CardKitStreamController, _CARDKIT_CAPABILITY_STATE
+
+        calls = []
+
+        class _MockCardKitHttp:
+            async def post(self, path, json=None, headers=None):
+                calls.append(("POST", path, json))
+                resp = MagicMock()
+                if path == "/open-apis/cardkit/v1/cards":
+                    resp.json.return_value = {"code": 0, "data": {"card_id": "ck_card_100"}}
+                else:
+                    resp.json.return_value = {"code": 0, "data": {"message_id": "om_reply_100"}}
+                return resp
+
+            async def put(self, path, json=None, headers=None):
+                calls.append(("PUT", path, json))
+                resp = MagicMock()
+                resp.json.return_value = {"code": 0}
+                return resp
+
+            async def patch(self, path, json=None, headers=None):
+                calls.append(("PATCH", path, json))
+                resp = MagicMock()
+                resp.json.return_value = {"code": 0}
+                return resp
+
+        orig_state = _CARDKIT_CAPABILITY_STATE.get("supported")
+        _CARDKIT_CAPABILITY_STATE["supported"] = True
+        try:
+            with patch("lark_client._get_tenant_access_token_async", AsyncMock(return_value="t_ok")), \
+                 patch("lark_client._get_async_http_client", return_value=_MockCardKitHttp()), \
+                 patch.object(config, "ENABLE_CARDKIT_STREAMING", True), \
+                 patch.object(config, "APP_ID", "cli_test"), \
+                 patch.object(config, "APP_SECRET", "sec_test"):
+                ctrl = CardKitStreamController("om_user_1", "oc_chat_1")
+
+                # 1. Initial thinking card MUST be created with streaming_mode=False (no typewriter!)
+                typing_card = CardBuilder.build_typing_indicator(user_text="分析代码", think_seconds=0)
+                mid = await ctrl.create_and_send(typing_card)
+                self.assertEqual(mid, "om_reply_100")
+                self.assertFalse(ctrl.streaming_enabled)
+                created_data = json.loads(calls[0][2]["data"])
+                self.assertFalse(created_data["config"]["streaming_mode"])
+
+                # 2. Tool / task-plan progress updates MUST stay streaming_mode=False (no /elements/stream_md/content!)
+                tool_card = CardBuilder.build_tool_indicator("读取 executor.py", "分析代码", None, True, 3, completed_steps=["读取 lark_client.py"])
+                ok_inst = await ctrl.update_card_instant(tool_card)
+                self.assertTrue(ok_inst)
+                self.assertFalse(ctrl.streaming_enabled)
+                self.assertFalse(any("/elements/stream_md/content" in p for _, p, _ in calls))
+                put_tool_card = json.loads(calls[-1][2]["card"]["data"])
+                self.assertFalse(put_tool_card["config"]["streaming_mode"])
+
+                # 3. Final answer streaming turns ON streaming_mode=True and streams pure prefix-appended text
+                ok_s1 = await ctrl.stream_final_text("已完成全链路排查，核心结论如下：")
+                ok_s2 = await ctrl.stream_final_text("已完成全链路排查，核心结论如下：\n1. 仅最终结果启用打字机。")
+                self.assertTrue(ok_s1 and ok_s2)
+                self.assertTrue(ctrl.streaming_enabled)
+                stream_puts = [c for c in calls if "/elements/stream_md/content" in c[1]]
+                self.assertEqual(len(stream_puts), 2)
+                self.assertTrue(stream_puts[1][2]["content"].startswith(stream_puts[0][2]["content"]))
+
+                # 4. Finalize closes streaming_mode=False and commits final card
+                final_card = CardBuilder.build_ai_response("已完成全链路排查，核心结论如下：\n1. 仅最终结果启用打字机。")
+                ok_fin = await ctrl.finalize(final_card)
+                self.assertTrue(ok_fin)
+                self.assertFalse(ctrl.streaming_enabled)
+                self.assertFalse(ctrl.active)
+        finally:
+            _CARDKIT_CAPABILITY_STATE["supported"] = orig_state
+
 
 if __name__ == "__main__":
     unittest.main()
