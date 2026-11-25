@@ -45,9 +45,34 @@ _SESSION_TOKEN_CACHE = {}
 # 格式：{ conv_id: {"tokens": int, "mtime": float} }
 # mtime 是上次读取 transcript 文件时的文件修改时间戳，防止文件缩小后还使用过期高缓存
 
+_TRANSCRIPT_INCREMENTAL_CACHE = {}
+# 格式：{ transcript_path: {"offset": int, "mtime": float, "user": int, "agent": int, "tool": int, "steps": int} }
+
+
+def _estimate_tokens_fast(text) -> int:
+    """Fast C-level UTF-8 byte-delta token estimator (~100x faster than per-char Python loop)."""
+    if not text:
+        return 0
+    if not isinstance(text, str):
+        import json
+        text = json.dumps(text, ensure_ascii=False)
+    char_len = len(text)
+    if char_len == 0:
+        return 0
+    byte_len = len(text.encode("utf-8", errors="ignore"))
+    # Each 3-byte UTF-8 CJK character contributes +2 bytes over ASCII char count
+    cjk_count = min(char_len, max(0, (byte_len - char_len) // 2))
+    other_count = char_len - cjk_count
+    return int(cjk_count * 1.5 + other_count / 3.8)
+
+
 def get_context_usage_stats(session_data=None):
     """
-    获取或估算当前对话会话的上下文 Token 使用统计信息
+    获取或估算当前对话会话的上下文 Token 使用统计信息。
+    v3.3 优化：
+      1. 若会话携带实时 ACP `acp_last_usage`，直接以 O(1) 零磁盘 I/O 返回精确上下文窗口用量；
+      2. 回退读取 `transcript.jsonl` 时采用字节偏移量游标增量解析 + C 层 UTF-8 字节差快速估算，
+         避免长会话每次回复重扫数 MB 历史日志。
     """
     import os
     import json
@@ -72,23 +97,54 @@ def get_context_usage_stats(session_data=None):
         return 1000000
 
     max_tokens = get_max_tokens(model_name)
+    conv_id = session_data.get("conversation") if isinstance(session_data, dict) else None
 
-    conv_id = None
+    # Fast Path 1: O(1) zero-disk-IO usage directly from live ACP usage_update telemetry
+    if isinstance(session_data, dict):
+        acp_usage = session_data.get("acp_last_usage")
+        if isinstance(acp_usage, dict):
+            acp_used = int(acp_usage.get("used") or 0)
+            acp_size = int(acp_usage.get("size") or 0)
+            acp_conv = str(acp_usage.get("conv_id") or "")
+            if acp_used > 0 and (not conv_id or not acp_conv or acp_conv == str(conv_id)):
+                eff_max = acp_size if acp_size > 0 else max_tokens
+                free_toks = max(0, eff_max - acp_used)
+                total_pct = round((acp_used / eff_max) * 100, 2)
+                free_pct = round(max(0.0, 100.0 - total_pct), 2)
+                if free_pct >= 100.0:
+                    free_pct = 99.99
+                u_toks = int(acp_usage.get("user_tokens") or min(acp_used, 2500))
+                rem_toks = max(0, acp_used - u_toks)
+                a_toks = int(acp_usage.get("agent_tokens") or int(rem_toks * 0.45))
+                t_toks = max(0, acp_used - u_toks - a_toks)
+                return {
+                    "model": model_name,
+                    "conv_id": conv_id or acp_conv or "N/A",
+                    "user_tokens": u_toks,
+                    "agent_tokens": a_toks,
+                    "tool_tokens": t_toks,
+                    "total_tokens": acp_used,
+                    "max_tokens": eff_max,
+                    "free_tokens": free_toks,
+                    "user_pct": round((u_toks / eff_max) * 100, 2),
+                    "agent_pct": round((a_toks / eff_max) * 100, 2),
+                    "tool_pct": round((t_toks / eff_max) * 100, 2),
+                    "total_pct": total_pct,
+                    "free_pct": free_pct,
+                    "steps_count": int(acp_usage.get("steps_count") or 0),
+                }
+
     transcript_path = None
 
     if session_data is not None:
-        conv_id = session_data.get("conversation")
         if conv_id:
             # 【修复】有明确 conv_id 时，直接使用对应 transcript，
             # 绝不进行"扫描最新文件"的兜底，防止误选 subagent transcript 导致数值大幅跳变
             p = get_transcript_path(conv_id)
             if os.path.exists(p):
                 transcript_path = p
-            # conv_id 已存在但 transcript 文件尚不存在（极罕见情况）：
-            # 直接返回 0，不走兜底扫描，保持数值稳定
         else:
             # 仅在 conv_id 完全缺失时（新会话刚发起）才走一次兜底扫描
-            # 并且只选择"顶层会话"（非 subagent 产生的子会话）
             brain_dir = get_brain_dir()
             if os.path.exists(brain_dir):
                 now = time.time()
@@ -101,7 +157,6 @@ def get_context_usage_stats(session_data=None):
                             fp = os.path.join(entry_path, ".system_generated", "logs", "transcript.jsonl")
                             if os.path.exists(fp):
                                 mtime = os.path.getmtime(fp)
-                                # 仅关联 120s 核心活跃窗口内更新的最新会话
                                 if mtime > newest_mtime and (now - mtime < 120):
                                     newest_mtime = mtime
                                     newest_file = fp
@@ -110,7 +165,6 @@ def get_context_usage_stats(session_data=None):
                     pass
                 if newest_file:
                     transcript_path = newest_file
-                    # 不再回写 session_data["conversation"]，避免绑定到错误的 subagent 会话
     else:
         brain_dir = get_brain_dir()
         if os.path.exists(brain_dir):
@@ -149,31 +203,66 @@ def get_context_usage_stats(session_data=None):
             "steps_count": 0
         }
 
-    def estimate_tokens(text):
-        if not text:
-            return 0
-        if not isinstance(text, str):
-            text = json.dumps(text, ensure_ascii=False)
-        cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
-        other_count = len(text) - cjk_count
-        return int(cjk_count * 1.5 + other_count / 3.8)
-
-    # 包含系统注入的基础底噪 (System Prompt, Safety Rules, Secret Track, Notes 等)
+    # Fast Path 2: Incremental byte-offset cursor over transcript.jsonl
     base_system_prompt_tokens = 2500
-
-    user_tokens = base_system_prompt_tokens
-    agent_tokens = 0
-    tool_tokens = 0
-    steps_count = 0
-
     try:
-        with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
+        st = os.stat(transcript_path)
+        file_size = st.st_size
+        current_mtime = st.st_mtime
+    except Exception:
+        file_size = 0
+        current_mtime = 0.0
+
+    inc = _TRANSCRIPT_INCREMENTAL_CACHE.get(transcript_path)
+    if (
+        inc is not None
+        and file_size == inc["offset"]
+        and current_mtime == inc["mtime"]
+    ):
+        user_tokens = inc["user"]
+        agent_tokens = inc["agent"]
+        tool_tokens = inc["tool"]
+        steps_count = inc["steps"]
+    else:
+        if inc is not None and file_size > inc["offset"] and current_mtime >= inc["mtime"]:
+            start_offset = inc["offset"]
+            user_tokens = inc["user"]
+            agent_tokens = inc["agent"]
+            tool_tokens = inc["tool"]
+            steps_count = inc["steps"]
+        else:
+            start_offset = 0
+            user_tokens = base_system_prompt_tokens
+            agent_tokens = 0
+            tool_tokens = 0
+            steps_count = 0
+
+        new_offset = start_offset
+        try:
+            with open(transcript_path, "rb") as fb:
+                if start_offset > 0:
+                    fb.seek(start_offset)
+                while True:
+                    raw_line = fb.readline()
+                    if not raw_line:
+                        break
+                    # If file grew without trailing newline yet and is non-empty, only commit complete lines
+                    # unless we reached current EOF cleanly in a completed write
+                    line_len = len(raw_line)
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not line:
+                        new_offset += line_len
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        # Incomplete trailing JSON line mid-flush: stop cursor before it so next poll re-reads cleanly
+                        if not raw_line.endswith(b"\n"):
+                            break
+                        new_offset += line_len
+                        continue
+
+                    new_offset += line_len
                     stype = data.get("type", "")
                     source = data.get("source", "")
                     cnt = data.get("content", "")
@@ -185,11 +274,10 @@ def get_context_usage_stats(session_data=None):
                         continue
 
                     steps_count += 1
-                    
-                    c_toks = estimate_tokens(cnt)
-                    th_toks = estimate_tokens(thinking)
-                    tc_toks = estimate_tokens(t_calls)
-                    res_toks = estimate_tokens(results)
+                    c_toks = _estimate_tokens_fast(cnt)
+                    th_toks = _estimate_tokens_fast(thinking)
+                    tc_toks = _estimate_tokens_fast(t_calls)
+                    res_toks = _estimate_tokens_fast(results)
 
                     if stype in ["USER_INPUT", "USER_EXPLICIT"] or source == "USER_EXPLICIT":
                         user_tokens += c_toks
@@ -197,31 +285,32 @@ def get_context_usage_stats(session_data=None):
                         agent_tokens += c_toks + th_toks
                     else:
                         tool_tokens += c_toks + tc_toks + res_toks
-                except Exception:
-                    pass
-    except Exception as e:
-        log.error(f"Error reading transcript for context stats: {e}")
+
+            if len(_TRANSCRIPT_INCREMENTAL_CACHE) >= 256 and transcript_path not in _TRANSCRIPT_INCREMENTAL_CACHE:
+                oldest_key = next(iter(_TRANSCRIPT_INCREMENTAL_CACHE))
+                _TRANSCRIPT_INCREMENTAL_CACHE.pop(oldest_key, None)
+            _TRANSCRIPT_INCREMENTAL_CACHE[transcript_path] = {
+                "offset": new_offset,
+                "mtime": current_mtime,
+                "user": user_tokens,
+                "agent": agent_tokens,
+                "tool": tool_tokens,
+                "steps": steps_count,
+            }
+        except Exception as e:
+            log.error(f"Error reading transcript for context stats: {e}")
 
     total_tokens = user_tokens + agent_tokens + tool_tokens
 
     # 【修复】单会话单调递增防护（带 mtime 时间戳）：
-    # 仅当 transcript 文件的 mtime 没有回退（文件没有缩小/被截断）时才应用缓存下界，
-    # 防止因 subagent 产生的新旧交替 transcript 导致计数忽高忽低
     if conv_id and conv_id != "新会话":
-        try:
-            current_mtime = os.path.getmtime(transcript_path)
-        except Exception:
-            current_mtime = 0
-
         cached = _SESSION_TOKEN_CACHE.get(conv_id, {})
         cached_tokens = cached.get("tokens", 0)
         cached_mtime = cached.get("mtime", 0)
 
         if total_tokens < cached_tokens and current_mtime >= cached_mtime:
-            # 文件未回退，使用缓存下界（单调递增保护）
             total_tokens = cached_tokens
         else:
-            # 文件更新了（或计数增加了），刷新缓存
             _SESSION_TOKEN_CACHE[conv_id] = {"tokens": total_tokens, "mtime": current_mtime}
 
     free_tokens = max(0, max_tokens - total_tokens)

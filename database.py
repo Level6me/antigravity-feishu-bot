@@ -1,11 +1,13 @@
 import os
+import atexit
 import copy
 import json
 import time
 import sqlite3
 import threading
 import asyncio
-from contextlib import closing
+import weakref
+from contextlib import asynccontextmanager, closing
 import aiosqlite
 from logger import log
 
@@ -247,11 +249,81 @@ def _normalize_session_dict(raw_json: str) -> dict:
     return data
 
 
+_async_db_pool = {}
+_async_db_pool_guard = threading.Lock()
+
+
+def _prune_closed_loop_db_conns() -> None:
+    """Synchronously stop and remove cached aiosqlite connections belonging to closed/GC'd event loops."""
+    dead_keys = []
+    for key, entry in list(_async_db_pool.items()):
+        loop_ref, conn, _ = entry
+        loop_obj = loop_ref()
+        if loop_obj is None or loop_obj.is_closed():
+            dead_keys.append((key, conn))
+    for key, conn in dead_keys:
+        _async_db_pool.pop(key, None)
+        try:
+            if hasattr(conn, "stop"):
+                conn.stop()
+        except Exception:
+            pass
+
+
+def _shutdown_all_async_db_conns() -> None:
+    """Stop all pooled aiosqlite worker threads cleanly at interpreter exit."""
+    with _async_db_pool_guard:
+        entries = list(_async_db_pool.values())
+        _async_db_pool.clear()
+    for _, conn, _ in entries:
+        if conn is not None:
+            try:
+                if hasattr(conn, "stop"):
+                    conn.stop()
+            except Exception:
+                pass
+
+
+atexit.register(_shutdown_all_async_db_conns)
+
+
+@asynccontextmanager
+async def _shared_aiosqlite_conn():
+    """Reuse a persistent WAL-mode aiosqlite connection per (event_loop, DB_FILE).
+    Eliminates per-query worker thread creation, SQLite handshake, and PRAGMA overhead.
+    """
+    loop = asyncio.get_running_loop()
+    db_path = os.path.abspath(DB_FILE)
+    pool_key = (id(loop), db_path)
+
+    with _async_db_pool_guard:
+        _prune_closed_loop_db_conns()
+        entry = _async_db_pool.get(pool_key)
+        if entry is None:
+            op_lock = asyncio.Lock()
+            entry = [weakref.ref(loop), None, op_lock]
+            _async_db_pool[pool_key] = entry
+
+    op_lock = entry[2]
+    async with op_lock:
+        conn = entry[1]
+        if conn is None or not getattr(conn, "_running", True):
+            conn_obj = aiosqlite.connect(db_path, timeout=DB_TIMEOUT)
+            conn_obj.daemon = True
+            if hasattr(conn_obj, "_thread") and conn_obj._thread is not None:
+                conn_obj._thread.daemon = True
+            conn = await conn_obj
+            await conn.execute('PRAGMA journal_mode=WAL')
+            await conn.execute('PRAGMA busy_timeout=5000')
+            await conn.execute('PRAGMA synchronous=NORMAL')
+            conn.row_factory = aiosqlite.Row
+            entry[1] = conn
+        yield conn
+
+
 async def get_session_async(chat_id):
     async with _get_session_lock(chat_id):
-        async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
-            await db.execute('PRAGMA busy_timeout=5000')
-            db.row_factory = aiosqlite.Row
+        async with _shared_aiosqlite_conn() as db:
             async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
                 row = await cursor.fetchone()
                 if row:
@@ -263,9 +335,7 @@ async def get_session_async(chat_id):
 
 async def _three_way_merge_locked(chat_id: str, data: dict, baseline: dict) -> dict:
     clean_local = {k: v for k, v in data.items() if k != "_isolated_pool_key"}
-    async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
-        await db.execute('PRAGMA busy_timeout=5000')
-        db.row_factory = aiosqlite.Row
+    async with _shared_aiosqlite_conn() as db:
         await db.execute('BEGIN IMMEDIATE')
         try:
             async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
@@ -308,8 +378,7 @@ async def save_session_async(chat_id, data):
         return
     async with _get_session_lock(chat_id):
         clean_data = {k: v for k, v in data.items() if k != "_isolated_pool_key"} if isinstance(data, dict) else data
-        async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
-            await db.execute('PRAGMA busy_timeout=5000')
+        async with _shared_aiosqlite_conn() as db:
             await db.execute('BEGIN IMMEDIATE')
             try:
                 await db.execute(
@@ -343,9 +412,7 @@ async def get_profile_async(user_id, fallback_chat_id=None):
     if not primary_key:
         return []
     async with _get_profile_lock(primary_key):
-        async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
-            await db.execute('PRAGMA busy_timeout=5000')
-            db.row_factory = aiosqlite.Row
+        async with _shared_aiosqlite_conn() as db:
             merged_items = []
             keys_to_query = [primary_key]
             if fallback_chat_id and str(fallback_chat_id) != primary_key:
@@ -369,8 +436,7 @@ async def save_profile_async(user_id, data):
     if not primary_key:
         return
     async with _get_profile_lock(primary_key):
-        async with aiosqlite.connect(DB_FILE, timeout=DB_TIMEOUT) as db:
-            await db.execute('PRAGMA busy_timeout=5000')
+        async with _shared_aiosqlite_conn() as db:
             await db.execute('INSERT OR REPLACE INTO user_profiles (user_id, data) VALUES (?, ?)', (primary_key, json.dumps(data, ensure_ascii=False)))
             await db.commit()
 

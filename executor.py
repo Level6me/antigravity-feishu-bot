@@ -90,15 +90,26 @@ def _get_process_tree_status(root_pid: int) -> dict:
     try:
         children_map = {}
         proc_info_map = {}
+        proc_raw_ticks_map = {}
+        fast_pids = None
 
         if os.path.isdir("/proc"):
             try:
                 clk_tck = float(os.sysconf("SC_CLK_TCK"))
             except Exception:
                 clk_tck = 100.0
-            for entry in os.listdir("/proc"):
-                if not entry.isdigit():
-                    continue
+            try:
+                from math_decision_model import _collect_descendant_pids_fast
+                fast_pids = _collect_descendant_pids_fast(root_pid)
+            except Exception:
+                fast_pids = None
+
+            target_entries = (
+                [str(p) for p in fast_pids]
+                if fast_pids is not None
+                else [e for e in os.listdir("/proc") if e.isdigit()]
+            )
+            for entry in target_entries:
                 p = int(entry)
                 try:
                     with open(f"/proc/{p}/stat", "r", encoding="utf-8", errors="ignore") as sf:
@@ -115,8 +126,10 @@ def _get_process_tree_status(root_pid: int) -> dict:
                     pp = int(rest[1])
                     utime = int(rest[11])
                     stime = int(rest[12])
-                    t = (utime + stime) / clk_tck
+                    raw_ticks = utime + stime
+                    t = raw_ticks / clk_tck
                     children_map.setdefault(pp, []).append(p)
+                    proc_raw_ticks_map[p] = (state, raw_ticks)
                     proc_info_map[p] = {
                         "pid": p, "ppid": pp, "state": state, "wchan": "",
                         "comm": c, "cputime": t, "args": ""
@@ -147,16 +160,19 @@ def _get_process_tree_status(root_pid: int) -> dict:
                     except (ValueError, TypeError):
                         continue
 
-        # BFS 遍历 root_pid 的整个子孙树
-        all_pids = set()
-        queue = [root_pid]
-        while queue:
-            curr = queue.pop(0)
-            all_pids.add(curr)
-            if curr in children_map:
-                for child in children_map[curr]:
-                    if child not in all_pids:
-                        queue.append(child)
+        # BFS 遍历 root_pid 的整个子孙树（若已通过 /proc/<pid>/task/*/children 获取则直接复用）
+        if fast_pids is not None:
+            all_pids = set(proc_info_map.keys())
+        else:
+            all_pids = set()
+            queue = [root_pid]
+            while queue:
+                curr = queue.pop(0)
+                all_pids.add(curr)
+                if curr in children_map:
+                    for child in children_map[curr]:
+                        if child not in all_pids:
+                            queue.append(child)
 
         # 仅针对属于 root_pid 树的子进程按需读取 /proc/<pid>/cmdline
         if os.path.isdir("/proc"):
@@ -220,6 +236,7 @@ def _get_process_tree_status(root_pid: int) -> dict:
             "worker_names": active_workers,
             "detail_cmd": detail_cmd,
             "all_pids": all_pids,
+            "proc_stats": {p: proc_raw_ticks_map[p] for p in all_pids if p in proc_raw_ticks_map},
             "running_count": running_count,
             "sleeping_count": sleeping_count,
             "deadlock_suspect": d_state_count > 0 and running_count == 0
@@ -282,12 +299,17 @@ def _is_process_group_active(pid: int, min_cpu_percent: float = 0.02, vitality_s
     workers = status["worker_names"]
     detail_cmd = status["detail_cmd"]
 
-    # 使用 HMDM Layer 4B 采集进程树真实 I/O 增量与非基线新子进程
+    # 使用 HMDM Layer 4B 采集进程树真实 I/O 增量与非基线新子进程（直接复用单次采样的子树 PID 与 CPU 快照，避免二次扫描 /proc）
     vitality_info = {}
     if vitality_state is not None:
         try:
             from math_decision_model import measure_process_tree_vitality
-            vitality_info = measure_process_tree_vitality(pid, vitality_state)
+            vitality_info = measure_process_tree_vitality(
+                pid,
+                vitality_state,
+                precomputed_pids=status.get("all_pids"),
+                precomputed_cpu_states=status.get("proc_stats"),
+            )
         except Exception:
             vitality_info = {}
 
@@ -757,53 +779,68 @@ _STREAM_GUARD_RISK_RE = re.compile(
 )
 
 
+_RE_CARD_TIMER_TICK = re.compile(r'\d+\s*(?:秒|分\d*秒|s\b)')
+
+
 def extract_final_chinese_response(text):
     if not text:
         return ""
-    
-    # 0. 优先彻底移除成对闭合的任务规划标签块，开头未闭合流式行仅移除首行（避免正文中包含 `[TASK_PLAN]` 文本时截断后续全文）
-    text = _RE_TASK_PLAN_PAIR.sub('', text).strip()
-    text = _RE_TASK_PLAN_OPEN.sub('', text).strip()
-    text = _RE_TASK_PLAN_CLOSE.sub('', text).strip()
 
-    # 1. 移除被 XML 标签包裹的思考过程与思维链，如 <thought>...</thought>, <thinking>...</thinking>, <think>...</think>
-    # 以及流式分片导致缺少开标签但残留闭合标签 </thought> 之前的所有思考内容
-    text = _RE_THOUGHT_PAIR.sub('', text).strip()
-    text = _RE_THOUGHT_DANGLING_CLOSE.sub('', text).strip()
-    text = _RE_THOUGHT_DANGLING_OPEN.sub('', text).strip()
-    text = _RE_THOUGHT_FENCE.sub('', text).strip()
-    
-    # 2. 移除 Task 执行日志 (例如 Task "timeout 15s bash ..." completed with exit code 0. Output: ...)
-    text = _RE_TASK_DONE_LOG.sub('', text).strip()
-    text = _RE_TASK_UPDATE_TAG.sub('', text).strip()
-    text = _RE_SYS_MSG_TAG.sub('', text).strip()
+    # v3.3 C-level substring fast-path guards: skip 15+ regex passes when streaming clean Chinese text
+    if "[" in text and ("TASK_PLAN" in text or "task_plan" in text.lower()):
+        text = _RE_TASK_PLAN_PAIR.sub('', text).strip()
+        text = _RE_TASK_PLAN_OPEN.sub('', text).strip()
+        text = _RE_TASK_PLAN_CLOSE.sub('', text).strip()
 
-    # 3. 移除终端原始退出状态及控制台片段 (例如 The command exited with code 0. Output: ...)
-    text = _RE_CMD_EXIT_LOG.sub('', text).strip()
-    text = _RE_SSH_WARN.sub('', text).strip()
-    text = _RE_GIT_FROM.sub('', text).strip()
+    if "<" in text:
+        text = _RE_THOUGHT_PAIR.sub('', text).strip()
+        text = _RE_THOUGHT_DANGLING_CLOSE.sub('', text).strip()
+        text = _RE_THOUGHT_DANGLING_OPEN.sub('', text).strip()
+        text = _RE_TASK_UPDATE_TAG.sub('', text).strip()
+        text = _RE_SYS_MSG_TAG.sub('', text).strip()
 
-    # 4. 移除开头的常见英文规划与描述前缀 (例如 "I will...", "Sure, I will...", "Let me...", "Here is...", "I need to...")
-    text = _RE_ENG_PREAMBLE.sub('', text).strip()
+    if "```" in text:
+        text = _RE_THOUGHT_FENCE.sub('', text).strip()
 
-    # 5. 移除单行英文申明 (例如 "I will respond in Simplified Chinese.", "Sure, I will analyze the codebase in Chinese.")
-    text = _RE_ENG_DECL.sub('', text).strip()
+    if 'Task "' in text or 'task "' in text.lower():
+        text = _RE_TASK_DONE_LOG.sub('', text).strip()
 
-    # 6. 移除包含 Thinking Process, Thought:, Plan:, Thinking:, 思考过程 等小标题的内部推理段落（支持跨多段英文思考清除）
-    text = _RE_THINKING_MULTI_PARA.sub('', text).strip()
-    text = _RE_THINKING_SINGLE_PARA.sub('', text).strip()
+    if "exited with code" in text or "The command " in text or "the command " in text.lower():
+        text = _RE_CMD_EXIT_LOG.sub('', text).strip()
+    if "Permanently added" in text or "permanently added" in text.lower():
+        text = _RE_SSH_WARN.sub('', text).strip()
+    if "github.com/" in text or "GITHUB.COM/" in text:
+        text = _RE_GIT_FROM.sub('', text).strip()
 
-    # 7. 移除内部消息包装 (例如 [Message] timestamp=... content=...)
-    text = _RE_INTERNAL_MSG.sub('', text).strip()
+    if text and text[0].isascii():
+        text = _RE_ENG_PREAMBLE.sub('', text).strip()
+    if text and text[0].isascii():
+        text = _RE_ENG_DECL.sub('', text).strip()
 
-    # 8. 清理残留的动态思考占位符
-    text = _RE_PLACEHOLDER_STATUS.sub('', text).strip()
+    if text:
+        tl = text.lower()
+        if (
+            "thinking" in tl
+            or "thought" in tl
+            or "reasoning" in tl
+            or "plan" in tl
+            or "思考过程" in text
+            or "内部推理" in text
+        ):
+            text = _RE_THINKING_MULTI_PARA.sub('', text).strip()
+            text = _RE_THINKING_SINGLE_PARA.sub('', text).strip()
 
-    # 9. 再次清理成对任务规划标签防泄漏
-    text = _RE_TASK_PLAN_PAIR.sub('', text).strip()
-    text = _RE_TASK_PLAN_OPEN.sub('', text).strip()
+    if "[Message]" in text:
+        text = _RE_INTERNAL_MSG.sub('', text).strip()
 
-    return text
+    if "*(" in text and "正在" in text:
+        text = _RE_PLACEHOLDER_STATUS.sub('', text).strip()
+
+    if "[" in text and ("TASK_PLAN" in text or "task_plan" in text.lower()):
+        text = _RE_TASK_PLAN_PAIR.sub('', text).strip()
+        text = _RE_TASK_PLAN_OPEN.sub('', text).strip()
+
+    return text.strip()
 
 
 _RE_STANDALONE_TASK_PLAN_LINE = re.compile(r'^\s*\[TASK_PLAN\]', re.IGNORECASE)
@@ -1886,6 +1923,8 @@ async def execute_antigravity(
                         session_data["acp_last_usage"] = {
                             "used": ev.get("used", 0),
                             "size": ev.get("size", 0),
+                            "conv_id": conv_id or session_data.get("conversation") or getattr(sess, "conversation_id", ""),
+                            "steps_count": len(completed_tool_steps),
                             "updated_at": time.time(),
                         }
                     elif event_type == "result":
@@ -2341,10 +2380,32 @@ async def execute_antigravity(
                         )
                     desired_patch_interval = 0.25
 
-                card_sig = str(indicator_card.get("elements", []))
-                if (card_sig != last_patched_card_sig) and (time.time() - last_patch_time >= desired_patch_interval):
-                    last_patch_time = time.time()
+                raw_card_elements = indicator_card.get("elements", [])
+                core_card_elements = (
+                    raw_card_elements[:-1]
+                    if (
+                        raw_card_elements
+                        and isinstance(raw_card_elements[-1], dict)
+                        and raw_card_elements[-1].get("tag") == "note"
+                    )
+                    else raw_card_elements
+                )
+                card_sig = str(core_card_elements)
+                structural_sig = _RE_CARD_TIMER_TICK.sub("<T>", card_sig)
+                prev_structural_sig = getattr(turn_stream, "_last_structural_sig", "")
+                effective_patch_interval = (
+                    desired_patch_interval
+                    if structural_sig != prev_structural_sig
+                    else max(desired_patch_interval, 3.0)
+                )
+                now_patch_ts = time.time()
+                if (card_sig != last_patched_card_sig) and (now_patch_ts - last_patch_time >= effective_patch_interval):
+                    last_patch_time = now_patch_ts
                     last_patched_card_sig = card_sig
+                    try:
+                        setattr(turn_stream, "_last_structural_sig", structural_sig)
+                    except Exception:
+                        pass
                     if bot_reply_msg_id:
                         await _feishu_call(
                             lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
@@ -3237,16 +3298,24 @@ async def execute_antigravity(
                     fail_notes = [f"- `{os.path.basename(p)}`: {reason}" for p, reason in upload_summary["failed"][:5]]
                     reply_text += "\n\n> ⚠️ **部分文件未能通过飞书 API 自动发送**：\n" + "\n".join(fail_notes)
 
-            final_card = CardBuilder.build_ai_response(
-                reply_text, 
+            final_card_kwargs = dict(
                 choice_card_data=choice_card_data,
                 current_model=session_data.get('model', 'Default'),
                 current_project=session_data.get('project', '默认'),
                 is_error=is_error,
                 is_streaming=False,
                 session_data=session_data,
-                is_quota=is_quota_exhausted
+                is_quota=is_quota_exhausted,
             )
+            if completed_tool_steps and not is_error:
+                final_card_kwargs["completed_steps"] = completed_tool_steps
+                final_card_kwargs["think_seconds"] = max(0, int(time.time() - process_start_time))
+            try:
+                final_card = CardBuilder.build_ai_response(reply_text, **final_card_kwargs)
+            except TypeError:
+                final_card_kwargs.pop("completed_steps", None)
+                final_card_kwargs.pop("think_seconds", None)
+                final_card = CardBuilder.build_ai_response(reply_text, **final_card_kwargs)
             async def _send_full_text_fallback(label: str):
                 fallback_text = reply_text if reply_text else "(AI 回复卡片发送失败，请查看工作区获取完整内容)"
                 if message_id and str(message_id).startswith("om_"):

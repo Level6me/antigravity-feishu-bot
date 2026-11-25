@@ -22,13 +22,14 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from agent_memory.store import (
-    get_compaction_state,
-    inspect_and_backfill_transcript,
-    read_project_capsule,
-    read_turn_contract,
-)
-
+PRE_TOOL_USE_MATCHER = "write_file|edit_file|write_to_file|replace_file_content|run_command"
+_GUARDED_PRE_TOOLS = frozenset({
+    "write_file",
+    "edit_file",
+    "write_to_file",
+    "replace_file_content",
+    "run_command",
+})
 
 _INSPECT_FORBIDDEN_CMD_RE = re.compile(
     r"(?:\bopenocd\b.*?\b(?:program|flash\s+write|erase)\b|"
@@ -49,6 +50,22 @@ def handle_hook_payload(payload: Dict[str, Any], custom_root: Optional[str] = No
         or payload.get("hook_event_name")
         or ""
     )
+    if event_name not in ("PreInvocation", "PreToolUse"):
+        return {"continue": True}
+
+    # Fast-path exit for read-only tools before importing sqlite3 / agent_memory.store
+    if event_name == "PreToolUse":
+        tool_name = payload.get("toolName") or payload.get("tool_name") or ""
+        if tool_name not in _GUARDED_PRE_TOOLS:
+            return {"continue": True}
+
+    from agent_memory.store import (
+        get_compaction_state,
+        inspect_and_backfill_transcript,
+        read_project_capsule,
+        read_turn_contract,
+    )
+
     conv_id = payload.get("conversationId") or payload.get("conversation_id") or ""
     tx_path = payload.get("transcriptPath") or payload.get("transcript_path") or ""
     cwd = payload.get("cwd") or payload.get("workspaceRoot") or os.getcwd()
@@ -237,16 +254,6 @@ def ensure_agy_hooks_installed(
     hooks_json_path = os.path.join(config_dir, "hooks.json")
 
     cmd_str = f"python3 {hook_script}"
-    desired_entry = {
-        "matcher": "*",
-        "hooks": [
-            {
-                "type": "command",
-                "command": cmd_str,
-                "timeout": 5,
-            }
-        ],
-    }
 
     existing: Dict[str, Any] = {}
     if os.path.exists(hooks_json_path):
@@ -263,9 +270,19 @@ def ensure_agy_hooks_installed(
         ev_list = hooks_map.get(ev_name)
         if not isinstance(ev_list, list):
             ev_list = []
-        # Remove any outdated agy_hooks.py entries and add current
+        # Remove any outdated agy_hooks.py entries and add current scoped entry
         ev_list = [item for item in ev_list if not _is_bot_hook_entry(item)]
-        ev_list.append(desired_entry)
+        matcher_val = PRE_TOOL_USE_MATCHER if ev_name == "PreToolUse" else "*"
+        ev_list.append({
+            "matcher": matcher_val,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": cmd_str,
+                    "timeout": 5,
+                }
+            ],
+        })
         hooks_map[ev_name] = ev_list
 
     with open(hooks_json_path, "w", encoding="utf-8") as f:

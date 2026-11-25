@@ -81,7 +81,8 @@ def clean_text_for_speech(text: str, max_chars: int = 180) -> str:
 
 
 async def text_to_opus(text: str, voice: Optional[str] = None) -> Tuple[Optional[str], int]:
-    """Generates an OPUS voice file using edge-tts and ffmpeg.
+    """Generates an OPUS voice file using edge-tts streaming pipe -> ffmpeg stdin.
+    Eliminates intermediate MP3 disk write/read and serial wait latency.
     Returns (opus_file_path, duration_ms).
     """
     clean_text = clean_text_for_speech(text)
@@ -94,17 +95,82 @@ async def text_to_opus(text: str, voice: Optional[str] = None) -> Tuple[Optional
     mp3_path = os.path.join(temp_dir, f"tts_{file_id}.mp3")
     opus_path = os.path.join(temp_dir, f"tts_{file_id}.opus")
 
+    def _parse_ffmpeg_duration_ms(stderr_text: str, approx_bytes: int = 0) -> int:
+        matches = re.findall(r'time=(\d+):(\d+):(\d+(?:\.\d+)?)', stderr_text or "")
+        if matches:
+            h, m, s = matches[-1]
+            sec = float(h) * 3600.0 + float(m) * 60.0 + float(s)
+            return max(1000, int(sec * 1000))
+        if approx_bytes > 0:
+            # 24kHz 48kbps MP3 stream from edge-tts is ~6000 bytes/sec
+            return max(1000, int((approx_bytes / 6000.0) * 1000))
+        return 0
+
     try:
         async with _TTS_SEMAPHORE:
-            # Step 1: Synthesize to MP3 via edge-tts
             communicate = edge_tts.Communicate(clean_text, voice)
-            await asyncio.wait_for(communicate.save(mp3_path), timeout=25.0)
+
+            # Fast path: zero-temp-MP3 streaming pipe directly into ffmpeg stdin
+            if hasattr(communicate, "stream"):
+                ff_proc = None
+                try:
+                    ff_proc = await asyncio.create_subprocess_exec(
+                        "ffmpeg", "-y", "-f", "mp3", "-i", "pipe:0",
+                        "-c:a", "libopus", "-b:a", "32k", "-vbr", "on",
+                        opus_path,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stderr_task = asyncio.create_task(ff_proc.stderr.read())
+                    total_audio_bytes = 0
+
+                    async def _pump_tts_to_ffmpeg():
+                        nonlocal total_audio_bytes
+                        async for chunk in communicate.stream():
+                            if isinstance(chunk, dict) and chunk.get("type") == "audio":
+                                data = chunk.get("data")
+                                if data and ff_proc.stdin and not ff_proc.stdin.is_closing():
+                                    total_audio_bytes += len(data)
+                                    ff_proc.stdin.write(data)
+                                    await ff_proc.stdin.drain()
+                        if ff_proc.stdin and not ff_proc.stdin.is_closing():
+                            ff_proc.stdin.close()
+                            try:
+                                await ff_proc.stdin.wait_closed()
+                            except Exception:
+                                pass
+                        await ff_proc.wait()
+
+                    await asyncio.wait_for(_pump_tts_to_ffmpeg(), timeout=30.0)
+                    stderr_raw = await asyncio.wait_for(stderr_task, timeout=5.0)
+                    stderr_str = stderr_raw.decode("utf-8", errors="ignore")
+
+                    if total_audio_bytes > 0 and ff_proc.returncode == 0 and os.path.exists(opus_path) and os.path.getsize(opus_path) > 0:
+                        duration_ms = _parse_ffmpeg_duration_ms(stderr_str, approx_bytes=total_audio_bytes)
+                        return opus_path, max(1000, duration_ms)
+                    log.warning(
+                        f"[VoiceService] Streaming pipe fallback triggered (bytes={total_audio_bytes}, rc={ff_proc.returncode})"
+                    )
+                except Exception as stream_err:
+                    log.warning(f"[VoiceService] Streaming TTS pipe error, falling back to file mode: {stream_err}")
+                finally:
+                    if ff_proc is not None and ff_proc.returncode is None:
+                        try:
+                            ff_proc.kill()
+                            await ff_proc.wait()
+                        except Exception:
+                            pass
+
+            # Fallback path: file-based save + ffmpeg (also supports mocks that only implement .save)
+            communicate_fb = edge_tts.Communicate(clean_text, voice)
+            await asyncio.wait_for(communicate_fb.save(mp3_path), timeout=25.0)
 
             if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) == 0:
                 log.error("[VoiceService] edge-tts output file is empty")
                 return None, 0
 
-            # Step 2: Convert to OPUS using ffmpeg (Lark IM audio format requirement)
+            mp3_size = os.path.getsize(mp3_path)
             loop = asyncio.get_running_loop()
             cmd_convert = [
                 "ffmpeg", "-y", "-i", mp3_path,
@@ -119,14 +185,7 @@ async def text_to_opus(text: str, voice: Optional[str] = None) -> Tuple[Optional
                 log.error(f"[VoiceService] ffmpeg conversion failed: {proc.stderr}")
                 return None, 0
 
-            # Step 3: Extract duration directly from ffmpeg output (saves ~400ms vs separate ffprobe)
-            duration_ms = 0
-            matches = re.findall(r'time=(\d+):(\d+):(\d+(?:\.\d+)?)', proc.stderr or "")
-            if matches:
-                h, m, s = matches[-1]
-                sec = float(h) * 3600.0 + float(m) * 60.0 + float(s)
-                duration_ms = max(1000, int(sec * 1000))
-
+            duration_ms = _parse_ffmpeg_duration_ms(proc.stderr or "", approx_bytes=mp3_size)
             if duration_ms <= 0:
                 cmd_probe = [
                     "ffprobe", "-v", "error", "-show_entries", "format=duration",

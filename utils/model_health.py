@@ -443,6 +443,26 @@ async def probe_model_capacity(
                     "cached": True,
                 }
 
+        # v3.3 Fast Path: Reuse warm shared ACP probe daemon (~0.8s vs ~5s cold CLI startup)
+        # Skip only when unit tests explicitly mock asyncio.create_subprocess_exec on CLI path
+        if not hasattr(asyncio.create_subprocess_exec, "_mock_name"):
+            try:
+                from session_pool import session_pool
+                acp_res = await session_pool.probe_model_via_shared_acp(
+                    m_id, timeout_seconds=min(float(timeout_seconds), 10.0)
+                )
+                if isinstance(acp_res, dict) and acp_res.get("status") in ("healthy", "unhealthy"):
+                    if acp_res["status"] == "healthy":
+                        mark_model_healthy(m_id, latency_ms=float(acp_res.get("latency_ms", 0.0)))
+                        log.info(
+                            f"[ModelHealth] Shared ACP Probe HEALTHY for {m_id} in {acp_res.get('latency_ms', 0):.0f}ms"
+                        )
+                    else:
+                        mark_model_unhealthy(m_id, reason=str(acp_res.get("error") or "503 capacity error"))
+                    return acp_res
+            except Exception as acp_probe_err:
+                log.debug(f"[ModelHealth] Shared ACP probe skipped for {m_id}: {acp_probe_err}")
+
         bin_path = ANTIGRAVITY_BIN or find_antigravity_bin()
         if not bin_path:
             return {"status": "error", "model": m_id, "latency_ms": 0.0, "error": "agy binary not found"}

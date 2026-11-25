@@ -738,4 +738,146 @@ class SessionPool:
         if sess:
             await sess.close()
 
+    async def probe_model_via_shared_acp(
+        self,
+        model_id: str,
+        timeout_seconds: float = 10.0,
+    ) -> Optional[Dict[str, Any]]:
+        """Fast warm-ACP capacity probe reusing a shared lightweight ACP daemon via `set_model`.
+        Eliminates 3~5s CLI cold-start overhead on 503 health checks.
+        Returns verdict dict or None if ACP probe is unavailable so caller can fall back to CLI probe.
+        """
+        if self._resolve_transport(None) != "acp":
+            return None
+
+        probe_lock = getattr(self, "_shared_probe_lock", None)
+        if probe_lock is None:
+            probe_lock = asyncio.Lock()
+            self._shared_probe_lock = probe_lock
+
+        import tempfile
+        start_ts = time.time()
+        async with probe_lock:
+            probe_sess = getattr(self, "_shared_probe_acp_session", None)
+            now_ts = time.time()
+            # Recycle shared probe session if dead or older than 30m
+            if (
+                probe_sess is None
+                or probe_sess.is_dead_or_closing()
+                or not probe_sess.is_alive()
+                or (now_ts - getattr(probe_sess, "spawn_time", probe_sess.last_active_time) > 1800.0)
+            ):
+                if probe_sess is not None:
+                    try:
+                        await probe_sess.close()
+                    except Exception:
+                        pass
+                try:
+                    from acp_client import AcpPersistentSession
+                    probe_sess = AcpPersistentSession(
+                        chat_id="__shared_model_probe__",
+                        model=model_id,
+                        project_dir=tempfile.gettempdir(),
+                        conversation_id="",
+                        effort="low",
+                        sandbox_enabled=True,
+                        agent_mode="auto",
+                        extra_dirs=[],
+                    )
+                    await asyncio.wait_for(probe_sess.start(), timeout=min(8.0, max(4.0, timeout_seconds)))
+                    self._shared_probe_acp_session = probe_sess
+                except Exception as start_err:
+                    log.debug(f"[SessionPool] Shared ACP probe start unavailable, falling back: {start_err}")
+                    self._shared_probe_acp_session = None
+                    return None
+            else:
+                try:
+                    await asyncio.wait_for(probe_sess.set_model(model_id, effort="low"), timeout=3.0)
+                except Exception as switch_err:
+                    log.debug(f"[SessionPool] Shared ACP set_model failed for {model_id}: {switch_err}")
+                    try:
+                        await probe_sess.close()
+                    except Exception:
+                        pass
+                    self._shared_probe_acp_session = None
+                    return None
+
+            turn_stream = None
+            try:
+                probe_start = time.time()
+                turn_stream = await probe_sess.send_prompt_and_stream("Reply OK only.")
+                deadline = probe_start + max(3.0, float(timeout_seconds))
+                while True:
+                    rem = deadline - time.time()
+                    if rem <= 0:
+                        return {
+                            "status": "timeout",
+                            "model": model_id,
+                            "latency_ms": round((time.time() - start_ts) * 1000.0, 1),
+                            "error": "shared acp probe timeout",
+                        }
+                    ev = await turn_stream.get_event(timeout=min(0.5, rem))
+                    if ev is None:
+                        continue
+                    ev_type = ev.get("event") or ev.get("type")
+                    if ev_type == "message" and ev.get("content"):
+                        return {
+                            "status": "healthy",
+                            "model": model_id,
+                            "latency_ms": round((time.time() - start_ts) * 1000.0, 1),
+                            "error": "",
+                        }
+                    if ev_type == "step_update":
+                        step_up = ev.get("step_update") or {}
+                        if step_up.get("step_type") == "agent_response" and step_up.get("text_delta"):
+                            return {
+                                "status": "healthy",
+                                "model": model_id,
+                                "latency_ms": round((time.time() - start_ts) * 1000.0, 1),
+                                "error": "",
+                            }
+                    if ev_type in ("result", "error", "turn_error", "fatal", "process_exit"):
+                        res_obj = ev.get("result") or {}
+                        if ev_type == "result" and isinstance(res_obj, dict) and res_obj.get("status") == "SUCCESS":
+                            return {
+                                "status": "healthy",
+                                "model": model_id,
+                                "latency_ms": round((time.time() - start_ts) * 1000.0, 1),
+                                "error": "",
+                            }
+                        err_txt = str(
+                            (res_obj.get("error") if isinstance(res_obj, dict) else "")
+                            or ev.get("error")
+                            or ev.get("message")
+                            or probe_sess.get_recent_stderr()
+                            or ""
+                        ).strip()
+                        if "503" in err_txt or "no capacity" in err_txt.lower() or "unavailable" in err_txt.lower():
+                            return {
+                                "status": "unhealthy",
+                                "model": model_id,
+                                "latency_ms": round((time.time() - start_ts) * 1000.0, 1),
+                                "error": err_txt[-300:],
+                            }
+                        return None
+            except Exception as probe_err:
+                log.debug(f"[SessionPool] Shared ACP probe error for {model_id}: {probe_err}")
+                try:
+                    await probe_sess.close()
+                except Exception:
+                    pass
+                self._shared_probe_acp_session = None
+                return None
+            finally:
+                if turn_stream is not None:
+                    try:
+                        await turn_stream.aclose()
+                    except Exception:
+                        pass
+                if probe_sess and getattr(probe_sess, "_in_turn", False) and hasattr(probe_sess, "cancel"):
+                    try:
+                        await asyncio.wait_for(probe_sess.cancel(), timeout=1.5)
+                    except Exception:
+                        pass
+
 session_pool = SessionPool()

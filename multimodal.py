@@ -349,8 +349,15 @@ def extract_and_upload_resources(
             except Exception as e:
                 log.error(f"[Multimodal] Error scanning md file: {e}")
 
-    # 1. Upload Images
-    for img_path in set(images):
+    # 1. Upload Images (concurrently upload keys when multiple images exist, then send in deterministic order)
+    from concurrent.futures import ThreadPoolExecutor
+
+    valid_images = []
+    seen_images = set()
+    for img_path in images:
+        if img_path in seen_images:
+            continue
+        seen_images.add(img_path)
         if not os.path.isfile(img_path):
             continue
         if not is_safe_path(img_path):
@@ -361,6 +368,13 @@ def extract_and_upload_resources(
                 log.warning(f"[Multimodal] Skipping oversized image (>10MB): {img_path}")
                 summary["failed"].append((img_path, "图片超过 10MB 限制"))
                 continue
+        except Exception as e:
+            summary["failed"].append((img_path, f"读取图片大小异常: {e}"))
+            continue
+        valid_images.append(img_path)
+
+    def _upload_single_image_key(img_path: str):
+        try:
             with open(img_path, "rb") as f:
                 req = lark.api.im.v1.CreateImageRequest.builder().request_body(
                     lark.api.im.v1.CreateImageRequestBody.builder().image_type("message").image(f).build()
@@ -369,27 +383,46 @@ def extract_and_upload_resources(
             if resp.code == 0:
                 img_key = json.loads(resp.raw.content).get('data', {}).get('image_key')
                 if img_key:
-                    log.info(f"[Multimodal] Image uploaded successfully, image_key: {img_key}")
-                    if message_id and str(message_id).startswith("om_"):
-                        msg_req = lark.api.im.v1.ReplyMessageRequest.builder().message_id(message_id).request_body(
-                            lark.api.im.v1.ReplyMessageRequestBody.builder().msg_type("image").content(json.dumps({"image_key": img_key})).build()
-                        ).build()
-                        api_client.im.v1.message.reply(msg_req)
-                    elif chat_id:
-                        msg_req = lark.api.im.v1.CreateMessageRequest.builder().receive_id_type("chat_id").request_body(
-                            lark.api.im.v1.CreateMessageRequestBody.builder().receive_id(chat_id).msg_type("image").content(json.dumps({"image_key": img_key})).build()
-                        ).build()
-                        api_client.im.v1.message.create(msg_req)
-                    summary["uploaded"].append(img_path)
-            else:
-                log.error(f"[Multimodal] Failed to upload image: {resp.msg}")
-                summary["failed"].append((img_path, f"飞书图片上传失败: {resp.msg}"))
+                    return (img_path, img_key, None)
+                return (img_path, None, "飞书图片上传未返回 image_key")
+            log.error(f"[Multimodal] Failed to upload image: {resp.msg}")
+            return (img_path, None, f"飞书图片上传失败: {resp.msg}")
         except Exception as e:
             log.error(f"[Multimodal] Error uploading image: {e}")
-            summary["failed"].append((img_path, f"飞书图片上传异常: {e}"))
+            return (img_path, None, f"飞书图片上传异常: {e}")
 
-    # 2. Upload Files / Audio
+    if len(valid_images) == 1:
+        image_upload_results = [_upload_single_image_key(valid_images[0])]
+    elif len(valid_images) > 1:
+        with ThreadPoolExecutor(max_workers=min(4, len(valid_images))) as pool:
+            image_upload_results = list(pool.map(_upload_single_image_key, valid_images))
+    else:
+        image_upload_results = []
+
+    for img_path, img_key, err_reason in image_upload_results:
+        if err_reason or not img_key:
+            summary["failed"].append((img_path, err_reason or "飞书图片上传失败"))
+            continue
+        try:
+            log.info(f"[Multimodal] Image uploaded successfully, image_key: {img_key}")
+            if message_id and str(message_id).startswith("om_"):
+                msg_req = lark.api.im.v1.ReplyMessageRequest.builder().message_id(message_id).request_body(
+                    lark.api.im.v1.ReplyMessageRequestBody.builder().msg_type("image").content(json.dumps({"image_key": img_key})).build()
+                ).build()
+                api_client.im.v1.message.reply(msg_req)
+            elif chat_id:
+                msg_req = lark.api.im.v1.CreateMessageRequest.builder().receive_id_type("chat_id").request_body(
+                    lark.api.im.v1.CreateMessageRequestBody.builder().receive_id(chat_id).msg_type("image").content(json.dumps({"image_key": img_key})).build()
+                ).build()
+                api_client.im.v1.message.create(msg_req)
+            summary["uploaded"].append(img_path)
+        except Exception as e:
+            log.error(f"[Multimodal] Error sending uploaded image {img_path}: {e}")
+            summary["failed"].append((img_path, f"飞书图片发送异常: {e}"))
+
+    # 2. Upload Files / Audio (validate upfront, concurrently upload keys if multiple, then send in order)
     uploaded_files = set()
+    valid_file_tasks = []
     for cand in candidates:
         abs_file = cand["abs_file"]
         if abs_file in uploaded_files:
@@ -445,8 +478,15 @@ def extract_and_upload_resources(
                 summary["failed"].append((abs_file, "文件超过飞书 30MB 单文件上限"))
                 continue
             uploaded_files.add(abs_file)
+            valid_file_tasks.append((abs_file, ext_lower == ".opus"))
+        except Exception as e:
+            log.error(f"[Multimodal] Error inspecting file {abs_file}: {e}")
+            summary["failed"].append((abs_file, f"上传异常: {e}"))
+
+    def _upload_single_file_key(task_item):
+        abs_file, is_opus_voice = task_item
+        try:
             duration_ms = None
-            is_opus_voice = (ext_lower == ".opus")
             if is_opus_voice:
                 try:
                     probe_cmd = [
@@ -457,27 +497,43 @@ def extract_and_upload_resources(
                     duration_ms = max(1000, int(float(probe_res.stdout.strip()) * 1000))
                 except Exception:
                     duration_ms = 1000
-
             file_key = upload_file_sdk(abs_file, duration_ms=duration_ms)
             if file_key:
-                log.info(f"[Multimodal] File uploaded to Lark API (key={file_key}, path={abs_file})")
-                if is_opus_voice:
-                    ok = reply_voice_sdk(message_id, file_key) if (message_id and str(message_id).startswith("om_")) else False
-                    if not ok and chat_id:
-                        ok = send_voice_to_chat_sdk(chat_id, file_key)
-                else:
-                    ok = reply_file_sdk(message_id, file_key) if (message_id and str(message_id).startswith("om_")) else False
-                    if not ok and chat_id:
-                        ok = send_file_to_chat_sdk(chat_id, file_key)
-                if ok:
-                    summary["uploaded"].append(abs_file)
-                else:
-                    summary["failed"].append((abs_file, "飞书文件消息发送失败"))
-            else:
-                log.error(f"[Multimodal] Failed to upload file via Lark API: {abs_file}")
-                summary["failed"].append((abs_file, "飞书文件上传接口返回失败"))
+                return (abs_file, is_opus_voice, file_key, None)
+            log.error(f"[Multimodal] Failed to upload file via Lark API: {abs_file}")
+            return (abs_file, is_opus_voice, None, "飞书文件上传接口返回失败")
         except Exception as e:
             log.error(f"[Multimodal] Error uploading file {abs_file}: {e}")
+            return (abs_file, is_opus_voice, None, f"上传异常: {e}")
+
+    if len(valid_file_tasks) == 1:
+        file_upload_results = [_upload_single_file_key(valid_file_tasks[0])]
+    elif len(valid_file_tasks) > 1:
+        with ThreadPoolExecutor(max_workers=min(4, len(valid_file_tasks))) as pool:
+            file_upload_results = list(pool.map(_upload_single_file_key, valid_file_tasks))
+    else:
+        file_upload_results = []
+
+    for abs_file, is_opus_voice, file_key, err_reason in file_upload_results:
+        if err_reason or not file_key:
+            summary["failed"].append((abs_file, err_reason or "飞书文件上传接口返回失败"))
+            continue
+        try:
+            log.info(f"[Multimodal] File uploaded to Lark API (key={file_key}, path={abs_file})")
+            if is_opus_voice:
+                ok = reply_voice_sdk(message_id, file_key) if (message_id and str(message_id).startswith("om_")) else False
+                if not ok and chat_id:
+                    ok = send_voice_to_chat_sdk(chat_id, file_key)
+            else:
+                ok = reply_file_sdk(message_id, file_key) if (message_id and str(message_id).startswith("om_")) else False
+                if not ok and chat_id:
+                    ok = send_file_to_chat_sdk(chat_id, file_key)
+            if ok:
+                summary["uploaded"].append(abs_file)
+            else:
+                summary["failed"].append((abs_file, "飞书文件消息发送失败"))
+        except Exception as e:
+            log.error(f"[Multimodal] Error sending uploaded file {abs_file}: {e}")
             summary["failed"].append((abs_file, f"上传异常: {e}"))
 
     return summary

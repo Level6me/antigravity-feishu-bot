@@ -579,11 +579,61 @@ class ProcessVitalityState:
     child_first_seen: Dict[int, float] = field(default_factory=dict)
 
 
-def snapshot_process_group_pids(leader_pid: int) -> Set[int]:
+def _collect_descendant_pids_fast(leader_pid: int) -> Optional[Set[int]]:
+    """O(subtree) descendant PID discovery via Linux /proc/<pid>/task/<tid>/children.
+    Returns None if /proc children interface is unavailable so caller can fall back cleanly.
+    """
+    if not leader_pid or leader_pid <= 0:
+        return set()
+    probe_children = f"/proc/{leader_pid}/task/{leader_pid}/children"
+    if not os.path.exists(probe_children):
+        # Distinguish dead PID vs unsupported kernel
+        if not os.path.exists(f"/proc/{leader_pid}"):
+            return set()
+        return None
+
+    pids: Set[int] = set()
+    queue: List[int] = [leader_pid]
+    while queue:
+        curr = queue.pop(0)
+        if curr in pids:
+            continue
+        if not os.path.exists(f"/proc/{curr}"):
+            continue
+        pids.add(curr)
+        task_dir = f"/proc/{curr}/task"
+        try:
+            tids = os.listdir(task_dir)
+        except OSError:
+            continue
+        for tid in tids:
+            if not tid.isdigit():
+                continue
+            try:
+                with open(f"{task_dir}/{tid}/children", "r", encoding="utf-8", errors="ignore") as cf:
+                    raw = cf.read().strip()
+                if raw:
+                    for tok in raw.split():
+                        if tok.isdigit():
+                            cpid = int(tok)
+                            if cpid not in pids:
+                                queue.append(cpid)
+            except OSError:
+                continue
+    return pids
+
+
+def snapshot_process_group_pids(leader_pid: int, fast_subtree: bool = False) -> Set[int]:
     """Return all current PIDs in the process group or descendant tree of leader_pid."""
     pids: Set[int] = set()
     if not leader_pid or leader_pid <= 0:
         return pids
+
+    if fast_subtree:
+        fast_res = _collect_descendant_pids_fast(leader_pid)
+        if fast_res is not None:
+            return fast_res
+
     try:
         pgid = os.getpgid(leader_pid)
     except OSError:
@@ -631,6 +681,8 @@ def measure_process_tree_vitality(
     *,
     beta: float = 0.82,
     max_single_child_age_sec: float = 300.0,
+    precomputed_pids: Optional[Set[int]] = None,
+    precomputed_cpu_states: Optional[Dict[int, Tuple[str, int]]] = None,
 ) -> Dict:
     """
     Compute true process group vitality using CPU ticks delta, /proc/<pid>/io bytes delta,
@@ -638,7 +690,7 @@ def measure_process_tree_vitality(
     Never treats pre-existing sleeping warm-pool daemon children as 'active work'!
     """
     now = time.time()
-    all_pids = snapshot_process_group_pids(leader_pid)
+    all_pids = set(precomputed_pids) if precomputed_pids is not None else snapshot_process_group_pids(leader_pid, fast_subtree=True)
     if not all_pids:
         vstate.ewma_vitality = 0.0
         return {
@@ -655,21 +707,27 @@ def measure_process_tree_vitality(
     new_active_pids: List[int] = []
 
     for pid in all_pids:
-        try:
-            with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="ignore") as f:
-                s = f.read()
-            rpar = s.rfind(")")
-            if rpar != -1:
-                fields = s[rpar + 2 :].split()
-                if len(fields) >= 13:
-                    state_ch = fields[0]
-                    utime = int(fields[11])
-                    stime = int(fields[12])
-                    total_cpu += utime + stime
-                    if state_ch in ("R", "D"):
-                        running_pids.append(pid)
-        except OSError:
-            continue
+        if precomputed_cpu_states and pid in precomputed_cpu_states:
+            state_ch, cpu_ticks = precomputed_cpu_states[pid]
+            total_cpu += cpu_ticks
+            if state_ch in ("R", "D"):
+                running_pids.append(pid)
+        else:
+            try:
+                with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="ignore") as f:
+                    s = f.read()
+                rpar = s.rfind(")")
+                if rpar != -1:
+                    fields = s[rpar + 2 :].split()
+                    if len(fields) >= 13:
+                        state_ch = fields[0]
+                        utime = int(fields[11])
+                        stime = int(fields[12])
+                        total_cpu += utime + stime
+                        if state_ch in ("R", "D"):
+                            running_pids.append(pid)
+            except OSError:
+                continue
 
         # Read /proc/<pid>/io if permitted
         try:
