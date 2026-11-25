@@ -230,7 +230,7 @@ _HELP_STATIC_COMMANDS = {
     "/project", "/adddir", "/add-dir", "/mode", "/note", "/notes", "/cron",
     "/schedule", "/quota", "/status", "/steer", "/plugin", "/plugins",
     "/pluginreload", "/mcp", "/agyplugin", "/skills", "/skill", "/stop", "/s1", "/sys1", "/system1",
-    "/ping", "/update", "/help", "/user", "/auth", "/transport",
+    "/ping", "/update", "/help", "/user", "/auth", "/transport", "/perm", "/perms",
 }
 
 
@@ -363,6 +363,7 @@ def build_help_card(is_admin_user: bool = False, plugins=None, active_tab: str =
             "tag": "markdown",
             "content": (
                 "🔐 **管理员专属指令：**\n"
+                "• `/perm` : 一键体检飞书机器人所需的应用权限开通状态（支持热激活与直达配置后台）\n"
                 "• `/user [grant|revoke|ban|unban]` : 管理多会话用户授权与权限分级\n"
                 "• `/auth` : 查看当前会话授权状态\n"
                 "• `/transport [acp|stream-json]` : 查看或切换底层会话传输引擎（默认 ACP）\n"
@@ -525,6 +526,12 @@ def build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs="", gi
                     "text": {"tag": "plain_text", "content": "🔍 检查远端更新"},
                     "type": "default",
                     "value": {"action": "refresh_status", "fetch_remote": True}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔐 权限体检"},
+                    "type": "default",
+                    "value": {"action": "user_choice", "choice": "/perm", "label": "权限体检"}
                 },
                 {
                     "tag": "button",

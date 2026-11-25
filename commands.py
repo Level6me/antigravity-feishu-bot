@@ -461,7 +461,12 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
     # Permission gate for privileged slash commands (guests never reach here;
     # this protects admin-only and scoped commands from regular users).
     if not is_admin(chat_id):
-        if user_text.startswith("/update") or user_text.startswith("/user") or user_text.strip() == "/status":
+        _cmd_head = user_text.strip().split()[0].lower() if user_text.strip() else ""
+        if (
+            user_text.startswith("/update")
+            or user_text.startswith("/user")
+            or _cmd_head in ("/status", "/perm", "/perms")
+        ):
             await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: send_reply_sdk(message_id, "🔒 该命令仅管理员可用。"),
@@ -1057,6 +1062,20 @@ async def handle_slash_command(user_text, message_id, chat_id, session_data, run
         )
         status_card = CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats)
         await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(message_id, status_card))
+        return True, user_text
+
+    elif first_word.lower() in ("/perm", "/perms"):
+        from database import get_auth_session
+        from utils.feishu_perm_checker import check_feishu_permissions
+        auth_sess = get_auth_session(chat_id) or {}
+        sender_oid = str(auth_sess.get("sender_open_id") or "").strip()
+        report = await check_feishu_permissions(
+            chat_id=chat_id, sender_open_id=sender_oid, force_token_refresh=True
+        )
+        perm_card = CardBuilder.build_perm_check_card(report)
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: send_interactive_card_sdk(message_id, perm_card)
+        )
         return True, user_text
 
     elif user_text.strip() == "/context":

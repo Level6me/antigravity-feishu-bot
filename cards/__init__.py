@@ -15,6 +15,7 @@ from cards import (
     mcp,
     agy_plugin,
     skills,
+    perm_card,
 )
 
 
@@ -99,6 +100,7 @@ class CardBuilder:
     build_mcp_panel_card = staticmethod(mcp.build_mcp_panel_card)
     build_agy_plugin_panel_card = staticmethod(agy_plugin.build_agy_plugin_panel_card)
     build_skill_panel_card = staticmethod(skills.build_skill_panel_card)
+    build_perm_check_card = staticmethod(perm_card.build_perm_check_card)
     build_system_one_config_card = staticmethod(system_one_card.build_system_one_config_card)
     build_system_one_tier_menu_card = staticmethod(system_one_card.build_system_one_tier_menu_card)
     build_typesafe_config_card = build_system_one_config_card

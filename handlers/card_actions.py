@@ -1326,6 +1326,29 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 sync_timeout=0.8 if fetch_remote else 1.5,
             )
 
+    elif action_value.get("action") == "refresh_feishu_perm":
+        if not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 仅管理员可执行飞书权限体检！"}})
+
+        async def _do_refresh_perm():
+            from utils.feishu_perm_checker import check_feishu_permissions
+            rep = await check_feishu_permissions(
+                chat_id=chat_id,
+                sender_open_id=operator_open_id or "",
+                force_token_refresh=True,
+            )
+            card = CardBuilder.build_perm_check_card(rep)
+            toast_msg = (
+                "🎉 权限已就绪，CardKit 2.0 流式引擎已自动热激活！"
+                if rep.get("cardkit_newly_activated")
+                else "飞书应用权限体检已刷新！"
+            )
+            return card, "success" if rep.get("ok") else "warning", toast_msg
+
+        return _respond_card_sync_or_patch(
+            _do_refresh_perm, card_message_id, "飞书应用权限体检已刷新！", sync_timeout=1.6
+        )
+
     elif action_value.get("action") == "refresh_quota":
         async def _do_refresh_quota():
             from utils.quota import fetch_quota
