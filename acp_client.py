@@ -658,39 +658,62 @@ class AcpPersistentSession:
             self._pending_rpc.pop(rpc_id, None)
 
     async def set_model(self, model_id: str, effort: Optional[str] = None) -> bool:
-        """Dynamically switch model (and thinking effort) without restarting the ACP process."""
+        """Dynamically switch model (and thinking effort) without restarting the ACP process.
+        Includes singleflight lock + applied-state deduplication so concurrent prewarm & executor calls never send duplicate RPCs.
+        """
         if not self.is_alive() or not self.conversation_id or not model_id:
             self.model = model_id
             if effort:
                 self.effort = effort
             return False
-        try:
-            await self._rpc_call(
-                "session/set_model",
-                {"sessionId": self.conversation_id, "modelId": model_id},
-                timeout=12.0,
-            )
-            self.model = model_id
-            if effort:
-                self.effort = effort
-                if not has_embedded_effort_suffix(model_id):
-                    try:
-                        await self._rpc_call(
-                            "session/set_config_option",
-                            {
-                                "sessionId": self.conversation_id,
-                                "configId": "thought_level",
-                                "value": effort,
-                            },
-                            timeout=8.0,
-                        )
-                    except Exception as eff_err:
-                        log.debug(f"[ACP] set thought_level={effort} skipped: {eff_err}")
-            log.info(f"[ACP] Dynamically switched model in-place for {self.chat_id}: {model_id} (effort={self.effort})")
-            return True
-        except Exception as e:
-            log.warning(f"[ACP] session/set_model({model_id}) failed for {self.chat_id}: {e}")
-            return False
+
+        switch_lock = getattr(self, "_model_switch_lock", None)
+        if switch_lock is None:
+            switch_lock = asyncio.Lock()
+            self._model_switch_lock = switch_lock
+
+        async with switch_lock:
+            target_effort = effort or self.effort
+            if (
+                getattr(self, "_applied_acp_conv_id", None) == self.conversation_id
+                and getattr(self, "_applied_acp_model", None) == model_id
+                and getattr(self, "_applied_acp_effort", None) == target_effort
+            ):
+                self.model = model_id
+                if effort:
+                    self.effort = effort
+                return True
+
+            try:
+                await self._rpc_call(
+                    "session/set_model",
+                    {"sessionId": self.conversation_id, "modelId": model_id},
+                    timeout=12.0,
+                )
+                self.model = model_id
+                if effort:
+                    self.effort = effort
+                    if not has_embedded_effort_suffix(model_id):
+                        try:
+                            await self._rpc_call(
+                                "session/set_config_option",
+                                {
+                                    "sessionId": self.conversation_id,
+                                    "configId": "thought_level",
+                                    "value": effort,
+                                },
+                                timeout=8.0,
+                            )
+                        except Exception as eff_err:
+                            log.debug(f"[ACP] set thought_level={effort} skipped: {eff_err}")
+                self._applied_acp_conv_id = self.conversation_id
+                self._applied_acp_model = model_id
+                self._applied_acp_effort = self.effort
+                log.info(f"[ACP] Dynamically switched model in-place for {self.chat_id}: {model_id} (effort={self.effort})")
+                return True
+            except Exception as e:
+                log.warning(f"[ACP] session/set_model({model_id}) failed for {self.chat_id}: {e}")
+                return False
 
     async def set_mode(self, mode: str) -> bool:
         """Dynamically switch execution mode (`default` | `accept-edits` | `plan`) in-place."""

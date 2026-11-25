@@ -71,65 +71,110 @@ class CronEngine:
         self._running = False
         self._loop_task = None
         self._running_tasks = set()
+        self._loop_ref = None
+        self._wakeup_event: asyncio.Event | None = None
 
     def start(self):
         """Start the cron engine background loop."""
         if self._running:
             return
         self._running = True
+        self._loop_ref = asyncio.get_running_loop()
+        self._wakeup_event = asyncio.Event()
         self._loop_task = asyncio.create_task(self._scheduler_loop())
-        log.info("[CronEngine] Background scheduler loop started.")
+        log.info("[CronEngine] Background event-driven scheduler loop started.")
 
     def stop(self):
         self._running = False
+        if self._wakeup_event is not None:
+            self._wakeup_event.set()
         if self._loop_task:
             self._loop_task.cancel()
         log.info("[CronEngine] Scheduler loop stopped.")
 
+    def notify_schedule_changed(self):
+        """Thread-safe instant wakeup when cron tasks are created, toggled, or deleted."""
+        loop = self._loop_ref
+        evt = self._wakeup_event
+        if not self._running or loop is None or evt is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(evt.set)
+        except RuntimeError:
+            pass
+
     async def _scheduler_loop(self):
         # Grace period on startup to let main bot initialize
-        await asyncio.sleep(3.0)
-        
+        await asyncio.sleep(2.0)
+
         while self._running:
+            sleep_seconds = 3600.0
             try:
-                now = int(time.time())
+                if self._wakeup_event is not None:
+                    self._wakeup_event.clear()
+
+                now_f = time.time()
+                now = int(now_f)
                 active_tasks = await asyncio.get_running_loop().run_in_executor(None, get_active_cron_tasks)
-                
+
+                earliest_next_run = None
                 for task in active_tasks:
                     task_id = task['id']
                     if task_id in self._running_tasks:
-                        continue  # Task is already executing
-                    
+                        # Re-check reasonably soon if a task is mid-flight
+                        earliest_next_run = min(earliest_next_run, now + 30) if earliest_next_run else (now + 30)
+                        continue
+
                     next_run = task.get('next_run_at', 0)
                     # If next_run is uninitialized (0), calculate and save it
                     if next_run <= 0:
                         next_run = compute_next_run(task['cron_expr'], task.get('task_type', 'cron'), now)
                         await asyncio.get_running_loop().run_in_executor(
-                            None, lambda: update_cron_task_run(task_id, task.get('last_run_at', 0), next_run)
+                            None, lambda tid=task_id, lr=task.get('last_run_at', 0), nr=next_run: update_cron_task_run(tid, lr, nr)
                         )
+                        earliest_next_run = min(earliest_next_run, next_run) if earliest_next_run else next_run
                         continue
-                    
+
                     if now >= next_run:
                         tentative_next = compute_next_run(task['cron_expr'], task.get('task_type', 'cron'), now)
                         if task.get('task_type') == 'delay':
                             tentative_next = 0
-                        
+
                         from database import claim_cron_task
                         claimed = await asyncio.get_running_loop().run_in_executor(
-                            None, lambda: claim_cron_task(task_id, now, tentative_next)
+                            None, lambda tid=task_id, tn=tentative_next: claim_cron_task(tid, now, tn)
                         )
                         if not claimed:
                             continue
 
                         self._running_tasks.add(task_id)
                         asyncio.create_task(self._run_task_wrapper(task))
-            
+                        if tentative_next > 0:
+                            earliest_next_run = min(earliest_next_run, tentative_next) if earliest_next_run else tentative_next
+                    else:
+                        earliest_next_run = min(earliest_next_run, next_run) if earliest_next_run else next_run
+
+                if earliest_next_run is not None:
+                    sleep_seconds = max(0.5, min(3600.0, float(earliest_next_run) - time.time()))
+                else:
+                    # Zero active tasks: sleep up to 1 hour without any SQLite polling unless woken by notify_schedule_changed()
+                    sleep_seconds = 3600.0
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.error(f"[CronEngine] Exception in scheduler loop: {e}")
-            
-            await asyncio.sleep(5.0)  # Check every 5 seconds
+                sleep_seconds = 10.0
+
+            try:
+                if self._wakeup_event is not None:
+                    await asyncio.wait_for(self._wakeup_event.wait(), timeout=sleep_seconds)
+                else:
+                    await asyncio.sleep(sleep_seconds)
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                break
 
     async def _run_task_wrapper(self, task):
         task_id = task['id']

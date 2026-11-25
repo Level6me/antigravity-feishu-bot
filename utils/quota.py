@@ -28,6 +28,7 @@ from logger import log
 _PORT_CACHE = None  # (timestamp, port)
 _PORT_CACHE_TTL = 300
 _AGY_VERSION_CACHE = None
+_LSP_FAST_HINT = {"port": None, "scheme": "https", "csrf": None, "ts": 0.0}
 
 
 def get_agy_version() -> str:
@@ -99,10 +100,32 @@ def _ssl_context(insecure_allowed=True):
     return ssl.create_default_context()
 
 
+def _load_listening_socket_inodes() -> dict[str, int]:
+    """Single-pass parse of /proc/net/tcp and /proc/net/tcp6 LISTEN sockets (state 0A) -> {inode: port}."""
+    inode_to_port: dict[str, int] = {}
+    for tcp_file in ("/proc/net/tcp", "/proc/net/tcp6"):
+        if not os.path.exists(tcp_file):
+            continue
+        try:
+            with open(tcp_file, "r", encoding="utf-8", errors="ignore") as tcp_f:
+                for tcp_line in tcp_f:
+                    tcp_parts = tcp_line.strip().split()
+                    if len(tcp_parts) >= 10 and tcp_parts[3] == "0A":
+                        inode = tcp_parts[9]
+                        hex_port = tcp_parts[1].rsplit(":", 1)[-1]
+                        inode_to_port[inode] = int(hex_port, 16)
+        except Exception:
+            continue
+    return inode_to_port
+
+
 def _discover_linux_proc():
-    """Scan /proc for agy processes and collect their listen ports (Linux)."""
+    """Scan /proc for agy processes and collect their listen ports in a single O(N) pass."""
     candidate_ports = set()
     if not os.path.isdir("/proc"):
+        return candidate_ports
+    inode_to_port = _load_listening_socket_inodes()
+    if not inode_to_port:
         return candidate_ports
     try:
         for pid_dir in os.listdir("/proc"):
@@ -119,21 +142,31 @@ def _discover_linux_proc():
                 if exe not in ("agy", "antigravity"):
                     continue
 
+                # Opportunistically cache CSRF token from the same agy process without a second /proc scan
+                if not _LSP_FAST_HINT.get("csrf"):
+                    try:
+                        with open(f"/proc/{pid_dir}/environ", "rb") as ef:
+                            for item in ef.read().split(b"\x00"):
+                                if item.startswith(b"ANTIGRAVITY_CSRF_TOKEN="):
+                                    val = item.split(b"=", 1)[1].decode("utf-8", errors="ignore").strip()
+                                    if val:
+                                        _LSP_FAST_HINT["csrf"] = val
+                                        break
+                    except Exception:
+                        pass
+
                 fd_dir = f"/proc/{pid_dir}/fd"
                 if not os.path.isdir(fd_dir):
                     continue
                 for fd in os.listdir(fd_dir):
                     try:
                         link = os.readlink(f"{fd_dir}/{fd}")
-                        if "socket:" not in link:
+                        if "socket:[" not in link:
                             continue
-                        inode = link.split("[")[1].rstrip("]")
-                        with open("/proc/net/tcp", "r") as tcp_f:
-                            for tcp_line in tcp_f:
-                                tcp_parts = tcp_line.strip().split()
-                                if len(tcp_parts) >= 10 and tcp_parts[9] == inode and tcp_parts[3] == "0A":
-                                    hex_port = tcp_parts[1].split(":")[1]
-                                    candidate_ports.add(int(hex_port, 16))
+                        inode = link.split("[", 1)[1].rstrip("]")
+                        matched_port = inode_to_port.get(inode)
+                        if matched_port is not None:
+                            candidate_ports.add(matched_port)
                     except Exception:
                         continue
             except Exception:
@@ -217,16 +250,21 @@ def discover_lsp_port():
 
 
 def _probe_lsp(port):
-    """Query the local LSP gRPC/Connect endpoint for the quota summary."""
+    """Query the local LSP gRPC/Connect endpoint for the quota summary (with scheme & CSRF fast cache)."""
     try:
         metadata_payload = b'{"metadata": {"ideName": "antigravity", "extensionName": "antigravity"}}'
         headers = {"Content-Type": "application/json"}
-        csrf = _get_csrf_token()
+        now = time.time()
+        csrf = _LSP_FAST_HINT["csrf"] if (_LSP_FAST_HINT.get("csrf") and now - _LSP_FAST_HINT.get("ts", 0) < 300) else None
+        if not csrf:
+            csrf = _get_csrf_token()
         if csrf:
             headers["x-codeium-csrf-token"] = csrf
 
         local_ctx = ssl._create_unverified_context()
-        for scheme in ("https", "http"):
+        preferred = _LSP_FAST_HINT.get("scheme") if _LSP_FAST_HINT.get("port") == port else "https"
+        schemes = (preferred, "http" if preferred == "https" else "https")
+        for scheme in schemes:
             try:
                 url = f"{scheme}://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
                 req = urllib.request.Request(
@@ -239,6 +277,10 @@ def _probe_lsp(port):
                 with urllib.request.urlopen(req, context=ctx, timeout=3) as response:
                     data = json.loads(response.read().decode())
                     if "response" in data and "groups" in data["response"] and len(data["response"]["groups"]) > 0:
+                        _LSP_FAST_HINT["port"] = port
+                        _LSP_FAST_HINT["scheme"] = scheme
+                        _LSP_FAST_HINT["csrf"] = csrf
+                        _LSP_FAST_HINT["ts"] = now
                         return data
             except Exception:
                 continue

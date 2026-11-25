@@ -252,6 +252,59 @@ def _normalize_session_dict(raw_json: str) -> dict:
 _async_db_pool = {}
 _async_db_pool_guard = threading.Lock()
 
+# L1 Write-Through Hot Memory Cache (eliminates 3~4 redundant session/profile DB reads per message)
+_HOT_CACHE_TTL_SEC = 30.0
+_hot_session_cache = {}  # {(db_path, chat_id): (ts, dict)}
+_hot_profile_cache = {}  # {(db_path, user_id): (ts, list)}
+_hot_cache_lock = threading.RLock()
+
+
+def _hot_cache_get_session(chat_id: str):
+    key = (os.path.abspath(DB_FILE), str(chat_id))
+    with _hot_cache_lock:
+        item = _hot_session_cache.get(key)
+        if item and (time.monotonic() - item[0] <= _HOT_CACHE_TTL_SEC):
+            return copy.deepcopy(item[1])
+        if item:
+            _hot_session_cache.pop(key, None)
+    return None
+
+
+def _hot_cache_put_session(chat_id: str, norm_dict: dict) -> None:
+    key = (os.path.abspath(DB_FILE), str(chat_id))
+    clean = {k: v for k, v in norm_dict.items() if k != "_isolated_pool_key"}
+    with _hot_cache_lock:
+        if len(_hot_session_cache) > 512 and key not in _hot_session_cache:
+            _hot_session_cache.pop(next(iter(_hot_session_cache)), None)
+        _hot_session_cache[key] = (time.monotonic(), copy.deepcopy(clean))
+
+
+def _hot_cache_get_profile(user_id: str):
+    key = (os.path.abspath(DB_FILE), str(user_id))
+    with _hot_cache_lock:
+        item = _hot_profile_cache.get(key)
+        if item and (time.monotonic() - item[0] <= _HOT_CACHE_TTL_SEC):
+            return copy.deepcopy(item[1])
+        if item:
+            _hot_profile_cache.pop(key, None)
+    return None
+
+
+def _hot_cache_put_profile(user_id: str, items: list) -> None:
+    key = (os.path.abspath(DB_FILE), str(user_id))
+    with _hot_cache_lock:
+        if len(_hot_profile_cache) > 512 and key not in _hot_profile_cache:
+            _hot_profile_cache.pop(next(iter(_hot_profile_cache)), None)
+        _hot_profile_cache[key] = (time.monotonic(), copy.deepcopy(items))
+
+
+def _notify_cron_engine() -> None:
+    try:
+        from cron_engine import cron_engine
+        cron_engine.notify_schedule_changed()
+    except Exception:
+        pass
+
 
 def _prune_closed_loop_db_conns() -> None:
     """Synchronously stop and remove cached aiosqlite connections belonging to closed/GC'd event loops."""
@@ -323,6 +376,9 @@ async def _shared_aiosqlite_conn():
 
 async def get_session_async(chat_id):
     async with _get_session_lock(chat_id):
+        cached = _hot_cache_get_session(chat_id)
+        if cached is not None:
+            return SessionDict(cached, _db_baseline=copy.deepcopy(cached))
         async with _shared_aiosqlite_conn() as db:
             async with db.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,)) as cursor:
                 row = await cursor.fetchone()
@@ -330,6 +386,7 @@ async def get_session_async(chat_id):
                     norm = _normalize_session_dict(row['data'])
                 else:
                     norm = {"conversation": "", "model": DEFAULT_MODEL, "role": "无", "project": "默认"}
+                _hot_cache_put_session(chat_id, norm)
                 return SessionDict(norm, _db_baseline=copy.deepcopy(norm))
 
 
@@ -358,6 +415,7 @@ async def _three_way_merge_locked(chat_id: str, data: dict, baseline: dict) -> d
                 (chat_id, json.dumps(merged, ensure_ascii=False)),
             )
             await db.commit()
+            _hot_cache_put_session(chat_id, merged)
         except Exception:
             await db.rollback()
             raise
@@ -386,6 +444,8 @@ async def save_session_async(chat_id, data):
                     (chat_id, json.dumps(clean_data, ensure_ascii=False)),
                 )
                 await db.commit()
+                if isinstance(clean_data, dict):
+                    _hot_cache_put_session(chat_id, _normalize_session_dict(json.dumps(clean_data, ensure_ascii=False)))
             except Exception:
                 await db.rollback()
                 raise
@@ -412,24 +472,41 @@ async def get_profile_async(user_id, fallback_chat_id=None):
     if not primary_key:
         return []
     async with _get_profile_lock(primary_key):
-        async with _shared_aiosqlite_conn() as db:
-            merged_items = []
-            keys_to_query = [primary_key]
-            if fallback_chat_id and str(fallback_chat_id) != primary_key:
-                keys_to_query.append(str(fallback_chat_id))
-            for qk in keys_to_query:
-                async with db.execute('SELECT data FROM user_profiles WHERE user_id = ?', (qk,)) as cursor:
-                    row = await cursor.fetchone()
-                    if row:
-                        try:
-                            items = json.loads(row['data'])
-                            if isinstance(items, list):
-                                for it in items:
-                                    if it not in merged_items:
-                                        merged_items.append(it)
-                        except Exception:
-                            pass
-            return merged_items
+        keys_to_query = [primary_key]
+        if fallback_chat_id and str(fallback_chat_id) != primary_key:
+            keys_to_query.append(str(fallback_chat_id))
+
+        missing_keys = []
+        per_key_items = {}
+        for qk in keys_to_query:
+            cached_p = _hot_cache_get_profile(qk)
+            if cached_p is not None:
+                per_key_items[qk] = cached_p
+            else:
+                missing_keys.append(qk)
+
+        if missing_keys:
+            async with _shared_aiosqlite_conn() as db:
+                for qk in missing_keys:
+                    q_list = []
+                    async with db.execute('SELECT data FROM user_profiles WHERE user_id = ?', (qk,)) as cursor:
+                        row = await cursor.fetchone()
+                        if row:
+                            try:
+                                items = json.loads(row['data'])
+                                if isinstance(items, list):
+                                    q_list = items
+                            except Exception:
+                                pass
+                    _hot_cache_put_profile(qk, q_list)
+                    per_key_items[qk] = q_list
+
+        merged_items = []
+        for qk in keys_to_query:
+            for it in per_key_items.get(qk, []):
+                if it not in merged_items:
+                    merged_items.append(it)
+        return merged_items
 
 async def save_profile_async(user_id, data):
     primary_key = str(user_id or "")
@@ -439,6 +516,8 @@ async def save_profile_async(user_id, data):
         async with _shared_aiosqlite_conn() as db:
             await db.execute('INSERT OR REPLACE INTO user_profiles (user_id, data) VALUES (?, ?)', (primary_key, json.dumps(data, ensure_ascii=False)))
             await db.commit()
+        if isinstance(data, list):
+            _hot_cache_put_profile(primary_key, data)
 
 def load_sessions():
     with _db_session_rw_lock:
@@ -448,7 +527,9 @@ def load_sessions():
             rows = cursor.fetchall()
     sessions = {}
     for row in rows:
-        sessions[row['chat_id']] = _normalize_session_dict(row['data'])
+        norm = _normalize_session_dict(row['data'])
+        sessions[row['chat_id']] = norm
+        _hot_cache_put_session(row['chat_id'], norm)
     return sessions
 
 def save_sessions(sessions):
@@ -458,16 +539,26 @@ def save_sessions(sessions):
             for chat_id, data in sessions.items():
                 cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data, ensure_ascii=False)))
             conn.commit()
+        for chat_id, data in sessions.items():
+            if isinstance(data, dict):
+                _hot_cache_put_session(chat_id, _normalize_session_dict(json.dumps(data, ensure_ascii=False)))
 
 def get_session_sync(chat_id):
+    cached = _hot_cache_get_session(chat_id)
+    if cached is not None:
+        return cached
     with _db_session_rw_lock:
         with closing(get_db()) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT data FROM chat_sessions WHERE chat_id = ?', (chat_id,))
             row = cursor.fetchone()
     if row:
-        return _normalize_session_dict(row['data'])
-    return {"conversation": "", "model": DEFAULT_MODEL, "role": "无", "project": "默认"}
+        norm = _normalize_session_dict(row['data'])
+        _hot_cache_put_session(chat_id, norm)
+        return norm
+    default_norm = {"conversation": "", "model": DEFAULT_MODEL, "role": "无", "project": "默认"}
+    _hot_cache_put_session(chat_id, default_norm)
+    return default_norm
 
 def save_session_sync(chat_id, data):
     with _db_session_rw_lock:
@@ -475,6 +566,8 @@ def save_session_sync(chat_id, data):
             cursor = conn.cursor()
             cursor.execute('INSERT OR REPLACE INTO chat_sessions (chat_id, data) VALUES (?, ?)', (chat_id, json.dumps(data, ensure_ascii=False)))
             conn.commit()
+        if isinstance(data, dict):
+            _hot_cache_put_session(chat_id, _normalize_session_dict(json.dumps(data, ensure_ascii=False)))
 
 
 # ---------------------------------------------------------------------------
@@ -595,15 +688,21 @@ def list_auth_sessions():
 # ---------------------------------------------------------------------------
 
 _DEDUP_WINDOW_SECONDS = 12 * 3600
+_dedup_insert_counter = 0
+_dedup_counter_lock = threading.Lock()
 
 
 def mark_message_seen(message_id: str, chat_id: str, create_time=None) -> bool:
     """Return True if this message is new; False if it was already processed.
-    Old records older than 12h are pruned opportunistically."""
+    Old records older than 12h are pruned once per 100 inserts instead of every message."""
+    global _dedup_insert_counter
     if not message_id:
         return True
     if create_time is None:
         create_time = int(time.time())
+    with _dedup_counter_lock:
+        _dedup_insert_counter += 1
+        should_prune = (_dedup_insert_counter % 100 == 0)
     conn = get_db()
     try:
         cursor = conn.cursor()
@@ -614,10 +713,11 @@ def mark_message_seen(message_id: str, chat_id: str, create_time=None) -> bool:
             'INSERT OR REPLACE INTO recent_messages (message_id, chat_id, create_time) VALUES (?, ?, ?)',
             (message_id, chat_id, int(create_time)),
         )
-        cursor.execute(
-            'DELETE FROM recent_messages WHERE create_time < ?',
-            (int(time.time()) - _DEDUP_WINDOW_SECONDS,),
-        )
+        if should_prune:
+            cursor.execute(
+                'DELETE FROM recent_messages WHERE create_time < ?',
+                (int(time.time()) - _DEDUP_WINDOW_SECONDS,),
+            )
         conn.commit()
         return True
     except Exception as e:
@@ -687,6 +787,40 @@ def save_pending_task(chat_id: str, task: dict):
         log.error(f"[pending] save_pending_task failed: {e}")
     finally:
         conn.close()
+
+
+async def save_pending_task_async(chat_id: str, task: dict):
+    """Non-blocking async persistence for pending_tasks using the shared WAL connection."""
+    raw_ts = task.get("created_at")
+    if raw_ts:
+        created_at = int(raw_ts)
+        _bump_pending_ts_floor(created_at)
+    else:
+        created_at = allocate_pending_task_ts()
+    task["created_at"] = created_at
+    try:
+        async with _shared_aiosqlite_conn() as db:
+            await db.execute(
+                'INSERT OR REPLACE INTO pending_tasks (chat_id, task, created_at) VALUES (?, ?, ?)',
+                (chat_id, json.dumps(task, ensure_ascii=False), created_at),
+            )
+            await db.commit()
+    except Exception as e:
+        log.error(f"[pending] save_pending_task_async failed: {e}")
+
+
+async def delete_pending_task_async(chat_id: str, created_at):
+    if not created_at:
+        return
+    try:
+        async with _shared_aiosqlite_conn() as db:
+            await db.execute(
+                'DELETE FROM pending_tasks WHERE chat_id = ? AND created_at = ?',
+                (chat_id, int(created_at)),
+            )
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[pending] delete_pending_task_async failed for {chat_id} ({created_at}): {e}")
 
 
 def delete_pending_task(chat_id: str, created_at):
@@ -918,6 +1052,7 @@ def save_cron_task(task_data: dict):
             task_data.get('run_count', 0),
         ))
         conn.commit()
+        _notify_cron_engine()
         return True
     except Exception as e:
         log.error(f"[cron] save_cron_task failed: {e}")
@@ -933,6 +1068,7 @@ def update_cron_task_status(task_id: str, is_active: bool):
         cursor = conn.cursor()
         cursor.execute('UPDATE cron_tasks SET is_active = ?, updated_at = ? WHERE id = ?', (1 if is_active else 0, now, task_id))
         conn.commit()
+        _notify_cron_engine()
         return True
     except Exception as e:
         log.error(f"[cron] update_cron_task_status failed: {e}")
@@ -989,6 +1125,7 @@ def delete_cron_task(task_id: str, keep_logs: bool = False):
         if not keep_logs:
             cursor.execute('DELETE FROM cron_logs WHERE task_id = ?', (task_id,))
         conn.commit()
+        _notify_cron_engine()
         return True
     except Exception as e:
         log.error(f"[cron] delete_cron_task failed: {e}")

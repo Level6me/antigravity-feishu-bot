@@ -11,6 +11,41 @@ from logger import log
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 
 
+async def prestage_media_item_async(loop, message_id: str, message_type: str, content_json: dict, content_raw: str) -> None:
+    """Pre-download an inbound image/file during the multi-media debounce window so it is ready in 0ms."""
+    try:
+        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+        if message_type == "image":
+            image_key = (content_json or {}).get("image_key", "")
+            if not image_key and isinstance(content_raw, str):
+                m = re.search(r"img_[a-zA-Z0-9_\-]+", content_raw)
+                if m:
+                    image_key = m.group(0)
+            if image_key:
+                out_p = os.path.abspath(os.path.join(DOWNLOADS_DIR, f"img_{image_key}.jpg"))
+                if not (os.path.isfile(out_p) and os.path.getsize(out_p) > 0):
+                    await loop.run_in_executor(
+                        None, lambda: download_message_resource_sdk(message_id, image_key, "image", out_p)
+                    )
+        elif message_type in ("file", "media"):
+            file_key = (content_json or {}).get("file_key", "") or (content_json or {}).get("media_key", "")
+            file_name = os.path.basename((content_json or {}).get("file_name", "") or "")
+            if file_key:
+                if not file_name:
+                    file_name = f"video_{file_key}.mp4" if message_type == "media" else f"file_{file_key}"
+                if message_type == "media" and not any(
+                    file_name.lower().endswith(ext) for ext in [".mp4", ".mov", ".avi", ".mkv", ".flv", ".webm", ".m4v"]
+                ):
+                    file_name = f"{file_name}.mp4"
+                out_p = os.path.abspath(os.path.join(DOWNLOADS_DIR, file_name))
+                if not (os.path.isfile(out_p) and os.path.getsize(out_p) > 0):
+                    await loop.run_in_executor(
+                        None, lambda: download_message_resource_sdk(message_id, file_key, "file", out_p)
+                    )
+    except Exception as e:
+        log.debug(f"[Media] Prestage download skipped: {e}")
+
+
 async def _process_image_message(loop, message_id, content_json, content_raw):
     image_key = content_json.get("image_key", "")
     if not image_key:
@@ -25,13 +60,16 @@ async def _process_image_message(loop, message_id, content_json, content_raw):
     if image_key:
         os.makedirs(DOWNLOADS_DIR, exist_ok=True)
         output_filename = os.path.join(DOWNLOADS_DIR, f"img_{image_key}.jpg")
-        
-        dl_card = CardBuilder.build_download_indicator(os.path.basename(output_filename), "图片")
-        bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
-        
         output_path = os.path.abspath(output_filename)
-        success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
-        
+        already_cached = os.path.isfile(output_path) and os.path.getsize(output_path) > 0
+
+        if not already_cached:
+            dl_card = CardBuilder.build_download_indicator(os.path.basename(output_filename), "图片")
+            bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, dl_card))
+            success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, image_key, "image", output_path))
+        else:
+            success = True
+
         return f"请查看这张图片并做出回应。图片路径: {output_path}", os.path.basename(output_filename), success, bot_reply_msg_id
     else:
         return "[未获取到图片]", None, True, None
@@ -133,7 +171,10 @@ async def _process_file_audio_media_message(loop, message_id, message_type, cont
         bot_reply_msg_id = await loop.run_in_executor(None, lambda: send_interactive_card_sdk(message_id, init_card))
 
         output_path = os.path.abspath(output_filename)
-        download_success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, file_key, "file", output_path))
+        if os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
+            download_success = True
+        else:
+            download_success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(message_id, file_key, "file", output_path))
         downloaded_file_name = file_name
         
         if message_type == "file":
@@ -196,7 +237,19 @@ async def _process_batch_media_message(loop, message_id, content_json):
             
         if file_key:
             output_path = os.path.abspath(os.path.join(DOWNLOADS_DIR, file_name))
-            success = await loop.run_in_executor(None, lambda: download_message_resource_sdk(item["message_id"], file_key, "image" if m_type == "image" else "file", output_path))
+            pre_cached_img = os.path.abspath(os.path.join(DOWNLOADS_DIR, f"img_{file_key}.jpg")) if m_type == "image" else ""
+            if m_type == "image" and os.path.isfile(pre_cached_img) and os.path.getsize(pre_cached_img) > 0:
+                output_path = pre_cached_img
+                success = True
+            elif os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
+                success = True
+            else:
+                success = await loop.run_in_executor(
+                    None,
+                    lambda mid=item["message_id"], fk=file_key, mt=m_type, op=output_path: download_message_resource_sdk(
+                        mid, fk, "image" if mt == "image" else "file", op
+                    ),
+                )
             if success:
                 media_hints.append(f"{idx+1}. 多模态 {m_type.upper()} 文件路径: `{output_path}`")
             else:

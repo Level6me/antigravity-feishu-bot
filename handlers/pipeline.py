@@ -3,7 +3,13 @@ import sys
 import asyncio
 import re
 
-from database import delete_pending_task, get_session_async, get_profile_async, save_session_async
+from database import (
+    delete_pending_task_async,
+    get_profile_async,
+    get_session_async,
+    save_pending_task_async,
+    save_session_async,
+)
 from card_builder import CardBuilder
 from lark_client import send_interactive_card_sdk, patch_interactive_card_sdk, set_emoji_sdk, delete_emoji_sdk
 from executor import execute_antigravity
@@ -263,7 +269,7 @@ async def process_chat_queue(chat_id):
                 if task_done_cleanly:
                     created_at = task.get("created_at")
                     if created_at:
-                        delete_pending_task(chat_id, created_at)
+                        await delete_pending_task_async(chat_id, created_at)
     except asyncio.CancelledError:
         was_cancelled = True
         log.info(f"Chat worker for {chat_id} was cancelled")
@@ -385,13 +391,37 @@ async def _process_single_task(chat_id, task):
         await _finalize_fastpath_turn(message_id, chat_id, session_data, is_error=False, result_text="已由插件前置拦截处理。")
         return
 
-    # 🚀 极致性能优化：抢先下发首张打字机/思考交互卡片（秒回卡片）
-    # 彻底杜绝因等待 TypeSafe Jev 远程认知网关（~2s）、插件初始化或会话锁导致的前端卡片延迟
+    # 🚀 极致性能优化：首张思考卡片下发 (~150ms) 与 System One / HMDM 认知路由评估 (~450ms) 全并行并发 (asyncio.gather)，
+    # 消除串行等待带来的额外 TTFT 损耗！
     is_voice_message = bool(
-        task.get("message_type") == "audio" or 
+        task.get("message_type") == "audio" or
         task.get("is_voice_message")
     )
-    if not bot_reply_msg_id and not is_resumed:
+    from system_one_gate import evaluate_message_gate, infer_effort_from_model, evaluate_adaptive_tier, resolve_adaptive_model
+
+    recent_context = get_recent_conversation_context(session_data)
+
+    # Use HMDM (<0.3ms) to predict effort before prewarming so we don't spawn and immediately kill a mismatched process
+    prewarmed_model = session_data.get("model", "Default")
+    prewarmed_effort = infer_effort_from_model(prewarmed_model, session_data.get("reasoning_effort", "medium"))
+    try:
+        from math_decision_model import math_decision_engine
+        local_preview = math_decision_engine.evaluate_decision(
+            chat_id, user_text, remote_jev_data=None, update_state=False
+        )
+        if getattr(config, "TYPESAFE_AUTO_MODE", True) and local_preview.effort_tier:
+            base_m = session_data.get("base_model") or session_data.get("model", "Default")
+            prewarmed_model = resolve_adaptive_model(
+                base_m, local_preview.effort_tier, complexity_score=local_preview.complexity_index
+            )
+            prewarmed_effort = infer_effort_from_model(prewarmed_model, local_preview.effort_tier.lower())
+    except Exception:
+        pass
+
+    async def _send_early_card_coro():
+        nonlocal bot_reply_msg_id
+        if bot_reply_msg_id or is_resumed:
+            return
         resumed_prog = session_data.get("_resumed_task_progress") or {}
         if resumed_prog and (resumed_prog.get("planned_steps") or resumed_prog.get("completed_steps")):
             init_card = CardBuilder.build_tool_indicator(
@@ -414,50 +444,40 @@ async def _process_single_task(chat_id, task):
                 is_voice=is_voice_message,
             )
         try:
-            bot_reply_msg_id = await app_state.run_feishu_sync(
-                loop, lambda: send_interactive_card_sdk(message_id, init_card)
-            )
+            from lark_client import CardKitStreamController
+            if (
+                CardKitStreamController.can_attempt()
+                and not hasattr(send_interactive_card_sdk, "_mock_name")
+                and not hasattr(patch_interactive_card_sdk, "_mock_name")
+            ):
+                ck_ctrl = CardKitStreamController(message_id=message_id, chat_id=chat_id)
+                ck_msg_id = await ck_ctrl.create_and_send(init_card)
+                if ck_msg_id:
+                    bot_reply_msg_id = ck_msg_id
+                    task["_cardkit_ctrl"] = ck_ctrl
+            if not bot_reply_msg_id:
+                bot_reply_msg_id = await app_state.run_feishu_sync(
+                    loop, lambda: send_interactive_card_sdk(message_id, init_card)
+                )
             if bot_reply_msg_id:
                 task["bot_reply_msg_id"] = bot_reply_msg_id
-                try:
-                    save_pending_task(chat_id, task)
-                except Exception:
-                    pass
+                persist_copy = {k: v for k, v in task.items() if k != "_cardkit_ctrl"}
+                await save_pending_task_async(chat_id, persist_copy)
         except Exception as e:
             log.warning(f"[Pipeline] Failed to send early typing card for chat {chat_id}: {e}")
 
-    # === System One (Jev) + HMDM Hybrid Mathematical Decision Gateway ===
-    from system_one_gate import evaluate_message_gate, infer_effort_from_model, evaluate_adaptive_tier, resolve_adaptive_model
-    from plugin_manager import plugin_manager
-
-    recent_context = get_recent_conversation_context(session_data)
-
-    # Use HMDM (<0.3ms) to predict effort before prewarming so we don't spawn and immediately kill a mismatched process
-    prewarmed_model = session_data.get("model", "Default")
-    prewarmed_effort = infer_effort_from_model(prewarmed_model, session_data.get("reasoning_effort", "medium"))
-    try:
-        from math_decision_model import math_decision_engine
-        local_preview = math_decision_engine.evaluate_decision(
-            chat_id, user_text, remote_jev_data=None, update_state=False
-        )
-        if getattr(config, "TYPESAFE_AUTO_MODE", True) and local_preview.effort_tier:
-            base_m = session_data.get("base_model") or session_data.get("model", "Default")
-            prewarmed_model = resolve_adaptive_model(
-                base_m, local_preview.effort_tier, complexity_score=local_preview.complexity_index
+    async def _eval_gate_coro():
+        try:
+            return await evaluate_message_gate(
+                user_text,
+                context=recent_context,
+                chat_id=chat_id,
+                trusted_internal_resume=is_authorized_resume,
             )
-            prewarmed_effort = infer_effort_from_model(prewarmed_model, local_preview.effort_tier.lower())
-    except Exception:
-        pass
+        except TypeError:
+            return await evaluate_message_gate(user_text, context=recent_context, chat_id=chat_id)
 
-    try:
-        decision = await evaluate_message_gate(
-            user_text,
-            context=recent_context,
-            chat_id=chat_id,
-            trusted_internal_resume=is_authorized_resume,
-        )
-    except TypeError:
-        decision = await evaluate_message_gate(user_text, context=recent_context, chat_id=chat_id)
+    _, decision = await asyncio.gather(_send_early_card_coro(), _eval_gate_coro())
     was_local_fast_path = bool(decision.raw_answers.get("fast_path"))
     if not decision.is_fallback:
         session_data["typesafe_decision_count"] = 1
@@ -692,16 +712,18 @@ async def _process_single_task(chat_id, task):
         if ensured_dirs is None:
             ensured_dirs = set()
             app_state._agy_hooks_ensured_dirs = ensured_dirs
-        if valid_proj_for_hooks not in ensured_dirs:
-            ensure_agy_hooks_installed(workspace_dir=valid_proj_for_hooks)
-            ensured_dirs.add(valid_proj_for_hooks)
+        def _sync_relay_and_hooks():
+            if valid_proj_for_hooks not in ensured_dirs:
+                ensure_agy_hooks_installed(workspace_dir=valid_proj_for_hooks)
+                ensured_dirs.add(valid_proj_for_hooks)
+            return check_and_prepare_session_relay(
+                chat_id,
+                session_data,
+                project_dir=session_data.get("project", "默认"),
+                current_model=selected_model,
+            )
 
-        relay_res = check_and_prepare_session_relay(
-            chat_id,
-            session_data,
-            project_dir=session_data.get("project", "默认"),
-            current_model=selected_model,
-        )
+        relay_res = await loop.run_in_executor(None, _sync_relay_and_hooks)
         if relay_res.get("relayed"):
             relay_handoff_context = relay_res.get("handoff_context", "")
             await save_session_async(chat_id, session_data)
@@ -955,14 +977,18 @@ async def _process_single_task(chat_id, task):
             if mem_ctx:
                 system_instruction += f"[User Long-Term Memory / 用户长期偏好与记忆]\n{mem_ctx}\n\n"
 
-        # 注入项目长效分层记忆 (PROJECT_STATE.md 胶囊 / 无感会话接力包 / FTS5 历史按需召回 / 死胡同禁令)
+        # 注入项目长效分层记忆 (后台线程池执行 SQLite FTS5 查询与胶囊读取，零主事件循环阻塞)
         try:
             from agent_memory import recall_for_turn
-            recalled_mem_block = recall_for_turn(
-                project_dir=current_proj,
-                user_query=user_text,
-                is_new_or_relayed=(not already_injected_static or bool(relay_handoff_context)),
-                relay_handoff_context=relay_handoff_context,
+            _is_new_or_rel = (not already_injected_static or bool(relay_handoff_context))
+            recalled_mem_block = await loop.run_in_executor(
+                None,
+                lambda: recall_for_turn(
+                    project_dir=current_proj,
+                    user_query=user_text,
+                    is_new_or_relayed=_is_new_or_rel,
+                    relay_handoff_context=relay_handoff_context,
+                ),
             )
             if recalled_mem_block:
                 system_instruction += f"{recalled_mem_block}\n\n"

@@ -370,14 +370,14 @@ def classify_task_scope_and_budget(
             ),
         }
 
-    # 2. Pure Q&A / advise
-    if tier_norm == "Low" and not is_operation and not has_modify and not has_device and not has_inspect:
+    # 2. Pure Q&A / advise (both Low and Medium non-operational questions without imperative modify/device/deploy verbs)
+    if not is_operation and not has_modify and not has_device and not has_deploy and not has_inspect:
         return {
             "scope": "advise",
             "scope_label": "轻量解答 (Advise)",
-            "max_steps": 8,
-            "max_seconds": 150,
-            "allow_write": False,
+            "max_steps": 8 if tier_norm == "Low" else 15,
+            "max_seconds": 150 if tier_norm == "Low" else 300,
+            "allow_write": tier_norm != "Low",
             "allow_device_op": False,
             "boundary_directive": "直接回答用户问题，无需调用无关工具。",
         }
@@ -811,6 +811,23 @@ def _extract_structured_items_from_turn(
 # L2 Episodic Recording & FTS5 Search
 # ============================================================================
 
+def _normalize_turn_timestamp(raw_ts: Optional[str]) -> str:
+    """Normalize ISO-8601 (including UTC 'Z' / '+00:00') or local timestamps to local '%Y-%m-%d %H:%M:%S'."""
+    if not raw_ts or not str(raw_ts).strip():
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    s = str(raw_ts).strip()
+    try:
+        if "T" in s or s.endswith("Z") or "+" in s[10:]:
+            iso_s = s[:-1] + "+00:00" if s.endswith("Z") else s
+            dt = datetime.fromisoformat(iso_s)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone()
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    return s[:19].replace("T", " ")
+
+
 def record_episodic_turn(
     project_dir: Optional[str],
     user_request: str,
@@ -825,6 +842,7 @@ def record_episodic_turn(
     dead_ends: Optional[List[str]] = None,
     created_at: Optional[str] = None,
     custom_root: Optional[str] = None,
+    rebuild_capsule: bool = True,
 ) -> bool:
     """Record a completed (or intercepted) turn into SQLite FTS5, `journal.jsonl`, and `PROJECT_STATE.md`."""
     clean_req = _sanitize_text(strip_injected_prompt_headers(user_request or ""))
@@ -848,9 +866,11 @@ def record_episodic_turn(
     dead_ends_str = " | ".join(extracted["dead_ends"][:6])
 
     slug = get_project_slug(project_dir)
-    now_str = created_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = _normalize_turn_timestamp(created_at)
+    # Content-based turn fingerprint independent of step_index so post-turn write (step_index=0)
+    # and subsequent transcript backfill (step_index=N) never create duplicate episodic rows!
     turn_hash = hashlib.sha1(
-        f"{slug}:{conv_id}:{step_index}:{clean_req[:200]}:{digest_text[:200]}".encode("utf-8")
+        f"{slug}:{conv_id}:{clean_req[:200]}:{digest_text[:160]}".encode("utf-8")
     ).hexdigest()
 
     conn = _get_conn(custom_root)
@@ -897,6 +917,11 @@ def record_episodic_turn(
                     conv_id or "",
                     str(turn_id),
                 ),
+            )
+        elif step_index and int(step_index) > 0:
+            conn.execute(
+                "UPDATE episodic_turns SET step_index = ? WHERE turn_hash = ? AND step_index = 0",
+                (int(step_index), turn_hash),
             )
 
         # Also persist extracted facts/decisions/dead_ends/artifacts
@@ -981,7 +1006,8 @@ def record_episodic_turn(
         except Exception as e:
             log.warning(f"[AgentMemory] Failed to append journal {journal_path}: {e}")
 
-    _rebuild_capsule_from_db(project_dir, custom_root=custom_root)
+    if rebuild_capsule:
+        _rebuild_capsule_from_db(project_dir, custom_root=custom_root)
     return inserted
 
 
@@ -1121,7 +1147,22 @@ def search_episodic_memory(
     finally:
         conn.close()
 
-    return results[:limit]
+    # Deduplicate recalled entries with identical Q&A content (protects recall slots against historical duplicates)
+    deduped: List[Dict[str, Any]] = []
+    seen_qa = set()
+    for item in results:
+        qa_sig = (
+            str(item.get("user_request") or "").strip()[:120],
+            str(item.get("reply_digest") or "").strip()[:120],
+        )
+        if qa_sig in seen_qa:
+            continue
+        seen_qa.add(qa_sig)
+        deduped.append(item)
+        if len(deduped) >= limit:
+            break
+
+    return deduped
 
 
 # ============================================================================
@@ -1252,6 +1293,7 @@ def inspect_and_backfill_transcript(
                 dead_ends=current_dead_ends,
                 created_at=current_user_time or None,
                 custom_root=custom_root,
+                rebuild_capsule=False,
             )
             if ok:
                 backfilled_turns += 1
@@ -1274,10 +1316,7 @@ def inspect_and_backfill_transcript(
         step_type = obj.get("type", "")
         content = str(obj.get("content") or "")
         created_at_raw = str(obj.get("created_at") or "")
-        if created_at_raw:
-            created_at_clean = created_at_raw[:19].replace("T", " ")
-        else:
-            created_at_clean = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        created_at_clean = _normalize_turn_timestamp(created_at_raw)
 
         if step_type == "USER_INPUT":
             _flush_turn()

@@ -49,9 +49,10 @@ class Settings(BaseSettings):
     structured_agy_fallback: bool = Field(default=True, alias="STRUCTURED_AGY_FALLBACK")
     structured_agy_model: str = Field(default="", alias="STRUCTURED_AGY_MODEL")
 
-    # Native voice reply settings
+    # Native voice reply & CardKit 2.0 streaming settings
     tts_voice: str = Field(default="zh-CN-XiaoxiaoNeural", alias="TTS_VOICE")
     enable_voice_reply: bool = Field(default=True, alias="ENABLE_VOICE_REPLY")
+    enable_cardkit_streaming: bool = Field(default=True, alias="ENABLE_CARDKIT_STREAMING")
 
     # TypeSafe AI (System One Model Jev) settings
     typesafe_api_key: str = Field(default="", alias="TYPESAFE_API_KEY")
@@ -96,6 +97,7 @@ STRUCTURED_AGY_MODEL = (settings.structured_agy_model or "").strip()
 APP_SECRET = settings.feishu_app_secret or settings.app_secret
 TTS_VOICE = settings.tts_voice or "zh-CN-XiaoxiaoNeural"
 ENABLE_VOICE_REPLY = settings.enable_voice_reply
+ENABLE_CARDKIT_STREAMING = settings.enable_cardkit_streaming
 
 # Watchdog timeouts exports
 STALL_TIMEOUT = settings.stall_timeout

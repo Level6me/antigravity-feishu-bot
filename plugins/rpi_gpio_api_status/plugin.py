@@ -310,10 +310,10 @@ class RpiGpioApiStatusPlugin(BasePlugin):
             pass
 
     def _fetch_buzzer_status_sync(self) -> Optional[dict]:
-        """Synchronously fetch current Buzzer status from gateway."""
+        """Synchronously fetch current Buzzer status from gateway using persistent HTTP session."""
         try:
             url = f"{self.buzzer_api_url}/api/status"
-            res = requests.get(url, headers=self._get_buzzer_headers(), timeout=2.0)
+            res = _GPIO_HTTP_SESSION.get(url, headers=self._get_buzzer_headers(), timeout=2.0)
             if res.status_code == 200:
                 return res.json()
         except Exception as e:

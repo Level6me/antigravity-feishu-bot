@@ -5,12 +5,18 @@ import re
 import time
 
 from commands import handle_slash_command
-from database import allocate_pending_task_ts, get_session_async, save_pending_task
+from database import (
+    allocate_pending_task_ts,
+    delete_pending_task_async,
+    get_session_async,
+    save_pending_task_async,
+)
+from handlers.media import prestage_media_item_async
 from lark_client import send_reply_sdk
 from logger import log
 import stats
 import app_state
-from handlers.pipeline import process_chat_queue
+from handlers.pipeline import process_chat_queue, set_emoji
 
 running_processes = app_state.running_processes
 chat_queues = app_state.chat_queues
@@ -154,9 +160,9 @@ async def _handle_message_async_internal(
             mem_task_payload["is_continuation"] = True
 
         queue.put_nowait(mem_task_payload)
-        save_pending_task(c_id, db_task_payload)
         if not worker_was_active:
             chat_workers[c_id] = asyncio.create_task(process_chat_queue(c_id))
+        await save_pending_task_async(c_id, db_task_payload)
 
         if worker_was_active:
             steer_hint = ""
@@ -170,19 +176,27 @@ async def _handle_message_async_internal(
             warning_msg = f"⏳ 收到！当前有任务正在执行，该请求已加入队列排队处理 (前方还有 {ahead_count} 个任务)...{steer_hint}"
             await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(msg_id, warning_msg))
 
-    # 方案四：多模态多图合并批处理防抖机制（防抖等待期同步写入 staging pending_task，杜绝 3s 窗口重启丢消息）
-    if message_type in ["image", "file", "audio", "media"]:
-        from database import delete_pending_task
-        if chat_id not in chat_media_batches:
+    # 方案四：多模态多图合并批处理防抖机制（语音消息 audio 单条独立发送直接豁免防抖，0ms 秒回；
+    # 图片/文件首帧立即贴 Typing 表情并后台预下载，兼顾多图合并与零等待体感）
+    if message_type in ["image", "file", "media"]:
+        is_first_in_batch = chat_id not in chat_media_batches
+        if is_first_in_batch:
             chat_media_batches[chat_id] = {
                 "items": [],
                 "staging_ts": [],
                 "timer_task": None
             }
-            
+            if message_id:
+                asyncio.create_task(set_emoji(message_id, "StatusReading"))
+
+        # Pre-download resource in background while debounce window waits
+        asyncio.create_task(
+            prestage_media_item_async(loop, message_id, message_type, content_json, content_raw)
+        )
+
         batch = chat_media_batches[chat_id]
         staging_ts = allocate_pending_task_ts()
-        save_pending_task(chat_id, {
+        await save_pending_task_async(chat_id, {
             "message_id": message_id,
             "message_type": message_type,
             "content_json": content_json,
@@ -199,24 +213,24 @@ async def _handle_message_async_internal(
             "content_raw": content_raw,
             "raw_text": raw_text,
         })
-        
+
         if batch["timer_task"] and not batch["timer_task"].done():
             batch["timer_task"].cancel()
-            
+
         async def delay_dispatch(target_batch=batch):
             try:
-                # Dynamic debounce: 1.5s + 0.1s per item, up to 3.0s max
-                delay = min(1.5 + len(target_batch["items"]) * 0.1, 3.0)
+                # Dynamic debounce: 1.2s + 0.1s per item, up to 2.5s max
+                delay = min(1.2 + len(target_batch["items"]) * 0.1, 2.5)
                 await asyncio.sleep(delay)
                 items = list(target_batch["items"])
                 staged_list = list(target_batch.get("staging_ts", []))
                 if chat_media_batches.get(chat_id) is target_batch:
                     chat_media_batches.pop(chat_id, None)
-                
+
                 if len(items) == 1:
                     single = items[0]
                     await dispatch_task(
-                        chat_id, single["message_id"], single["message_type"], 
+                        chat_id, single["message_id"], single["message_type"],
                         single["content_json"], single["content_raw"], single.get("raw_text", "")
                     )
                 elif items:
@@ -226,11 +240,11 @@ async def _handle_message_async_internal(
                         for it in items
                     ]
                     await dispatch_task(
-                        chat_id, target_msg_id, "batch_media", 
+                        chat_id, target_msg_id, "batch_media",
                         {"items": clean_items}, "", ""
                     )
                 for old_ts in staged_list:
-                    delete_pending_task(chat_id, old_ts)
+                    await delete_pending_task_async(chat_id, old_ts)
             except asyncio.CancelledError:
                 pass
                 

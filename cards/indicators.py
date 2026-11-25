@@ -36,8 +36,8 @@ def _get_dynamic_think_text(base_text, think_seconds):
         "💡 马上就好，正在组织语言...",
         "🚀 正在全速冲刺，请稍等..."
     ]
-    # Rotate phrase every 2 seconds
-    idx = (think_seconds // 2) % len(phrases)
+    # Rotate phrase every 4 seconds for calmer visual cadence aligned with quiet patch interval
+    idx = (think_seconds // 4) % len(phrases)
     return f"{base_text}\n\n*( {phrases[idx]} 已耗时 {think_seconds}s )*"
 
 

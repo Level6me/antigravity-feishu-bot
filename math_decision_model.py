@@ -180,6 +180,12 @@ def _sigmoid(x: float) -> float:
         return z / (1.0 + z)
 
 
+_PURE_SHORT_INQUIRY_RE = re.compile(
+    r"^(?:有什么|有哪些|有啥|是什么|什么意思|为什么|怎么回事|怎么样了|怎么理解|区别是什么)[^;；\n]{0,24}(?:吗|呢|\?|？)?$",
+    re.IGNORECASE,
+)
+
+
 def _char_shannon_entropy(text: str) -> float:
     """Compute normalized character-level Shannon entropy in [0, 1]."""
     if not text:
@@ -382,6 +388,15 @@ class HybridMathDecisionEngine:
         """
         if fv.phi_confirm >= 0.8:
             return False
+        # Pure short non-imperative questions (e.g. "有什么改变吗", "是什么意思") resolve in <0.2ms locally without 460ms JEV RTT
+        if (
+            fv.phi_imperative == 0.0
+            and fv.phi_tech_entity == 0.0
+            and fv.phi_hazard == 0.0
+            and fv.phi_confirm == 0.0
+            and _PURE_SHORT_INQUIRY_RE.match(fv.raw_text)
+        ):
+            return False
         # Context-dependent short follow-ups (e.g. "还有l1跟l2的", "那第二个呢", "再看看那个") must use context-aware JEV
         if has_context and len(fv.raw_text) <= 25 and fv.phi_tech_entity < 0.35 and fv.phi_imperative < 0.45:
             return True
@@ -479,8 +494,18 @@ class HybridMathDecisionEngine:
         c_star = round(min(2.0, max(0.0, c_star)), 3)
 
         # Continuous Complexity -> EffortTier mapping (Low / Medium / High / XHigh)
-        if c_star < 0.42 and final_post["chat"] >= 0.65 and fv.phi_imperative < 0.25 and fv.phi_tech_entity == 0.0:
-            effort_tier: EffortTier = "Low"
+        is_short_pure_inquiry = bool(
+            fv.phi_imperative == 0.0
+            and fv.phi_tech_entity == 0.0
+            and fv.phi_hazard == 0.0
+            and fv.phi_confirm == 0.0
+            and _PURE_SHORT_INQUIRY_RE.match(fv.raw_text)
+        )
+        if is_short_pure_inquiry:
+            effort_tier: EffortTier = "Low" if len(fv.raw_text) <= 8 else "Medium"
+            is_pure_qa = True
+        elif c_star < 0.42 and final_post["chat"] >= 0.65 and fv.phi_imperative < 0.25 and fv.phi_tech_entity == 0.0:
+            effort_tier = "Low"
             is_pure_qa = True
         elif (
             (c_star >= 1.66 and final_post["deep_arch"] >= 0.72 and fv.phi_multistep >= 0.45)

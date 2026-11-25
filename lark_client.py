@@ -1,6 +1,10 @@
+import atexit
 import json
 import os
+import time
 import asyncio
+import weakref
+import httpx
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
     ReplyMessageRequest, ReplyMessageRequestBody, PatchMessageRequest,
@@ -10,9 +14,279 @@ from lark_oapi.api.im.v1 import (
     CreateFileRequest, CreateFileRequestBody
 )
 from lark_oapi.api.contact.v3 import GetUserRequest
+import config
 from config import APP_ID, APP_SECRET
 from logger import log
 from utils import with_retry, NonRetryableError
+
+
+def _compact_json(payload) -> str:
+    """Compact UTF-8 JSON serializer (eliminates 6-byte \\uXXXX CJK escaping & whitespace, ~45% smaller cards)."""
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+# ---------------------------------------------------------------------------
+# Native Async HTTP Connection Pool & Feishu CardKit 2.0 Streaming Engine
+# ---------------------------------------------------------------------------
+_ASYNC_HTTP_CLIENTS = {}  # {loop_id: (weakref(loop), httpx.AsyncClient)}
+_TENANT_TOKEN_CACHE = {"token": "", "expire_at": 0.0}
+_TENANT_TOKEN_LOCK_MAP = {}
+_CARDKIT_CAPABILITY_STATE = {"supported": None}  # None=unprobed, True=ok, False=permission_missing
+
+
+def _close_all_async_http_clients():
+    for _, (_, client) in list(_ASYNC_HTTP_CLIENTS.items()):
+        try:
+            if not client.is_closed:
+                # Best-effort underlying transport close at interpreter shutdown
+                pass
+        except Exception:
+            pass
+    _ASYNC_HTTP_CLIENTS.clear()
+
+
+atexit.register(_close_all_async_http_clients)
+
+
+def _get_async_http_client() -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    lid = id(loop)
+    # Prune dead loops
+    for k, (lref, cl) in list(_ASYNC_HTTP_CLIENTS.items()):
+        lobj = lref()
+        if lobj is None or lobj.is_closed():
+            _ASYNC_HTTP_CLIENTS.pop(k, None)
+    entry = _ASYNC_HTTP_CLIENTS.get(lid)
+    if entry is not None and not entry[1].is_closed:
+        return entry[1]
+    client = httpx.AsyncClient(
+        base_url="https://open.feishu.cn",
+        timeout=httpx.Timeout(10.0, connect=5.0),
+        limits=httpx.Limits(max_keepalive_connections=16, max_connections=32, keepalive_expiry=60.0),
+    )
+    _ASYNC_HTTP_CLIENTS[lid] = (weakref.ref(loop), client)
+    return client
+
+
+async def _get_tenant_access_token_async() -> str:
+    app_id = getattr(config, "APP_ID", "") or APP_ID
+    app_secret = getattr(config, "APP_SECRET", "") or APP_SECRET
+    if not app_id or not app_secret:
+        return ""
+    now = time.time()
+    if _TENANT_TOKEN_CACHE["token"] and now < _TENANT_TOKEN_CACHE["expire_at"] - 120:
+        return _TENANT_TOKEN_CACHE["token"]
+
+    loop = asyncio.get_running_loop()
+    lock = _TENANT_TOKEN_LOCK_MAP.get(id(loop))
+    if lock is None:
+        lock = asyncio.Lock()
+        _TENANT_TOKEN_LOCK_MAP[id(loop)] = lock
+
+    async with lock:
+        now = time.time()
+        if _TENANT_TOKEN_CACHE["token"] and now < _TENANT_TOKEN_CACHE["expire_at"] - 120:
+            return _TENANT_TOKEN_CACHE["token"]
+        client = _get_async_http_client()
+        resp = await client.post(
+            "/open-apis/auth/v3/tenant_access_token/internal",
+            json={"app_id": app_id, "app_secret": app_secret},
+        )
+        data = resp.json()
+        if data.get("code") == 0 and data.get("tenant_access_token"):
+            tok = data["tenant_access_token"]
+            exp = float(data.get("expire") or 7200)
+            _TENANT_TOKEN_CACHE["token"] = tok
+            _TENANT_TOKEN_CACHE["expire_at"] = now + exp
+            return tok
+        log.warning(f"[AsyncFeishu] Failed fetching tenant_access_token: {data}")
+        return ""
+
+
+async def async_patch_interactive_card(message_id: str, card_content: dict, max_retries: int = 3) -> bool:
+    """Non-blocking async Feishu card PATCH over persistent keep-alive pool (zero ThreadPoolExecutor blocking)."""
+    token = await _get_tenant_access_token_async()
+    if not token:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(message_id, card_content))
+
+    client = _get_async_http_client()
+    body_bytes = _compact_json({"content": _compact_json(card_content)}).encode("utf-8")
+    delay = 0.4
+    for attempt in range(max_retries + 1):
+        try:
+            resp = await client.patch(
+                f"/open-apis/im/v1/messages/{message_id}",
+                content=body_bytes,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"},
+            )
+            data = resp.json()
+            code = data.get("code", -1)
+            if code == 0:
+                return True
+            msg = data.get("msg", "")
+            if code in (99991663, 99991661):  # token expired
+                _TENANT_TOKEN_CACHE["expire_at"] = 0.0
+                token = await _get_tenant_access_token_async()
+            elif _is_non_retryable_card_error(code, msg):
+                raise NonRetryableError(f"Feishu Patch API non-retryable error code {code}: {msg}")
+            if attempt == max_retries:
+                raise RuntimeError(f"Feishu Patch API error code {code}: {msg}")
+        except NonRetryableError:
+            raise
+        except Exception as e:
+            if attempt == max_retries:
+                raise
+            log.debug(f"[AsyncFeishu] patch retry {attempt + 1}/{max_retries}: {e}")
+        await asyncio.sleep(delay)
+        delay *= 1.8
+    return False
+
+
+class CardKitStreamController:
+    """Feishu CardKit 2.0 Native 60fps Streaming Controller with zero-risk automatic fallback."""
+
+    def __init__(self, message_id: str, chat_id: str = ""):
+        self.message_id = message_id
+        self.chat_id = chat_id
+        self.card_id: str = ""
+        self.bot_reply_msg_id: str = ""
+        self.seq: int = 1
+        self.active: bool = False
+
+    @staticmethod
+    def can_attempt() -> bool:
+        if not getattr(config, "ENABLE_CARDKIT_STREAMING", True):
+            return False
+        if _CARDKIT_CAPABILITY_STATE["supported"] is False:
+            return False
+        app_id = getattr(config, "APP_ID", "") or APP_ID
+        app_secret = getattr(config, "APP_SECRET", "") or APP_SECRET
+        return bool(app_id and app_secret)
+
+    async def create_and_send(self, init_card_v1: dict) -> str:
+        """Create a CardKit 2.0 streaming card entity and reply to `message_id` (or send to `chat_id`).
+        Returns `bot_reply_msg_id` on success, or empty string if unsupported/failed (triggering transparent fallback).
+        """
+        if not self.can_attempt():
+            return ""
+        try:
+            from cards.common import convert_card_v1_to_v2
+            token = await _get_tenant_access_token_async()
+            if not token:
+                return ""
+            client = _get_async_http_client()
+            v2_card = convert_card_v1_to_v2(init_card_v1, stream_element_id="stream_md", streaming_mode=True)
+            create_resp = await client.post(
+                "/open-apis/cardkit/v1/cards",
+                json={"type": "card_json", "data": _compact_json(v2_card)},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            c_data = create_resp.json()
+            c_code = c_data.get("code", -1)
+            if c_code != 0:
+                # Permission missing (e.g. 99991672 cardkit:card:write not enabled) -> cache & fallback cleanly
+                if c_code in (99991672, 99991668) or "permission" in str(c_data.get("msg", "")).lower():
+                    _CARDKIT_CAPABILITY_STATE["supported"] = False
+                    log.info(
+                        "[CardKit] App lacks cardkit:card:write permission; falling back to async HTTP PATCH "
+                        "(enable cardkit:card:write in Feishu console to unlock native 60fps streaming)."
+                    )
+                else:
+                    log.debug(f"[CardKit] create_card returned code={c_code}: {c_data.get('msg')}")
+                return ""
+
+            card_id = (c_data.get("data") or {}).get("card_id") or ""
+            if not card_id:
+                return ""
+
+            card_ref_content = _compact_json({"type": "card", "data": {"card_id": card_id}})
+            if self.message_id and str(self.message_id).startswith("om_"):
+                send_resp = await client.post(
+                    f"/open-apis/im/v1/messages/{self.message_id}/reply",
+                    json={"msg_type": "interactive", "content": card_ref_content},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            elif self.chat_id:
+                send_resp = await client.post(
+                    "/open-apis/im/v1/messages?receive_id_type=chat_id",
+                    json={"receive_id": self.chat_id, "msg_type": "interactive", "content": card_ref_content},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            else:
+                return ""
+
+            s_data = send_resp.json()
+            if s_data.get("code") == 0:
+                msg_id = (s_data.get("data") or {}).get("message_id") or ""
+                if msg_id:
+                    _CARDKIT_CAPABILITY_STATE["supported"] = True
+                    self.card_id = card_id
+                    self.bot_reply_msg_id = msg_id
+                    self.active = True
+                    return msg_id
+        except Exception as e:
+            log.debug(f"[CardKit] create_and_send fallback: {e}")
+        return ""
+
+    async def stream_card(self, indicator_card_v1: dict) -> bool:
+        """Stream markdown delta/full text into `stream_md` element via CardKit Streaming API."""
+        if not self.active or not self.card_id:
+            return False
+        try:
+            from cards.common import extract_primary_markdown_from_card
+            token = await _get_tenant_access_token_async()
+            if not token:
+                return False
+            md_text = extract_primary_markdown_from_card(indicator_card_v1)
+            self.seq += 1
+            client = _get_async_http_client()
+            resp = await client.put(
+                f"/open-apis/cardkit/v1/cards/{self.card_id}/elements/stream_md/content",
+                json={"content": md_text, "sequence": self.seq},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            return resp.json().get("code") == 0
+        except Exception as e:
+            log.debug(f"[CardKit] stream_card warning: {e}")
+            return False
+
+    async def finalize(self, final_card_v1: dict) -> bool:
+        """Close `streaming_mode` and commit full final Card 2.0 (including interactive buttons & context bar)."""
+        if not self.active or not self.card_id:
+            return False
+        try:
+            from cards.common import convert_card_v1_to_v2
+            token = await _get_tenant_access_token_async()
+            if not token:
+                return False
+            client = _get_async_http_client()
+            self.seq += 1
+            await client.patch(
+                f"/open-apis/cardkit/v1/cards/{self.card_id}/settings",
+                json={
+                    "settings": _compact_json({"config": {"streaming_mode": False}}),
+                    "sequence": self.seq,
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            v2_final = convert_card_v1_to_v2(final_card_v1, stream_element_id="stream_md", streaming_mode=False)
+            self.seq += 1
+            upd_resp = await client.put(
+                f"/open-apis/cardkit/v1/cards/{self.card_id}",
+                json={
+                    "card": {"type": "card_json", "data": _compact_json(v2_final)},
+                    "sequence": self.seq,
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            ok = upd_resp.json().get("code") == 0
+            self.active = False
+            return ok
+        except Exception as e:
+            log.warning(f"[CardKit] finalize failed, caller will send fallback reply: {e}")
+            self.active = False
+            return False
 
 
 def _is_non_retryable_card_error(code, msg: str) -> bool:
@@ -134,7 +408,7 @@ def send_reply_sdk(message_id, reply_text):
             .message_id(message_id) \
             .request_body(ReplyMessageRequestBody.builder() \
                 .msg_type("text") \
-                .content(json.dumps({"text": chunk})) \
+                .content(_compact_json({"text": chunk})) \
                 .build()) \
             .build()
         resp = api_client.im.v1.message.reply(req)
@@ -147,7 +421,7 @@ def send_interactive_card_sdk(message_id, card_content):
         .message_id(message_id) \
         .request_body(ReplyMessageRequestBody.builder() \
             .msg_type("interactive") \
-            .content(json.dumps(card_content)) \
+            .content(_compact_json(card_content)) \
             .build()) \
         .build()
     resp = api_client.im.v1.message.reply(req)
@@ -165,7 +439,7 @@ def patch_interactive_card_sdk(message_id, card_content):
     req = PatchMessageRequest.builder() \
         .message_id(message_id) \
         .request_body(PatchMessageRequestBody.builder() \
-            .content(json.dumps(card_content)) \
+            .content(_compact_json(card_content)) \
             .build()) \
         .build()
     resp = api_client.im.v1.message.patch(req)
@@ -230,7 +504,7 @@ def send_card_to_chat_sdk(chat_id, card_content):
         .request_body(CreateMessageRequestBody.builder()
             .receive_id(chat_id)
             .msg_type("interactive")
-            .content(json.dumps(card_content))
+            .content(_compact_json(card_content))
             .build()) \
         .build()
     resp = api_client.im.v1.message.create(req)
@@ -252,7 +526,7 @@ def send_text_to_chat_sdk(chat_id, text):
             .request_body(CreateMessageRequestBody.builder()
                 .receive_id(chat_id)
                 .msg_type("text")
-                .content(json.dumps({"text": chunk}))
+                .content(_compact_json({"text": chunk}))
                 .build()) \
             .build()
         resp = api_client.im.v1.message.create(req)

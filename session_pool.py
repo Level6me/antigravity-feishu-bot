@@ -708,8 +708,9 @@ class SessionPool:
                 transport=transport,
             )
             if not sess.is_alive():
-                await sess.start()
-            else:
+                if not sess.lock.locked() and not sess._start_lock.locked():
+                    await sess.start()
+            elif not sess.lock.locked():
                 await self.sync_live_session_config(sess, model, effort=effort, agent_mode=agent_mode)
         except Exception as e:
             log.warning(f"[SessionPool] Prewarm failed for chat {chat_id}: {e}")

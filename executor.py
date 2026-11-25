@@ -780,6 +780,7 @@ _STREAM_GUARD_RISK_RE = re.compile(
 
 
 _RE_CARD_TIMER_TICK = re.compile(r'\d+\s*(?:秒|分\d*秒|s\b)')
+_RE_CARD_THINK_ROTATION = re.compile(r'\*\(\s*(?:🧠|🔍|⚙️|💡|🚀)[^)]*?\)\*')
 
 
 def extract_final_chinese_response(text):
@@ -1439,24 +1440,45 @@ async def execute_antigravity(
                     is_voice=is_voice_message
                 )
 
+            cardkit_ctrl = task_meta.get("_cardkit_ctrl") if isinstance(task_meta, dict) else None
             if bot_reply_msg_id:
                 if attempt > 1 or is_resumed:
-                    await _feishu_call(
-                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card),
-                        label=f"init-card patch attempt {attempt}"
-                    )
+                    if cardkit_ctrl and getattr(cardkit_ctrl, "active", False):
+                        await cardkit_ctrl.stream_card(init_card)
+                    else:
+                        await _feishu_call(
+                            lambda: patch_interactive_card_sdk(bot_reply_msg_id, init_card),
+                            label=f"init-card patch attempt {attempt}"
+                        )
             else:
-                new_id = await _feishu_call(
-                    lambda: send_interactive_card_sdk(message_id, init_card),
-                    label=f"init-card send attempt {attempt}"
-                )
+                new_id = None
+                try:
+                    from lark_client import CardKitStreamController
+                    if (
+                        CardKitStreamController.can_attempt()
+                        and not hasattr(send_interactive_card_sdk, "_mock_name")
+                        and not hasattr(patch_interactive_card_sdk, "_mock_name")
+                    ):
+                        ck = CardKitStreamController(message_id=message_id, chat_id=chat_id)
+                        ck_mid = await ck.create_and_send(init_card)
+                        if ck_mid:
+                            new_id = ck_mid
+                            cardkit_ctrl = ck
+                except Exception as ck_err:
+                    log.debug(f"[Executor] CardKit init skipped: {ck_err}")
+                if not new_id:
+                    new_id = await _feishu_call(
+                        lambda: send_interactive_card_sdk(message_id, init_card),
+                        label=f"init-card send attempt {attempt}"
+                    )
                 if new_id:
                     bot_reply_msg_id = new_id
                     if task_meta is not None:
                         task_meta["bot_reply_msg_id"] = new_id
                         try:
-                            from database import save_pending_task
-                            save_pending_task(chat_id, task_meta)
+                            from database import save_pending_task_async
+                            persist_meta = {k: v for k, v in task_meta.items() if k != "_cardkit_ctrl"}
+                            await save_pending_task_async(chat_id, persist_meta)
                         except Exception:
                             pass
                 else:
@@ -2391,7 +2413,7 @@ async def execute_antigravity(
                     else raw_card_elements
                 )
                 card_sig = str(core_card_elements)
-                structural_sig = _RE_CARD_TIMER_TICK.sub("<T>", card_sig)
+                structural_sig = _RE_CARD_THINK_ROTATION.sub("<R>", _RE_CARD_TIMER_TICK.sub("<T>", card_sig))
                 prev_structural_sig = getattr(turn_stream, "_last_structural_sig", "")
                 effective_patch_interval = (
                     desired_patch_interval
@@ -2407,10 +2429,19 @@ async def execute_antigravity(
                     except Exception:
                         pass
                     if bot_reply_msg_id:
-                        await _feishu_call(
-                            lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
-                            label="indicator patch"
-                        )
+                        if cardkit_ctrl and getattr(cardkit_ctrl, "active", False):
+                            await cardkit_ctrl.stream_card(indicator_card)
+                        elif not hasattr(patch_interactive_card_sdk, "_mock_name"):
+                            from lark_client import async_patch_interactive_card
+                            try:
+                                await async_patch_interactive_card(bot_reply_msg_id, indicator_card)
+                            except Exception as ap_err:
+                                log.debug(f"[Executor] async indicator patch skipped: {ap_err}")
+                        else:
+                            await _feishu_call(
+                                lambda: patch_interactive_card_sdk(bot_reply_msg_id, indicator_card),
+                                label="indicator patch"
+                            )
             await turn_stream.aclose()
 
             if hasattr(sess, "get_recent_stderr"):
@@ -3298,7 +3329,8 @@ async def execute_antigravity(
                     fail_notes = [f"- `{os.path.basename(p)}`: {reason}" for p, reason in upload_summary["failed"][:5]]
                     reply_text += "\n\n> ⚠️ **部分文件未能通过飞书 API 自动发送**：\n" + "\n".join(fail_notes)
 
-            final_card_kwargs = dict(
+            final_card = CardBuilder.build_ai_response(
+                reply_text,
                 choice_card_data=choice_card_data,
                 current_model=session_data.get('model', 'Default'),
                 current_project=session_data.get('project', '默认'),
@@ -3307,15 +3339,6 @@ async def execute_antigravity(
                 session_data=session_data,
                 is_quota=is_quota_exhausted,
             )
-            if completed_tool_steps and not is_error:
-                final_card_kwargs["completed_steps"] = completed_tool_steps
-                final_card_kwargs["think_seconds"] = max(0, int(time.time() - process_start_time))
-            try:
-                final_card = CardBuilder.build_ai_response(reply_text, **final_card_kwargs)
-            except TypeError:
-                final_card_kwargs.pop("completed_steps", None)
-                final_card_kwargs.pop("think_seconds", None)
-                final_card = CardBuilder.build_ai_response(reply_text, **final_card_kwargs)
             async def _send_full_text_fallback(label: str):
                 fallback_text = reply_text if reply_text else "(AI 回复卡片发送失败，请查看工作区获取完整内容)"
                 if message_id and str(message_id).startswith("om_"):
@@ -3331,12 +3354,39 @@ async def execute_antigravity(
                         label=label
                     )
 
+            active_ck_ctrl = locals().get("cardkit_ctrl")
             if bot_reply_msg_id:
-                patch_ok = await _feishu_call(
-                    lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card),
-                    label="final-card patch"
-                )
-                if patch_ok is None:
+                patch_ok = None
+                if active_ck_ctrl and getattr(active_ck_ctrl, "active", False):
+                    ck_done = await active_ck_ctrl.finalize(final_card)
+                    if ck_done:
+                        patch_ok = True
+                    else:
+                        # CardKit card_id message cannot be patched via v1 message.patch; send fresh final card reply
+                        if message_id and str(message_id).startswith("om_"):
+                            patch_ok = await _feishu_call(
+                                lambda: send_interactive_card_sdk(message_id, final_card),
+                                label="final-card cardkit fallback reply"
+                            )
+                        else:
+                            from lark_client import send_card_to_chat_sdk
+                            patch_ok = await _feishu_call(
+                                lambda: send_card_to_chat_sdk(chat_id, final_card),
+                                label="final-card cardkit fallback chat"
+                            )
+                elif not hasattr(patch_interactive_card_sdk, "_mock_name"):
+                    from lark_client import async_patch_interactive_card
+                    try:
+                        patch_ok = await async_patch_interactive_card(bot_reply_msg_id, final_card)
+                    except Exception as final_ap_err:
+                        log.error(f"[Executor] async final-card patch failed: {final_ap_err}")
+                        patch_ok = None
+                else:
+                    patch_ok = await _feishu_call(
+                        lambda: patch_interactive_card_sdk(bot_reply_msg_id, final_card),
+                        label="final-card patch"
+                    )
+                if not patch_ok:
                     await _send_full_text_fallback("final-card text fallback")
             else:
                 if message_id and str(message_id).startswith("om_"):

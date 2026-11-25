@@ -97,28 +97,8 @@ def build_ai_response(
             "actions": actions
         })
 
-    # 3. Compact Execution Trace & Context Info Row
+    # 3. Context Info Row (execution trace removed per user preference for clean card footer)
     if not is_error:
-        if not is_streaming and completed_steps:
-            from cards.indicators import _collapse_consecutive_steps, clean_action_text
-            cleaned_steps = [clean_action_text(s) for s in completed_steps if s and str(s).strip()]
-            collapsed = _collapse_consecutive_steps(cleaned_steps)
-            if collapsed:
-                preview_items = []
-                for label, cnt in collapsed[:6]:
-                    short_lbl = label if len(label) <= 22 else (label[:20] + "…")
-                    preview_items.append(f"{short_lbl}×{cnt}" if cnt > 1 else short_lbl)
-                if len(collapsed) > 6:
-                    preview_items.append(f"…共{len(cleaned_steps)}步")
-                dur_prefix = f"⏱️ {int(think_seconds)}s · " if think_seconds and int(think_seconds) > 0 else ""
-                trace_line = f"⚡ 执行轨迹 ({dur_prefix}共 {len(cleaned_steps)} 步): " + " → ".join(preview_items)
-                if elements and elements[-1].get("tag") != "hr":
-                    elements.append({"tag": "hr"})
-                elements.append({
-                    "tag": "markdown",
-                    "content": f"<font color='grey'>{sanitize_feishu_markdown(trace_line)}</font>"
-                })
-
         project_name_only = "默认"
         if current_project and current_project not in ["默认", "Default"]:
             project_name_only = os.path.basename(current_project) or current_project
