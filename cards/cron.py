@@ -56,7 +56,7 @@ def _is_completed_delay_task(task: dict) -> bool:
     )
 
 
-def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None):
+def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None, page=1, notice=""):
     valid_tasks = [t for t in (tasks or []) if not _is_completed_delay_task(t)]
     user_tasks = [t for t in valid_tasks if t.get('category') in ['user', None, '', 'default']]
     sys_tasks = [t for t in valid_tasks if t.get('category') in ['system', 'maintenance']]
@@ -71,30 +71,32 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None
 
     displayed_tasks = user_tasks if active_tab == 'user' else sys_tasks
     has_inactive_user = any(not bool(t.get('is_active', 1)) for t in user_tasks)
-    
+
     elements = []
-    
+
     # 顶部说明与快捷按钮栏
     if active_tab == 'history':
         subtitle = (
             f"当前分类：**📜 历史执行记录**（共 **{len(history_logs)}** 条） · "
             f"*含已自动销毁的一次性任务与周期任务审计流水*"
         )
+    elif active_tab == 'create':
+        subtitle = "当前分类：**➕ 新建计划任务** · *表单一步创建提醒、AI 智能巡检或 Shell 脚本*"
     else:
         subtitle = (
             f"当前分类：**{'👤 用户主动任务' if active_tab == 'user' else '⚙️ 系统后台任务'}**（共 **{len(displayed_tasks)}** 项） · "
             f"*一次性任务触发后自动归档至历史记录*"
         )
 
+    header_md = f"**⏱️ 计划任务管理中心 (Cron Center)**\n{subtitle}"
+    if notice:
+        header_md += f"\n\n💡 {notice}"
     elements.append({
         "tag": "markdown",
-        "content": (
-            f"**⏱️ 计划任务管理中心 (Cron Center)**\n"
-            f"{subtitle}"
-        )
+        "content": header_md,
     })
-    
-    # 切换 Tab 按钮与新建任务按钮
+
+    # 切换 Tab 按钮与新建任务按钮（统一走内联 Tab，无需再发提示文本刷屏）
     header_actions = [
         {
             "tag": "button",
@@ -116,9 +118,9 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None
         },
         {
             "tag": "button",
-            "text": {"tag": "plain_text", "content": "➕ 新建任务"},
-            "type": "primary",
-            "value": {"action": "open_cron_create"}
+            "text": {"tag": "plain_text", "content": "🔵 ➕ 新建任务" if active_tab == 'create' else "➕ 新建任务"},
+            "type": "primary" if active_tab == 'create' else "default",
+            "value": {"action": "switch_cron_tab", "tab": "create"}
         }
     ]
     if active_tab == 'user' and has_inactive_user:
@@ -126,6 +128,10 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None
             "tag": "button",
             "text": {"tag": "plain_text", "content": "🧹 清理已暂停"},
             "type": "danger",
+            "confirm": {
+                "title": {"tag": "plain_text", "content": "确认清理已暂停任务"},
+                "text": {"tag": "plain_text", "content": "将移除所有已暂停或已完成的一次性任务（历史日志保留），确定继续吗？"}
+            },
             "value": {"action": "clear_completed_cron"}
         })
     elif active_tab == 'history' and history_logs:
@@ -133,6 +139,10 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None
             "tag": "button",
             "text": {"tag": "plain_text", "content": "🧹 清空记录"},
             "type": "danger",
+            "confirm": {
+                "title": {"tag": "plain_text", "content": "确认清空历史记录"},
+                "text": {"tag": "plain_text", "content": "确定清空当前会话全部计划任务历史流水吗？"}
+            },
             "value": {"action": "clear_cron_logs"}
         })
     elements.append({
@@ -142,7 +152,90 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None
     })
     elements.append({"tag": "hr"})
 
-    if active_tab == 'history':
+    if active_tab == 'create':
+        elements.append({
+            "tag": "form",
+            "name": "cron_create_form",
+            "elements": [
+                {
+                    "tag": "input",
+                    "name": "cron_name",
+                    "label": {"tag": "plain_text", "content": "任务名称"},
+                    "placeholder": {"tag": "plain_text", "content": "例如：每日代码巡检 / 10分钟后喝水提醒"},
+                },
+                {
+                    "tag": "select_static",
+                    "name": "cron_action_type",
+                    "initial_option": "ai_agent",
+                    "placeholder": {"tag": "plain_text", "content": "选择执行引擎类型"},
+                    "options": [
+                        {"text": {"tag": "plain_text", "content": "🧠 AI 智能体分析执行 (唤醒 Agent 执行指令并汇报)"}, "value": "ai_agent"},
+                        {"text": {"tag": "plain_text", "content": "💬 纯文本消息提醒 (直接推送提醒文案)"}, "value": "reminder"},
+                        {"text": {"tag": "plain_text", "content": "🖥️ Shell 脚本命令 (仅管理员可执行受控命令)"}, "value": "shell"},
+                    ],
+                },
+                {
+                    "tag": "select_static",
+                    "name": "cron_preset",
+                    "initial_option": "0 9 * * *",
+                    "placeholder": {"tag": "plain_text", "content": "选择常用触发周期（或在下方自定义）"},
+                    "options": [
+                        {"text": {"tag": "plain_text", "content": "⏳ 5 分钟后执行一次 (300s)"}, "value": "300s"},
+                        {"text": {"tag": "plain_text", "content": "⏳ 30 分钟后执行一次 (1800s)"}, "value": "1800s"},
+                        {"text": {"tag": "plain_text", "content": "⏳ 1 小时后执行一次 (3600s)"}, "value": "3600s"},
+                        {"text": {"tag": "plain_text", "content": "🔁 每天 09:00 定时执行 (0 9 * * *)"}, "value": "0 9 * * *"},
+                        {"text": {"tag": "plain_text", "content": "🔁 工作日 09:30 执行 (30 9 * * 1-5)"}, "value": "30 9 * * 1-5"},
+                        {"text": {"tag": "plain_text", "content": "🔁 每 2 小时巡检一次 (0 */2 * * *)"}, "value": "0 */2 * * *"},
+                    ],
+                },
+                {
+                    "tag": "input",
+                    "name": "cron_custom_expr",
+                    "label": {"tag": "plain_text", "content": "自定义 Cron / 秒数（选填，填写则优先覆盖上方预设）"},
+                    "placeholder": {"tag": "plain_text", "content": "留空使用上方预设；或填如 600s / */15 * * * *"},
+                },
+                {
+                    "tag": "input",
+                    "name": "cron_prompt",
+                    "label": {"tag": "plain_text", "content": "执行 Prompt / 提醒文本 / Shell 命令"},
+                    "placeholder": {"tag": "plain_text", "content": "例如：检查当前工作区 Git 状态与最近报错日志并输出简报"},
+                },
+                {
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "name": "cron_submit_btn",
+                                    "text": {"tag": "plain_text", "content": "✅ 立即创建计划任务"},
+                                    "type": "primary",
+                                    "action_type": "form_submit",
+                                    "value": {"action": "cron_create_submit"},
+                                }
+                            ],
+                        },
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "name": "cron_cancel_btn",
+                                    "text": {"tag": "plain_text", "content": "返回列表"},
+                                    "type": "default",
+                                    "value": {"action": "switch_cron_tab", "tab": "user"},
+                                }
+                            ],
+                        },
+                    ],
+                },
+            ],
+        })
+    elif active_tab == 'history':
         if not history_logs:
             elements.append({
                 "tag": "markdown",
@@ -194,10 +287,15 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None
     elif not displayed_tasks:
         elements.append({
             "tag": "markdown",
-            "content": f"*(暂无{'用户主动' if active_tab == 'user' else '系统后台'}计划任务)*\n可以直接在聊天中发送：`一分钟后提醒我喝水` 或点击上方 **[ ➕ 新建任务 ]** 快速添加！"
+            "content": f"*(暂无{'用户主动' if active_tab == 'user' else '系统后台'}计划任务)*\n可以直接在聊天中发送：`一分钟后提醒我喝水` 或点击上方 **[ ➕ 新建任务 ]** 在卡片表单中一步创建！"
         })
     else:
-        visible_tasks = displayed_tasks[:MAX_DISPLAY_TASKS]
+        page_size = 8
+        total_pages = max(1, (len(displayed_tasks) + page_size - 1) // page_size)
+        cur_page = max(1, min(int(page or 1), total_pages))
+        start_idx = (cur_page - 1) * page_size
+        visible_tasks = displayed_tasks[start_idx:start_idx + page_size]
+
         for t in visible_tasks:
             t_id = t.get('id')
             is_active = bool(t.get('is_active', 1))
@@ -208,14 +306,14 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None
             t_type = t.get('task_type', 'cron')
             cron_expr = t.get('cron_expr', '')
             schedule_tag = f"⏳ 一次性 (`{cron_expr}`)" if t_type == 'delay' else f"🔁 周期 (`{cron_expr}`)"
-            
+
             last_run = _format_timestamp(t.get('last_run_at'))
             next_run_str = _format_relative_time(t.get('next_run_at')) if is_active else "已暂停"
-            
+
             prompt_preview = t.get('prompt', '') or t.get('command', '')
             if len(prompt_preview) > 75:
                 prompt_preview = prompt_preview[:75] + "..."
-                
+
             task_md = f"**{badge} {t_name}**  {status_icon}\n" \
                       f"⏰ **触发设定**：{schedule_tag} · {next_run_str}\n" \
                       f"💡 **执行内容**：{prompt_preview}\n" \
@@ -225,26 +323,30 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None
                 "tag": "markdown",
                 "content": task_md
             })
-            
-            # 操作按钮行
+
+            # 操作按钮行（携带当前 active_tab 与 page，防止在系统任务页操作后跳回用户任务页）
             task_actions = [
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "⚡ 立即触发"},
                     "type": "default",
-                    "value": {"action": "run_cron_now", "task_id": t_id}
+                    "value": {"action": "run_cron_now", "task_id": t_id, "tab": active_tab, "page": cur_page}
                 },
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "⏸️ 暂停" if is_active else "▶️ 启用"},
                     "type": "default",
-                    "value": {"action": "toggle_cron_active", "task_id": t_id, "is_active": not is_active}
+                    "value": {"action": "toggle_cron_active", "task_id": t_id, "is_active": not is_active, "tab": active_tab, "page": cur_page}
                 },
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "🗑️ 删除"},
                     "type": "danger",
-                    "value": {"action": "delete_cron_task", "task_id": t_id}
+                    "confirm": {
+                        "title": {"tag": "plain_text", "content": "确认删除计划任务"},
+                        "text": {"tag": "plain_text", "content": f"确定要删除任务「{t_name[:24]}」吗？此操作不可恢复。"}
+                    },
+                    "value": {"action": "delete_cron_task", "task_id": t_id, "tab": active_tab, "page": cur_page}
                 }
             ]
             elements.append({
@@ -254,11 +356,23 @@ def build_cron_panel_card(tasks, active_tab="user", session_data=None, logs=None
             })
             elements.append({"tag": "hr"})
 
-        if len(displayed_tasks) > MAX_DISPLAY_TASKS:
-            elements.append({
-                "tag": "markdown",
-                "content": f"*(仅展示最近 {MAX_DISPLAY_TASKS} 条任务，当前分类共 {len(displayed_tasks)} 条)*"
-            })
+        if total_pages > 1:
+            page_btns = []
+            if cur_page > 1:
+                page_btns.append({
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "◀️ 上一页"},
+                    "type": "default",
+                    "value": {"action": "cron_page", "tab": active_tab, "page": cur_page - 1},
+                })
+            if cur_page < total_pages:
+                page_btns.append({
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": f"下一页 ({cur_page}/{total_pages}) ▶️"},
+                    "type": "default",
+                    "value": {"action": "cron_page", "tab": active_tab, "page": cur_page + 1},
+                })
+            elements.append({"tag": "action", "layout": "flow", "actions": page_btns})
 
     elements.append(create_footer())
     card = {

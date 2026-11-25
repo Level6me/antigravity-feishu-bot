@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import time
 import urllib.request
 import ssl
 from datetime import datetime, timezone, timedelta
@@ -10,60 +11,87 @@ from cards.common import create_footer
 # 北京时间 (UTC+8) 时区定义
 BEIJING_TZ = timezone(timedelta(hours=8))
 
-def get_antigravity_account() -> str:
-    """获取 antigravity cli 当前登录的账号 Email"""
+# 进程级账号 Email 缓存，避免每次渲染卡片重复文件读取或阻塞主事件循环请求外网
+_ACCOUNT_EMAIL_CACHE = {"email": "", "mtime": -1.0, "ts": 0.0}
+_ACCOUNT_CACHE_TTL = 600.0
+
+
+def get_antigravity_account(allow_network: bool = False) -> str:
+    """获取 antigravity cli 当前登录的账号 Email（带进程级缓存，默认零外网阻塞）"""
     try:
         from config import get_oauth_token_path
         token_path = get_oauth_token_path()
         if not os.path.exists(token_path):
             return ""
-        
+
+        now = time.time()
+        try:
+            mtime = os.path.getmtime(token_path)
+        except Exception:
+            mtime = 0.0
+
+        if (
+            _ACCOUNT_EMAIL_CACHE["email"]
+            and _ACCOUNT_EMAIL_CACHE["mtime"] == mtime
+            and (now - _ACCOUNT_EMAIL_CACHE["ts"]) < _ACCOUNT_CACHE_TTL
+        ):
+            return _ACCOUNT_EMAIL_CACHE["email"]
+
         with open(token_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
+
+        resolved_email = ""
         if isinstance(data, dict):
             # 1. 尝试直接读取根或 token 下保存的 email
             if "email" in data and data["email"]:
-                return str(data["email"])
+                resolved_email = str(data["email"])
             token_obj = data.get("token", {}) if isinstance(data.get("token"), dict) else data
-            if isinstance(token_obj, dict) and "email" in token_obj and token_obj["email"]:
-                return str(token_obj["email"])
+            if not resolved_email and isinstance(token_obj, dict) and "email" in token_obj and token_obj["email"]:
+                resolved_email = str(token_obj["email"])
 
             # 2. 从 id_token 中解码 JWT 获取 email
-            id_token = token_obj.get("id_token") if isinstance(token_obj, dict) else None
-            if not id_token and isinstance(data, dict):
-                id_token = data.get("id_token")
-                
-            if id_token and isinstance(id_token, str) and id_token.count(".") == 2:
-                try:
-                    payload_b64 = id_token.split(".")[1]
-                    rem = len(payload_b64) % 4
-                    if rem:
-                        payload_b64 += "=" * (4 - rem)
-                    payload_json = base64.urlsafe_b64decode(payload_b64).decode("utf-8")
-                    payload = json.loads(payload_json)
-                    if "email" in payload and payload["email"]:
-                        return str(payload["email"])
-                except Exception:
-                    pass
+            if not resolved_email:
+                id_token = token_obj.get("id_token") if isinstance(token_obj, dict) else None
+                if not id_token and isinstance(data, dict):
+                    id_token = data.get("id_token")
 
-            # 3. 备用方式：向 Google UserInfo API 请求
-            access_token = token_obj.get("access_token") if isinstance(token_obj, dict) else None
-            if access_token:
-                try:
-                    req = urllib.request.Request(
-                        "https://www.googleapis.com/oauth2/v3/userinfo",
-                        headers={"Authorization": f"Bearer {access_token}"}
-                    )
-                    with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=3) as resp:
-                        user_info = json.loads(resp.read().decode("utf-8"))
-                        if "email" in user_info and user_info["email"]:
-                            return str(user_info["email"])
-                except Exception:
-                    pass
+                if id_token and isinstance(id_token, str) and id_token.count(".") == 2:
+                    try:
+                        payload_b64 = id_token.split(".")[1]
+                        rem = len(payload_b64) % 4
+                        if rem:
+                            payload_b64 += "=" * (4 - rem)
+                        payload_json = base64.urlsafe_b64decode(payload_b64).decode("utf-8")
+                        payload = json.loads(payload_json)
+                        if "email" in payload and payload["email"]:
+                            resolved_email = str(payload["email"])
+                    except Exception:
+                        pass
+
+            # 3. 备用方式：仅在后台线程显式允许网络时请求 Google UserInfo API，严禁阻塞主循环
+            if not resolved_email and allow_network:
+                access_token = token_obj.get("access_token") if isinstance(token_obj, dict) else None
+                if access_token:
+                    try:
+                        req = urllib.request.Request(
+                            "https://www.googleapis.com/oauth2/v3/userinfo",
+                            headers={"Authorization": f"Bearer {access_token}"}
+                        )
+                        with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=2.5) as resp:
+                            user_info = json.loads(resp.read().decode("utf-8"))
+                            if "email" in user_info and user_info["email"]:
+                                resolved_email = str(user_info["email"])
+                    except Exception:
+                        pass
+
+        if resolved_email:
+            _ACCOUNT_EMAIL_CACHE["email"] = resolved_email
+            _ACCOUNT_EMAIL_CACHE["mtime"] = mtime
+            _ACCOUNT_EMAIL_CACHE["ts"] = now
+            return resolved_email
     except Exception:
         pass
-    return ""
+    return _ACCOUNT_EMAIL_CACHE.get("email", "")
 
 
 def get_local_tz_info():
@@ -155,18 +183,56 @@ def build_quota_card(quota_data):
                     "tag": "hr"
                 })
             
+    # 智能探测高余量推荐模型按钮
+    best_model_btn = {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "🎛️ 切换模型 (/model)"},
+        "type": "default",
+        "value": {"action": "user_choice", "choice": "/model", "label": "切换模型"}
+    }
+    if quota_data and "response" in quota_data and "groups" in quota_data["response"]:
+        best_group = None
+        best_pct = -1.0
+        has_low_bucket = False
+        for g in quota_data["response"].get("groups", []):
+            if not isinstance(g, dict):
+                continue
+            buckets = [b for b in (g.get("buckets") or []) if isinstance(b, dict)]
+            if not buckets:
+                continue
+            min_f = min(float(b.get("remainingFraction", 0.0)) for b in buckets)
+            if min_f < 0.30:
+                has_low_bucket = True
+            if min_f > best_pct:
+                best_pct = min_f
+                best_group = g.get("displayName", "").lower()
+        if has_low_bucket and best_pct >= 0.50 and best_group:
+            rec_model = (
+                "gemini-3.8-flash-high"
+                if "gemini" in best_group and "argon" not in best_group
+                else ("claude-sonnet-5-5-high" if ("claude" in best_group or "3p" in best_group) else "gemini-3.8-flash-high")
+            )
+            best_model_btn = {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"⚡ 一键切高余量 ({rec_model})"},
+                "type": "default",
+                "value": {"action": "switch_model", "model": rec_model}
+            }
+
     elements.append({
         "tag": "hr"
     })
     elements.append({
         "tag": "action",
+        "layout": "flow",
         "actions": [
             {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "🔄 刷新额度配额"},
                 "type": "primary",
                 "value": {"action": "refresh_quota"}
-            }
+            },
+            best_model_btn,
         ]
     })
     
@@ -303,6 +369,10 @@ def build_context_card(stats):
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "🧹 清空上下文"},
                     "type": "danger",
+                    "confirm": {
+                        "title": {"tag": "plain_text", "content": "确认清空当前对话上下文"},
+                        "text": {"tag": "plain_text", "content": "清空后将开启全新对话（项目长效记忆胶囊不受影响），确定继续吗？"}
+                    },
                     "value": {"action": "user_choice", "choice": "/clear", "label": "清空上下文"}
                 },
                 {

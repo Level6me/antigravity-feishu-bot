@@ -64,9 +64,14 @@ async def _render_and_patch_agy_plugin_card(
     notice: str = "",
     notice_level: str = "info",
     needs_session_reload: bool = False,
+    force_refresh: bool = False,
+    do_patch: bool = True,
 ):
     ws_dir = await _resolve_chat_workspace(chat_id)
-    plugins, err = await list_agy_plugins(workspace_dir=ws_dir)
+    try:
+        plugins, err = await list_agy_plugins(workspace_dir=ws_dir, force_refresh=force_refresh)
+    except TypeError:
+        plugins, err = await list_agy_plugins(workspace_dir=ws_dir)
     card = CardBuilder.build_agy_plugin_panel_card(
         plugins,
         active_tab=active_tab,
@@ -80,11 +85,48 @@ async def _render_and_patch_agy_plugin_card(
         workspace_dir=ws_dir,
         error_msg=err or "",
     )
-    if card_message_id:
+    if do_patch and card_message_id:
         await asyncio.get_running_loop().run_in_executor(
             None, lambda: patch_interactive_card_sdk(card_message_id, card)
         )
     return card
+
+
+def _smart_agy_plugin_read_response(
+    chat_id: str,
+    card_message_id: str,
+    toast_text: str,
+    **render_kwargs,
+) -> P2CardActionTriggerResponse:
+    if asyncio._get_running_loop() is None and app_state.main_loop and app_state.main_loop.is_running():
+        fut = asyncio.run_coroutine_threadsafe(
+            _render_and_patch_agy_plugin_card(chat_id, card_message_id, do_patch=False, **render_kwargs),
+            app_state.main_loop,
+        )
+        try:
+            card = fut.result(timeout=1.4)
+            return P2CardActionTriggerResponse({
+                "card": {"type": "raw", "data": card},
+                "toast": {"type": "info", "content": toast_text},
+            })
+        except Exception:
+            async def _late_patch():
+                try:
+                    c = await asyncio.wrap_future(fut)
+                    if card_message_id and c:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: patch_interactive_card_sdk(card_message_id, c)
+                        )
+                except Exception:
+                    pass
+            asyncio.run_coroutine_threadsafe(_late_patch(), app_state.main_loop)
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": toast_text}})
+
+    asyncio.run_coroutine_threadsafe(
+        _render_and_patch_agy_plugin_card(chat_id, card_message_id, do_patch=True, **render_kwargs),
+        app_state.main_loop,
+    )
+    return P2CardActionTriggerResponse({"toast": {"type": "info", "content": toast_text}})
 
 
 def handle_agy_plugin_card_action(
@@ -123,76 +165,52 @@ def _dispatch_agy_plugin_action(
         tab = str(val.get("tab") or "list")
         f_status = str(val.get("filter") or "all")
         page = max(1, int(val.get("page") or 1))
-
-        async def _do_tab():
-            await _render_and_patch_agy_plugin_card(
-                chat_id, card_message_id, active_tab=tab, filter_status=f_status, page=page
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_tab(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已切换视图"}})
+        return _smart_agy_plugin_read_response(
+            chat_id, card_message_id, "已切换视图", active_tab=tab, filter_status=f_status, page=page
+        )
 
     if action == "agy_plugin_filter":
         f_status = str(val.get("filter") or "all")
-
-        async def _do_filter():
-            await _render_and_patch_agy_plugin_card(
-                chat_id, card_message_id, active_tab="list", filter_status=f_status, page=1
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_filter(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已更新筛选"}})
+        return _smart_agy_plugin_read_response(
+            chat_id, card_message_id, "已更新筛选", active_tab="list", filter_status=f_status, page=1
+        )
 
     if action == "agy_plugin_page":
         f_status = str(val.get("filter") or "all")
         page = max(1, int(val.get("page") or 1))
-
-        async def _do_page():
-            await _render_and_patch_agy_plugin_card(
-                chat_id, card_message_id, active_tab="list", filter_status=f_status, page=page
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_page(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"第 {page} 页"}})
+        return _smart_agy_plugin_read_response(
+            chat_id, card_message_id, f"第 {page} 页", active_tab="list", filter_status=f_status, page=page
+        )
 
     if action == "agy_plugin_detail":
         name = str(val.get("name") or "")
         f_status = str(val.get("filter") or "all")
         page = max(1, int(val.get("page") or 1))
-
-        async def _do_detail():
-            await _render_and_patch_agy_plugin_card(
-                chat_id,
-                card_message_id,
-                active_tab="list",
-                filter_status=f_status,
-                page=page,
-                expanded_name=name,
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_detail(), app_state.main_loop)
-        return P2CardActionTriggerResponse(
-            {"toast": {"type": "info", "content": f"已展开 {name} 详情" if name else "已收起详情"}}
+        return _smart_agy_plugin_read_response(
+            chat_id,
+            card_message_id,
+            f"已展开 {name} 详情" if name else "已收起详情",
+            active_tab="list",
+            filter_status=f_status,
+            page=page,
+            expanded_name=name,
         )
 
     if action == "agy_plugin_refresh":
         tab = str(val.get("tab") or "list")
         f_status = str(val.get("filter") or "all")
         page = max(1, int(val.get("page") or 1))
-
-        async def _do_refresh():
-            await _render_and_patch_agy_plugin_card(
-                chat_id,
-                card_message_id,
-                active_tab=tab,
-                filter_status=f_status,
-                page=page,
-                notice="已刷新最新 Antigravity 原生插件状态",
-                notice_level="info",
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_refresh(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在刷新原生插件列表..."}})
+        return _smart_agy_plugin_read_response(
+            chat_id,
+            card_message_id,
+            "已刷新原生插件列表",
+            active_tab=tab,
+            filter_status=f_status,
+            page=page,
+            notice="已刷新最新 Antigravity 原生插件状态",
+            notice_level="info",
+            force_refresh=True,
+        )
 
     if action == "agy_plugin_toggle":
         name = str(val.get("name") or "").strip()

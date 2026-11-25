@@ -11,7 +11,9 @@ def build_typesafe_config_card(
     base_url: Optional[str] = None,
     test_result: Optional[Dict[str, Any]] = None,
     tier: Optional[str] = None,
-    auto_mode: Optional[bool] = None
+    auto_mode: Optional[bool] = None,
+    show_credentials_form: bool = False,
+    notice: str = "",
 ) -> dict:
     """Build minimalist, modern configuration card for TypeSafe AI Gateway (Main Console)."""
     import config
@@ -27,7 +29,6 @@ def build_typesafe_config_card(
     }
     cur_tier_display = tier_names.get(current_tier, tier_names["gateway"])
 
-    # Status badges with classic, intuitive emojis
     if not enabled:
         header_template = "grey"
         status_badge = "🔴 已停用 (DISABLED)"
@@ -56,7 +57,9 @@ def build_typesafe_config_card(
         f"• **服务端点**: {endpoint_text}",
     ]
 
-    if test_result:
+    if notice:
+        content_lines.append(f"\n✅ **配置通知**: {notice}")
+    elif test_result:
         status_text = "🟢 连通正常 (OK)" if test_result.get("status") == "ok" else "🔴 连接异常 (FAIL)"
         content_lines.append(f"\n📡 **连通性测试结果 ({status_text})：**")
         if "latency_ms" in test_result:
@@ -127,15 +130,6 @@ def build_typesafe_config_card(
                     "type": "primary" if model == "jev-1.13.0" else "default",
                     "value": {"action": "set_typesafe_model", "model": "jev-1.13.0"}
                 },
-                {
-                    "tag": "button",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": f"✓ 自定义: {model}" if model not in ("decision-model-preview", "jev-latest", "jev-1.13.0") else "➕ 输入其他模型"
-                    },
-                    "type": "primary" if model not in ("decision-model-preview", "jev-latest", "jev-1.13.0") else "default",
-                    "value": {"action": "prompt_typesafe_model"}
-                }
             ]
         },
         {
@@ -156,35 +150,20 @@ def build_typesafe_config_card(
         {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": "⚙️ **系统配置与凭据管理**："
+            "content": "⚙️ **系统配置与无痕凭据管理**（通过内联表单直写 `.env`，聊天记录零明文残留）："
         },
         {
             "tag": "action",
-            "layout": "bisect",
+            "layout": "flow",
             "actions": [
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "🔑 设置 API Key"},
-                    "type": "default",
-                    "value": {"action": "prompt_typesafe_key"}
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "🌐 设置 Base URL"},
-                    "type": "default",
-                    "value": {"action": "prompt_typesafe_base_url"}
-                }
-            ]
-        },
-        {
-            "tag": "action",
-            "layout": "bisect",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "🏷️ 设置模型名称"},
-                    "type": "default",
-                    "value": {"action": "prompt_typesafe_model"}
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "🔼 收起凭据表单" if show_credentials_form else "🔐 无痕配置 Key / 端点 / 模型",
+                    },
+                    "type": "primary" if not show_credentials_form else "default",
+                    "value": {"action": "toggle_typesafe_form", "show": not show_credentials_form}
                 },
                 {
                     "tag": "button",
@@ -194,23 +173,70 @@ def build_typesafe_config_card(
                     },
                     "type": "default" if enabled else "primary",
                     "value": {"action": "toggle_typesafe_enabled"}
-                }
-            ]
-        },
-        {
-            "tag": "action",
-            "layout": "flow",
-            "actions": [
+                },
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "🗑️ 清除 Key"},
                     "type": "danger",
+                    "confirm": {
+                        "title": {"tag": "plain_text", "content": "确认清除 API Key"},
+                        "text": {"tag": "plain_text", "content": "清除后网关将自动切换至本地启发式规则兜底模式，确定继续吗？"}
+                    },
                     "value": {"action": "clear_typesafe_key"}
                 }
             ]
         },
-        create_footer()
     ]
+
+    if show_credentials_form:
+        elements.append({
+            "tag": "form",
+            "name": "typesafe_cred_form",
+            "elements": [
+                {
+                    "tag": "input",
+                    "name": "ts_api_key",
+                    "label": {"tag": "plain_text", "content": "TypeSafe API Key（留空则保持原 Key 不变）"},
+                    "placeholder": {"tag": "plain_text", "content": "输入新 Key 安全直写服务端 .env（不在群聊留痕）"},
+                },
+                {
+                    "tag": "input",
+                    "name": "ts_base_url",
+                    "default_value": base_url or "",
+                    "label": {"tag": "plain_text", "content": "自定义 Base URL（留空或填 default 使用官方默认）"},
+                    "placeholder": {"tag": "plain_text", "content": "https://api.typesafe.ai/v1"},
+                },
+                {
+                    "tag": "input",
+                    "name": "ts_model",
+                    "default_value": model or "jev-latest",
+                    "label": {"tag": "plain_text", "content": "决策网关模型名称"},
+                    "placeholder": {"tag": "plain_text", "content": "jev-latest 或 decision-model-preview"},
+                },
+                {
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "name": "ts_form_submit_btn",
+                                    "text": {"tag": "plain_text", "content": "✅ 安全保存并热生效"},
+                                    "type": "primary",
+                                    "action_type": "form_submit",
+                                    "value": {"action": "typesafe_form_submit"},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ],
+        })
+
+    elements.append(create_footer())
 
     return {
         "config": {"wide_screen_mode": True},
@@ -368,11 +394,24 @@ def build_l3_high_risk_confirm_card(
 
     clean_cmd = command.strip()
     cmd_preview = clean_cmd if len(clean_cmd) <= 300 else f"{clean_cmd[:300]}..."
-    # 防止超长命令（如 >10KB 的内联脚本）塞入 3 个按钮 value 导致飞书卡片 JSON 超出 30KB 限制报错 (code 2200/230025)
-    # 完整未截断指令已保存在 session_data["paused_l3_state"]["command"] 与 transcript_full.jsonl 中
-    btn_cmd = clean_cmd if len(clean_cmd) <= 1500 else f"{clean_cmd[:1500]}..."
+    # 完整指令与工作目录已持久化在 session_data["paused_l3_state"]，按钮仅传精简引用与前缀提示，避免重复 3 遍撑爆卡片 JSON 体积
+    btn_cmd_hint = clean_cmd if len(clean_cmd) <= 96 else f"{clean_cmd[:96]}..."
     clean_reason = reason.strip() or "Jev 认知模型判定该操作具有破坏性或不确定性风险"
     cwd_display = project_dir if (project_dir and project_dir not in ["默认", "Default"]) else "默认工作区"
+
+    def _l3_btn_val(decision: str, scope: str = "once") -> dict:
+        val = {
+            "action": "l3_confirm_action",
+            "decision": decision,
+            "tool": tool_name,
+            "command": btn_cmd_hint,
+            "risk_level": risk_level,
+            "call_id": call_id,
+            "chat_id": chat_id,
+        }
+        if decision == "approve":
+            val["scope"] = scope
+        return val
 
     elements = [
         {
@@ -407,17 +446,7 @@ def build_l3_high_risk_confirm_card(
                         "content": "⚠️ 仅授权单次 (Once)"
                     },
                     "type": "danger",
-                    "value": {
-                        "action": "l3_confirm_action",
-                        "decision": "approve",
-                        "scope": "once",
-                        "tool": tool_name,
-                        "command": btn_cmd,
-                        "risk_level": risk_level,
-                        "cwd": project_dir,
-                        "call_id": call_id,
-                        "chat_id": chat_id
-                    }
+                    "value": _l3_btn_val("approve", "once"),
                 },
                 {
                     "tag": "button",
@@ -426,17 +455,7 @@ def build_l3_high_risk_confirm_card(
                         "content": "⚡ 授权本轮所有 (Turn)"
                     },
                     "type": "primary",
-                    "value": {
-                        "action": "l3_confirm_action",
-                        "decision": "approve",
-                        "scope": "turn",
-                        "tool": tool_name,
-                        "command": btn_cmd,
-                        "risk_level": risk_level,
-                        "cwd": project_dir,
-                        "call_id": call_id,
-                        "chat_id": chat_id
-                    }
+                    "value": _l3_btn_val("approve", "turn"),
                 }
             ]
         },
@@ -450,16 +469,7 @@ def build_l3_high_risk_confirm_card(
                         "content": "🚫 拒绝并终止当前任务 (Reject)"
                     },
                     "type": "default",
-                    "value": {
-                        "action": "l3_confirm_action",
-                        "decision": "reject",
-                        "tool": tool_name,
-                        "command": btn_cmd,
-                        "risk_level": risk_level,
-                        "cwd": project_dir,
-                        "call_id": call_id,
-                        "chat_id": chat_id
-                    }
+                    "value": _l3_btn_val("reject"),
                 }
             ]
         },

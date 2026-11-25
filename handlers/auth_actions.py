@@ -16,20 +16,51 @@ _AUTH_ACTIONS = (
 )
 
 
-async def _refresh_panel(card_message_id):
-    """Rebuild and patch the admin management panel card."""
-    from database import list_auth_sessions
-    from utils.auth import start_display_name_refresh
-    sessions = list_auth_sessions()
-    task = start_display_name_refresh(sessions)
-    try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
-    except asyncio.TimeoutError:
-        pass
-    return await asyncio.get_running_loop().run_in_executor(
-        None,
-        lambda: patch_interactive_card_sdk(card_message_id, CardBuilder.build_user_panel_card(sessions)),
+def _schedule_bg_name_patch(card_message_id: str, sessions: list, page: int = 1):
+    """Refresh missing Feishu display names in background without blocking initial/callback card render."""
+    if not card_message_id:
+        return
+    needs_lookup = any(
+        not (s.get("display_name") or "").strip() or str(s.get("display_name", "")).startswith("oc_")
+        for s in (sessions or [])
     )
+    if not needs_lookup:
+        return
+
+    async def _bg():
+        from database import list_auth_sessions
+        from utils.auth import start_display_name_refresh
+        before_names = {s.get("chat_id"): s.get("display_name") for s in (sessions or [])}
+        task = start_display_name_refresh(sessions)
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=4.0)
+        except Exception:
+            pass
+        fresh = list_auth_sessions()
+        after_names = {s.get("chat_id"): s.get("display_name") for s in fresh}
+        if after_names != before_names:
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: patch_interactive_card_sdk(
+                    card_message_id, CardBuilder.build_user_panel_card(fresh, page=page)
+                ),
+            )
+
+    asyncio.create_task(_bg())
+
+
+async def _refresh_panel(card_message_id, page: int = 1):
+    """Rebuild and patch the admin management panel card immediately using cached display names."""
+    from database import list_auth_sessions
+    sessions = list_auth_sessions()
+    res = await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: patch_interactive_card_sdk(
+            card_message_id, CardBuilder.build_user_panel_card(sessions, page=page)
+        ),
+    )
+    _schedule_bg_name_patch(card_message_id, sessions, page=page)
+    return res
 
 
 def handle_auth_card_action(action_value, chat_id, card_message_id):
@@ -148,24 +179,28 @@ def _dispatch_auth_action(action_value, action, chat_id, card_message_id):
 
     if action == "user_page":
         page = int(action_value.get("page", 1))
+        from database import list_auth_sessions
+        sessions = list_auth_sessions()
+        new_card = CardBuilder.build_user_panel_card(sessions, page=page)
         if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_user_page():
-                from database import list_auth_sessions
-                from utils.auth import start_display_name_refresh
-                sessions = list_auth_sessions()
-                task = start_display_name_refresh(sessions)
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
-                except asyncio.TimeoutError:
+            async def do_user_page_bg():
+                _schedule_bg_name_patch(card_message_id, sessions, page=page)
+                if asyncio._get_running_loop() is not None and card_message_id:
+                    # Fallback patch only if caller didn't get sync card response
                     pass
+            # If called from WS callback worker thread (no running loop in current thread), return card in-place!
+            if asyncio._get_running_loop() is None:
+                asyncio.run_coroutine_threadsafe(do_user_page_bg(), app_state.main_loop)
+                return P2CardActionTriggerResponse({
+                    "card": {"type": "raw", "data": new_card},
+                    "toast": {"type": "success", "content": f"第 {page} 页"},
+                })
+            async def do_user_page_loop():
+                _schedule_bg_name_patch(card_message_id, sessions, page=page)
                 await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    lambda: patch_interactive_card_sdk(
-                        card_message_id,
-                        CardBuilder.build_user_panel_card(sessions, page=page),
-                    ),
+                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
                 )
-            asyncio.run_coroutine_threadsafe(do_user_page(), app_state.main_loop)
+            asyncio.run_coroutine_threadsafe(do_user_page_loop(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已翻页"}})
 
     return None

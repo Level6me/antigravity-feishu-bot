@@ -51,10 +51,8 @@ FEATURED_REMOTE_PLUGINS = [
 ]
 
 
-def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") -> dict:
-    """Build interactive card displaying installed plugins or plugin store sources."""
-    
-    # 1. Navigation Tab Buttons
+def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed", active_form: str = "", notice: str = "") -> dict:
+    """Build interactive card displaying installed plugins or plugin store sources with inline forms."""
     is_installed = active_tab == "installed"
     tab_actions = [
         {
@@ -77,15 +75,16 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
             "layout": "flow",
             "actions": tab_actions
         },
-        {"tag": "hr"}
     ]
+    if notice:
+        elements.append({"tag": "markdown", "content": f"💡 {notice}"})
+    elements.append({"tag": "hr"})
 
     if is_installed:
-        # TAB 1: INSTALLED PLUGINS
         if not plugin_list:
             elements.append({
                 "tag": "markdown",
-                "content": "⚠️ *当前 `plugins/` 目录下暂无安装的插件。切换到【🏪 插件源与商店】Tab 或使用 GitHub URL 即可一键安装扩展能力。*"
+                "content": "⚠️ *当前 `plugins/` 目录下暂无安装的插件。切换到【🏪 插件源与商店】Tab 或展开下方输入框即可一键安装扩展能力。*"
             })
         else:
             for p in plugin_list:
@@ -99,8 +98,8 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
 
                 elements.append({
                     "tag": "markdown",
-                    "content": f"**{name}** (`{pid}` v{version})\n" \
-                               f"• **运行状态**：{status_tag}\n" \
+                    "content": f"**{name}** (`{pid}` v{version})\n"
+                               f"• **运行状态**：{status_tag}\n"
                                f"• **注册指令**：{cmd_str}"
                 })
                 elements.append({
@@ -117,6 +116,10 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
                             "tag": "button",
                             "text": {"tag": "plain_text", "content": "🗑️ 物理卸载"},
                             "type": "danger",
+                            "confirm": {
+                                "title": {"tag": "plain_text", "content": "确认卸载插件"},
+                                "text": {"tag": "plain_text", "content": f"确定要卸载插件「{name}」吗？"}
+                            },
                             "value": {"action": "uninstall_plugin", "plugin_id": pid}
                         }
                     ]
@@ -129,9 +132,9 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
             "actions": [
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "📥 从 GitHub URL 安装插件"},
-                    "type": "primary",
-                    "value": {"action": "prompt_install_github"}
+                    "text": {"tag": "plain_text", "content": "🔼 收起安装框" if active_form == "install" else "📥 从 GitHub URL 安装插件"},
+                    "type": "primary" if active_form != "install" else "default",
+                    "value": {"action": "toggle_plugin_form", "tab": "installed", "form": "" if active_form == "install" else "install"}
                 },
                 {
                     "tag": "button",
@@ -142,13 +145,45 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
             ]
         })
 
+        if active_form == "install":
+            elements.append({
+                "tag": "form",
+                "name": "plugin_gh_install_form",
+                "elements": [
+                    {
+                        "tag": "input",
+                        "name": "plugin_repo_url",
+                        "label": {"tag": "plain_text", "content": "GitHub 插件仓库 URL 或 owner/repo"},
+                        "placeholder": {"tag": "plain_text", "content": "例如：https://github.com/owner/my-feishu-plugin.git"},
+                    },
+                    {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "columns": [
+                            {
+                                "tag": "column",
+                                "width": "auto",
+                                "elements": [
+                                    {
+                                        "tag": "button",
+                                        "name": "plugin_install_btn",
+                                        "text": {"tag": "plain_text", "content": "⬇️ 立即克隆安装"},
+                                        "type": "primary",
+                                        "action_type": "form_submit",
+                                        "value": {"action": "plugin_install_submit"},
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            })
+
     else:
-        # TAB 2: PLUGIN SOURCES & STORE
         sources = load_plugin_sources()
         elements.append({
             "tag": "markdown",
-            "content": f"**🏪 插件源与商店**\n" \
-                       f"• **当前插件源仓库**：`https://github.com/Level6me/feishu-bot-plugin`"
+            "content": "**🏪 插件源与商店**\n• **当前插件源仓库**：`https://github.com/Level6me/feishu-bot-plugin`"
         })
         elements.append({"tag": "hr"})
 
@@ -219,12 +254,58 @@ def build_plugin_panel_card(plugin_list: list, active_tab: str = "installed") ->
                 },
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "➕ 添加 GitHub 插件源"},
+                    "text": {"tag": "plain_text", "content": "🔼 收起插件源表单" if active_form == "source" else "➕ 添加 GitHub 插件源"},
                     "type": "default",
-                    "value": {"action": "prompt_add_source"}
+                    "value": {"action": "toggle_plugin_form", "tab": "sources", "form": "" if active_form == "source" else "source"}
                 }
             ]
         })
+
+        if active_form == "source":
+            elements.append({
+                "tag": "form",
+                "name": "plugin_add_source_form",
+                "elements": [
+                    {
+                        "tag": "input",
+                        "name": "source_name",
+                        "label": {"tag": "plain_text", "content": "插件源名称"},
+                        "placeholder": {"tag": "plain_text", "content": "例如：开源社区插件集"},
+                    },
+                    {
+                        "tag": "input",
+                        "name": "source_url",
+                        "label": {"tag": "plain_text", "content": "GitHub 仓库 URL"},
+                        "placeholder": {"tag": "plain_text", "content": "https://github.com/org/plugins-repo"},
+                    },
+                    {
+                        "tag": "input",
+                        "name": "source_desc",
+                        "label": {"tag": "plain_text", "content": "备注说明（选填）"},
+                        "placeholder": {"tag": "plain_text", "content": "可选描述"},
+                    },
+                    {
+                        "tag": "column_set",
+                        "flex_mode": "none",
+                        "columns": [
+                            {
+                                "tag": "column",
+                                "width": "auto",
+                                "elements": [
+                                    {
+                                        "tag": "button",
+                                        "name": "plugin_src_submit",
+                                        "text": {"tag": "plain_text", "content": "✅ 保存插件源"},
+                                        "type": "primary",
+                                        "action_type": "form_submit",
+                                        "value": {"action": "plugin_source_submit"},
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            })
 
     elements.append(create_footer())
 

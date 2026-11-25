@@ -960,12 +960,14 @@ def get_all_cron_tasks(chat_id=None):
     conn = get_db()
     try:
         cursor = conn.cursor()
-        # 自动清理已触发完毕的历史一次性倒计时任务（先归档元数据至 cron_logs 再移除主表）
+        # 仅当确实存在待归档的历史一次性倒计时任务时才开启写事务清理，消除常规读路径写放大
         cond = "task_type = 'delay' AND is_active = 0 AND (run_count > 0 OR last_run_at > 0)"
-        _archive_tasks_before_delete(cursor, cond)
-        cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}")
-        if cursor.rowcount > 0:
-            conn.commit()
+        cursor.execute(f"SELECT 1 FROM cron_tasks WHERE {cond} LIMIT 1")
+        if cursor.fetchone():
+            _archive_tasks_before_delete(cursor, cond)
+            cursor.execute(f"DELETE FROM cron_tasks WHERE {cond}")
+            if cursor.rowcount > 0:
+                conn.commit()
         if chat_id:
             cursor.execute('SELECT * FROM cron_tasks WHERE chat_id = ? OR chat_id = "" OR chat_id IS NULL OR category IN ("system", "maintenance") ORDER BY created_at DESC', (chat_id,))
         else:

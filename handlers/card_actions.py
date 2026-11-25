@@ -34,41 +34,121 @@ chat_queues = app_state.chat_queues
 chat_workers = app_state.chat_workers
 
 
+def _respond_card_sync_or_patch(
+    build_card_coro,
+    card_message_id: str,
+    toast_content: str,
+    toast_type: str = "success",
+    sync_timeout: float = 1.5,
+) -> P2CardActionTriggerResponse:
+    """Execute async state update + card build on main_loop.
+    Returns card synchronously in callback response (<30ms, 0 HTTP PATCH) from WS worker thread,
+    falling back to async patch_interactive_card_sdk on slow operations or in-loop test calls.
+    """
+    if not (app_state.main_loop and app_state.main_loop.is_running()):
+        return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_content}})
+
+    if asyncio._get_running_loop() is None:
+        fut = asyncio.run_coroutine_threadsafe(build_card_coro(), app_state.main_loop)
+        try:
+            res = fut.result(timeout=sync_timeout)
+            if isinstance(res, tuple) and len(res) == 3:
+                new_card, eff_type, eff_msg = res
+            else:
+                new_card, eff_type, eff_msg = res, toast_type, toast_content
+            if new_card:
+                return P2CardActionTriggerResponse({
+                    "card": {"type": "raw", "data": new_card},
+                    "toast": {"type": eff_type, "content": eff_msg},
+                })
+            return P2CardActionTriggerResponse({"toast": {"type": eff_type, "content": eff_msg}})
+        except Exception:
+            async def _fallback_patch():
+                try:
+                    res = await asyncio.wrap_future(fut)
+                    new_card = res[0] if (isinstance(res, tuple) and len(res) == 3) else res
+                    if new_card and card_message_id:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+                        )
+                except Exception as pe:
+                    log.warning(f"[CardAction] Fallback patch failed: {pe}")
+            asyncio.run_coroutine_threadsafe(_fallback_patch(), app_state.main_loop)
+            return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_content}})
+
+    async def _loop_patch():
+        try:
+            res = await build_card_coro()
+            new_card = res[0] if (isinstance(res, tuple) and len(res) == 3) else res
+            if new_card and card_message_id:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+                )
+        except Exception as le:
+            log.warning(f"[CardAction] Loop patch failed: {le}")
+
+    asyncio.run_coroutine_threadsafe(_loop_patch(), app_state.main_loop)
+    return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_content}})
+
+
 # Provide main_loop as dynamic attribute via module-level lookup in function
 def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
     log.info(f"Card action received: {data.event.action.value}")
-    
+
     action_value = data.event.action.value or {}
     form_value = getattr(data.event.action, "form_value", None) or {}
     chat_id = data.event.context.open_chat_id
     card_message_id = data.event.context.open_message_id
-    
+
     # Check whitelist if configured
     is_allowed = True
     if ALLOWED_USERS or ALLOWED_CHATS:
         is_allowed = False
-        # 卡片回调操作者字段为 CallBackOperator.open_id（字符串），
-        # 注意与消息事件 sender.sender_id.open_id 的对象结构不同。
         sender_id = data.event.operator.open_id if data.event.operator else None
         if ALLOWED_USERS and sender_id in ALLOWED_USERS:
             is_allowed = True
         if ALLOWED_CHATS and chat_id in ALLOWED_CHATS:
             is_allowed = True
-            
+
     if not is_allowed:
         log.warning(f"Unauthorized card action ignored. chat_id: {chat_id}, operator_id: {sender_id if 'sender_id' in locals() else None}")
         return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "您无权操作此卡片！"}})
 
-    # Auth gate: guests / pending / banned chats cannot operate any card.
     operator_open_id = data.event.operator.open_id if data.event.operator else None
     role = get_role(chat_id, operator_open_id or "")
+
+    # Allow unauthorized guest to click "🔑 一键申请使用权限" directly on build_auth_hint_card
+    if action_value.get("action") == "guest_request_auth":
+        if role == "banned":
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "该会话已被限制访问。"}})
+        if role in ("admin", "user"):
+            return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "当前会话已获得授权，可直接发送消息使用！"}})
+        from utils.auth import get_admin_chat_id, request_access
+        from database import get_auth_session
+        status = request_access(chat_id, "p2p" if operator_open_id else "group", operator_open_id or "", "卡片一键申请授权")
+        if status == "ok" and app_state.main_loop and app_state.main_loop.is_running():
+            async def _notify_admin_req():
+                from lark_client import send_card_to_chat_async
+                admin_cid = get_admin_chat_id()
+                sess = get_auth_session(chat_id)
+                if admin_cid and sess:
+                    await send_card_to_chat_async(admin_cid, CardBuilder.build_auth_request_card(sess))
+            asyncio.run_coroutine_threadsafe(_notify_admin_req(), app_state.main_loop)
+        toast_msg = "已向管理员提交授权申请！" if status == "ok" else "申请已提交，请等待管理员审批"
+        return P2CardActionTriggerResponse({
+            "card": {"type": "raw", "data": CardBuilder.build_auth_hint_card(pending=True)},
+            "toast": {"type": "success" if status == "ok" else "info", "content": toast_msg},
+        })
+
+    # Auth gate: guests / pending / banned chats cannot operate any other card.
     if role in ("guest", "pending", "banned"):
         return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "该会话未授权，无法操作。"}})
 
     # Admin gate for plugin write operations (prevents privilege escalation via card buttons)
     plugin_write_actions = {
         "reload_plugins", "update_plugin", "uninstall_plugin",
-        "install_github_repo", "prompt_install_github", "prompt_add_source"
+        "install_github_repo", "prompt_install_github", "prompt_add_source",
+        "toggle_plugin_form", "plugin_install_submit", "plugin_source_submit",
     }
     if action_value.get("action") in plugin_write_actions:
         if not is_admin(chat_id):
@@ -363,34 +443,99 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         )
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": toast_msg}})
 
+    elif action_value.get("action") == "switch_agent_mode":
+        target_mode = str(action_value.get("mode") or "auto").strip().lower()
+        if target_mode not in ("auto", "accept-edits", "plan", "default"):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": f"无效模式：{target_mode}"}})
+        if target_mode != "plan" and not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 当前会话仅允许使用 plan 只读模式"}})
+
+        async def _do_switch_mode():
+            from commands import DEFAULT_FALLBACK_MODELS, get_available_models_cached
+            session_data = await get_session_async(chat_id)
+            session_data["agent_mode"] = target_mode
+            await save_session_async(chat_id, session_data)
+            try:
+                from session_pool import session_pool
+                active_sess = session_pool.get_active_session(chat_id)
+                if active_sess and getattr(active_sess, "transport_name", "") == "acp" and active_sess.is_alive():
+                    await active_sess.set_mode(target_mode)
+                elif active_sess:
+                    await session_pool.reset_session(chat_id)
+            except Exception:
+                pass
+            avail = await get_available_models_cached(force_refresh=False) or DEFAULT_FALLBACK_MODELS
+            card = CardBuilder.build_model_panel(avail, session_data.get("model", "Default"), agent_mode=target_mode)
+            return card, "success", f"执行模式已热切为 {target_mode}"
+
+        return _respond_card_sync_or_patch(_do_switch_mode, card_message_id, f"执行模式已热切为 {target_mode}")
+
+    elif action_value.get("action") == "help_switch_tab":
+        tab = str(action_value.get("tab") or "all").strip().lower()
+        new_help_card = CardBuilder.build_help_card(is_admin_user=is_admin(chat_id), active_tab=tab)
+        if asyncio._get_running_loop() is None:
+            return P2CardActionTriggerResponse({
+                "card": {"type": "raw", "data": new_help_card},
+                "toast": {"type": "info", "content": "已切换帮助分类"},
+            })
+        if app_state.main_loop and app_state.main_loop.is_running() and card_message_id:
+            asyncio.run_coroutine_threadsafe(
+                asyncio.to_thread(patch_interactive_card_sdk, card_message_id, new_help_card),
+                app_state.main_loop,
+            )
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已切换帮助分类"}})
+
     elif action_value.get("action") == "user_choice":
         choice = action_value.get("choice", "")
         label = action_value.get("label", choice)
-        log.info(f"User selected choice: {choice}")
-        
+        from_choice_card = bool(action_value.get("from_choice_card"))
+        log.info(f"User selected choice: {choice} (from_choice_card={from_choice_card})")
+
+        locked_card = None
+        if from_choice_card and not str(choice).startswith("/"):
+            locked_card = CardBuilder.build_choice_locked_card(
+                chosen_label=label,
+                chosen_value=choice,
+                question=str(action_value.get("question") or "已确认选项"),
+                reply_preview=str(action_value.get("reply_preview") or ""),
+            )
+
         if app_state.main_loop and app_state.main_loop.is_running():
             async def notify_and_process():
                 handled = False
                 if choice and choice.startswith("/"):
                     session_data = await get_session_async(chat_id)
-                    # 1. 优先使用完整的 choice 执行命令（保留如 "/update confirm" 等子命令参数）
                     handled_res, _ = await handle_slash_command(choice, card_message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
                     handled = bool(handled_res)
                     if not handled:
-                        # 2. 提取首个命令词（处理带说明括号的选项如 "/light (常用缩写...)" -> "/light"）
                         clean_cmd = choice.split()[0].strip()
                         if clean_cmd != choice:
                             handled_res2, _ = await handle_slash_command(clean_cmd, card_message_id, chat_id, session_data, running_processes, chat_queues, chat_workers)
                             handled = bool(handled_res2)
 
                 if not handled:
-                    # 2. 如果不是有效斜杠指令或未被命令捕获，统一模拟为用户回复提交给 AI 继续处理
-                    user_display_text = f"✅ **您已选择：{label}**\n*(选项内容已提交 AI 进行下一步处理...)*"
-                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, user_display_text))
-                    simulated_content = json.dumps({"text": f"我的选择是：{choice}"})
+                    if locked_card is not None:
+                        # 原卡片已原地锁定展示用户所选选项，无需再发多余刷屏文本消息
+                        if asyncio._get_running_loop() is not None and card_message_id:
+                            pass
+                    else:
+                        user_display_text = f"✅ **您已选择：{label}**\n*(选项内容已提交 AI 进行下一步处理...)*"
+                        await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, user_display_text))
+                    simulated_content = json.dumps({"text": f"我的选择是：{choice}"}, ensure_ascii=False)
                     await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
 
+            if locked_card is not None and asyncio._get_running_loop() is not None and card_message_id:
+                asyncio.run_coroutine_threadsafe(
+                    asyncio.to_thread(patch_interactive_card_sdk, card_message_id, locked_card),
+                    app_state.main_loop,
+                )
             asyncio.run_coroutine_threadsafe(notify_and_process(), app_state.main_loop)
+
+        if locked_card is not None and asyncio._get_running_loop() is None:
+            return P2CardActionTriggerResponse({
+                "card": {"type": "raw", "data": locked_card},
+                "toast": {"type": "success", "content": f"已确认选择：{label}"},
+            })
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"已选择：{label}"}})
             
     elif action_value.get("action") == "l3_confirm_action":
@@ -854,19 +999,144 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无目录浏览权限"}})
         target_path = action_value.get("path")
-        
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_browse_dir():
-                session_data = await get_session_async(chat_id)
-                recent_projects = session_data.get("recent_projects", [])
-                ignored_projects = session_data.get("ignored_projects", [])
-                ws_root = session_data.get("workspace_root")
-                new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, workspace_root=ws_root, ignored_projects=ignored_projects)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_browse_dir(), app_state.main_loop)
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在载入目录..."}})
-        
+
+        async def _do_browse_dir():
+            session_data = await get_session_async(chat_id)
+            return CardBuilder.build_dir_browser_card(
+                target_path,
+                session_data.get("recent_projects", []),
+                workspace_root=session_data.get("workspace_root"),
+                ignored_projects=session_data.get("ignored_projects", []),
+            )
+
+        return _respond_card_sync_or_patch(_do_browse_dir, card_message_id, "已载入目录")
+
+    elif action_value.get("action") in ("toggle_project_form", "create_project_prompt", "prompt_custom_workspace_root", "prompt_custom_project_path"):
+        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无工作区设置权限"}})
+        act_name = action_value.get("action")
+        if act_name == "create_project_prompt":
+            target_form = "create"
+        elif act_name in ("prompt_custom_workspace_root", "prompt_custom_project_path"):
+            target_form = "root"
+        else:
+            target_form = str(action_value.get("form") or "")
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_toggle_proj_form():
+            session_data = await get_session_async(chat_id)
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            return CardBuilder.build_dir_browser_card(
+                session_data.get("project", "默认"),
+                session_data.get("recent_projects", []),
+                recent_page=page_num,
+                workspace_root=session_data.get("workspace_root"),
+                ignored_projects=session_data.get("ignored_projects", []),
+                active_form=target_form,
+            )
+
+        return _respond_card_sync_or_patch(
+            _do_toggle_proj_form,
+            card_message_id,
+            "请在卡片表单中填写" if target_form else "已收起表单",
+            toast_type="info",
+        )
+
+    elif action_value.get("action") == "project_root_submit":
+        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无工作区根目录设置权限"}})
+        raw_root = str(form_value.get("workspace_root_input") or "").strip()
+        if not raw_root:
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "请输入根目录绝对路径"}})
+        target_root = os.path.abspath(os.path.expanduser(raw_root))
+        forbidden_sys_dirs = ("/etc", "/root", "/proc", "/sys", "/boot", "/dev", "/var/log")
+        if not is_admin(chat_id) and any(target_root == d or target_root.startswith(d + "/") for d in forbidden_sys_dirs):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 禁止非管理员绑定系统敏感目录"}})
+        if not os.path.isdir(target_root):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": f"目录不存在：{target_root}"}})
+
+        async def _do_save_root():
+            session_data = await get_session_async(chat_id)
+            session_data["workspace_root"] = target_root
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            return CardBuilder.build_dir_browser_card(
+                session_data.get("project", "默认"),
+                session_data.get("recent_projects", []),
+                recent_page=1,
+                workspace_root=target_root,
+                ignored_projects=session_data.get("ignored_projects", []),
+                notice=f"公共项目根目录已更新为 `{target_root}`",
+            )
+
+        return _respond_card_sync_or_patch(_do_save_root, card_message_id, "根目录已保存")
+
+    elif action_value.get("action") == "project_create_submit":
+        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无创建项目权限"}})
+        raw_target = str(form_value.get("project_target") or "").strip()
+        if not raw_target or raw_target.startswith("-"):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "请输入有效的项目名称或 Git 仓库地址"}})
+
+        is_git = bool(re.match(r"^(https?://|git@|git://)[^\s]+$", raw_target, re.IGNORECASE)) or (raw_target.endswith(".git") and "/" in raw_target)
+        if is_git:
+            if app_state.main_loop and app_state.main_loop.is_running():
+                async def _do_git_clone_proj():
+                    from commands import _handle_create_project
+                    session_data = await get_session_async(chat_id)
+                    await _handle_create_project(raw_target, card_message_id, chat_id, session_data)
+                    session_data = await get_session_async(chat_id)
+                    updated_card = CardBuilder.build_dir_browser_card(
+                        session_data.get("project", "默认"),
+                        session_data.get("recent_projects", []),
+                        recent_page=1,
+                        workspace_root=session_data.get("workspace_root"),
+                        ignored_projects=session_data.get("ignored_projects", []),
+                        notice=f"已完成仓库克隆并切换工作区",
+                    )
+                    if card_message_id:
+                        await asyncio.to_thread(patch_interactive_card_sdk, card_message_id, updated_card)
+                asyncio.run_coroutine_threadsafe(_do_git_clone_proj(), app_state.main_loop)
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在后台克隆 Git 仓库并切换工作区..."}})
+
+        async def _do_local_create_proj():
+            from config import WORKSPACE_ROOT
+            session_data = await get_session_async(chat_id)
+            ws_root = session_data.get("workspace_root")
+            parent_p = os.path.abspath(os.path.expanduser(ws_root if ws_root and os.path.isdir(ws_root) else WORKSPACE_ROOT))
+            expanded = os.path.abspath(os.path.expanduser(raw_target))
+            forbidden_sys = ("/etc", "/root", "/proc", "/sys", "/boot", "/dev", "/var/log")
+            if not is_admin(chat_id) and any(expanded == d or expanded.startswith(d + "/") for d in forbidden_sys):
+                return None, "error", "🔒 禁止绑定系统敏感目录"
+            if os.path.isdir(expanded):
+                new_path = expanded
+                notice_txt = f"已切换至现有目录 `{os.path.basename(new_path) or new_path}`"
+            else:
+                clean_name = re.sub(r"[^a-zA-Z0-9._\-\u4e00-\u9fa5]", "_", raw_target)[:32].strip(".") or "project"
+                new_path = os.path.abspath(os.path.join(parent_p, clean_name))
+                os.makedirs(new_path, exist_ok=True)
+                notice_txt = f"已新建项目并切换至 `{clean_name}`"
+            session_data["project"] = new_path
+            recent = list(session_data.get("recent_projects", []))
+            if new_path in recent:
+                recent.remove(new_path)
+            recent.insert(0, new_path)
+            session_data["recent_projects"] = recent[:8]
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            card = CardBuilder.build_dir_browser_card(
+                new_path,
+                recent,
+                recent_page=1,
+                workspace_root=ws_root,
+                ignored_projects=session_data.get("ignored_projects", []),
+                notice=notice_txt,
+            )
+            return card, "success", notice_txt[:40]
+
+        return _respond_card_sync_or_patch(_do_local_create_proj, card_message_id, "项目已创建并切换")
+
     elif action_value.get("action") == "select_project":
         if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无工作区切换权限"}})
@@ -875,124 +1145,164 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             abs_tp = os.path.abspath(target_path)
             if any(abs_tp == d or abs_tp.startswith(d + "/") for d in ("/etc", "/root", "/proc", "/sys", "/boot", "/dev")):
                 return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 禁止绑定系统敏感目录"}})
-        
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_select_project():
-                session_data = await get_session_async(chat_id)
-                session_data["project"] = target_path
-                
-                # 记录最近使用的项目
-                recent = session_data.get("recent_projects", [])
-                if target_path in recent:
-                    recent.remove(target_path)
-                recent.insert(0, target_path)
-                session_data["recent_projects"] = recent[:5]
-                
-                await save_session_async(chat_id, session_data)
-                try:
-                    from session_pool import session_pool
-                    from system_one_gate import infer_effort_from_model
-                    model_to_warm = session_data.get("base_model") or session_data.get("model", "Default")
-                    effort_to_warm = infer_effort_from_model(model_to_warm, session_data.get("reasoning_effort", "medium"))
-                    cwd_dir = target_path if (target_path and os.path.isdir(target_path) and target_path not in ["默认", "Default"]) else None
-                    conv_id = session_data.get("conversation", "")
-                    asyncio.create_task(session_pool.prewarm(
-                        chat_id, model_to_warm, cwd_dir, conversation_id=conv_id,
-                        effort=effort_to_warm
-                    ))
-                except Exception:
-                    pass
-                
-                success_text = (
-                    f"📂 **工作区项目切换成功！**\n\n"
-                    f"当前已将活跃目录设定为：\n`{target_path}`"
-                )
-                success_card = CardBuilder.build_ai_response(
-                    success_text,
-                    current_model=session_data.get('model', 'Default'),
-                    current_project=target_path,
-                    session_data=session_data
-                )
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_interactive_card_sdk(card_message_id, success_card))
-            asyncio.run_coroutine_threadsafe(do_select_project(), app_state.main_loop)
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目切换成功！"}})
+
+        async def _do_select_project():
+            session_data = await get_session_async(chat_id)
+            session_data["project"] = target_path
+            recent = list(session_data.get("recent_projects", []))
+            if target_path in recent:
+                recent.remove(target_path)
+            recent.insert(0, target_path)
+            session_data["recent_projects"] = recent[:8]
+            await save_session_async(chat_id, session_data)
+            try:
+                from session_pool import session_pool
+                from system_one_gate import infer_effort_from_model
+                model_to_warm = session_data.get("base_model") or session_data.get("model", "Default")
+                effort_to_warm = infer_effort_from_model(model_to_warm, session_data.get("reasoning_effort", "medium"))
+                cwd_dir = target_path if (target_path and os.path.isdir(target_path) and target_path not in ["默认", "Default"]) else None
+                conv_id = session_data.get("conversation", "")
+                asyncio.create_task(session_pool.prewarm(
+                    chat_id, model_to_warm, cwd_dir, conversation_id=conv_id, effort=effort_to_warm
+                ))
+            except Exception:
+                pass
+            proj_name = os.path.basename(str(target_path)) or target_path
+            card = CardBuilder.build_dir_browser_card(
+                target_path,
+                recent,
+                recent_page=1,
+                workspace_root=session_data.get("workspace_root"),
+                ignored_projects=session_data.get("ignored_projects", []),
+                notice=f"当前工作区已切换为 `{proj_name}`（后台已预热会话）",
+            )
+            return card, "success", f"已切换至 {proj_name}"
+
+        return _respond_card_sync_or_patch(_do_select_project, card_message_id, "项目切换成功！")
 
     elif action_value.get("action") == "remove_project_from_list":
         target_path = action_value.get("path")
-        
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_remove_project():
-                session_data = await get_session_async(chat_id)
-                ignored = session_data.get("ignored_projects", [])
-                if target_path not in ignored:
-                    ignored.append(target_path)
-                session_data["ignored_projects"] = ignored
-                
-                recent = session_data.get("recent_projects", [])
-                if target_path in recent:
-                    recent.remove(target_path)
-                session_data["recent_projects"] = recent
-                
-                await save_session_async(chat_id, session_data)
-                
-                active_project = session_data.get("project", "默认")
-                ws_root = session_data.get("workspace_root")
-                new_card = CardBuilder.build_dir_browser_card(
-                    active_project, 
-                    recent, 
-                    recent_page=1, 
-                    workspace_root=ws_root, 
-                    ignored_projects=ignored
-                )
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_remove_project(), app_state.main_loop)
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "项目已成功从列表中移出！"}})
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_remove_project():
+            session_data = await get_session_async(chat_id)
+            ignored = list(session_data.get("ignored_projects", []))
+            if target_path not in ignored:
+                ignored.append(target_path)
+            session_data["ignored_projects"] = ignored
+            recent = [p for p in session_data.get("recent_projects", []) if p != target_path]
+            session_data["recent_projects"] = recent
+            await save_session_async(chat_id, session_data)
+            return CardBuilder.build_dir_browser_card(
+                session_data.get("project", "默认"),
+                recent,
+                recent_page=page_num,
+                workspace_root=session_data.get("workspace_root"),
+                ignored_projects=ignored,
+                notice=f"已从列表隐藏 `{os.path.basename(str(target_path)) or target_path}`",
+            )
+
+        return _respond_card_sync_or_patch(_do_remove_project, card_message_id, "已从列表中隐藏")
+
+    elif action_value.get("action") == "browse_recent_page":
+        target_path = action_value.get("current_path")
+        target_page = int(action_value.get("page", 1))
+
+        async def _do_browse_recent_page():
+            session_data = await get_session_async(chat_id)
+            return CardBuilder.build_dir_browser_card(
+                target_path or session_data.get("project", "默认"),
+                session_data.get("recent_projects", []),
+                target_page,
+                workspace_root=session_data.get("workspace_root"),
+                ignored_projects=session_data.get("ignored_projects", []),
+            )
+
+        return _respond_card_sync_or_patch(_do_browse_recent_page, card_message_id, f"第 {target_page} 页")
+
+    elif action_value.get("action") in ("toggle_note_form", "prompt_add_note"):
+        show_form = True if action_value.get("action") == "prompt_add_note" else bool(action_value.get("show", True))
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_toggle_note_form():
+            session_data = await get_session_async(chat_id)
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            return CardBuilder.build_note_list_card(
+                session_data.get("notes", []), show_add_form=show_form, page=page_num
+            )
+
+        return _respond_card_sync_or_patch(
+            _do_toggle_note_form, card_message_id, "请在卡片内输入笔记内容" if show_form else "已收起输入框", toast_type="info"
+        )
+
+    elif action_value.get("action") == "note_add_submit":
+        note_content = str(form_value.get("note_content") or "").strip()
+        if not note_content:
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "请输入笔记内容"}})
+
+        async def _do_add_note():
+            session_data = await get_session_async(chat_id)
+            notes = list(session_data.get("notes", []))
+            notes.append(note_content)
+            session_data["notes"] = notes
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            last_page = max(1, (len(notes) + 7) // 8)
+            return CardBuilder.build_note_list_card(notes, page=last_page, notice="已新增一条笔记")
+
+        return _respond_card_sync_or_patch(_do_add_note, card_message_id, "笔记已保存！")
+
+    elif action_value.get("action") == "note_page":
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_note_page():
+            session_data = await get_session_async(chat_id)
+            return CardBuilder.build_note_list_card(session_data.get("notes", []), page=page_num)
+
+        return _respond_card_sync_or_patch(_do_note_page, card_message_id, f"第 {page_num} 页", toast_type="info")
+
     elif action_value.get("action") == "view_note_detail":
-        idx = int(action_value.get("index"))
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_view_note():
-                session_data = await get_session_async(chat_id)
-                notes = session_data.get("notes", [])
-                if 0 <= idx < len(notes):
-                    note_content = notes[idx]
-                    await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, f"📝 **笔记详情**:\\n{note_content}"))
-            asyncio.run_coroutine_threadsafe(do_view_note(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "详情已发送到当前会话！"}})
-        
+        idx = int(action_value.get("index", -1))
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_view_note():
+            session_data = await get_session_async(chat_id)
+            notes = session_data.get("notes", [])
+            exp = idx if (0 <= idx < len(notes)) else None
+            return CardBuilder.build_note_list_card(notes, expanded_idx=exp, page=page_num)
+
+        return _respond_card_sync_or_patch(
+            _do_view_note,
+            card_message_id,
+            "已在卡片内展开详情" if idx >= 0 else "已收起详情",
+            toast_type="info",
+        )
+
     elif action_value.get("action") == "delete_note":
         idx = int(action_value.get("index"))
-        
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_delete_note():
-                session_data = await get_session_async(chat_id)
-                notes = session_data.get("notes", [])
-                if 0 <= idx < len(notes):
-                    removed = notes.pop(idx)
-                    session_data["notes"] = notes
-                    await save_session_async(chat_id, session_data)
-                    log.info(f"Removed note: '{removed}' in chat {chat_id}")
-                    
-                    new_card = CardBuilder.build_note_list_card(notes)
-                    await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_delete_note(), app_state.main_loop)
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功删除该条笔记！"}})
-        
-    elif action_value.get("action") == "clear_notes":
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_clear_notes():
-                session_data = await get_session_async(chat_id)
-                session_data["notes"] = []
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_delete_note():
+            session_data = await get_session_async(chat_id)
+            notes = list(session_data.get("notes", []))
+            if 0 <= idx < len(notes):
+                notes.pop(idx)
+                session_data["notes"] = notes
                 await save_session_async(chat_id, session_data)
-                
-                new_card = CardBuilder.build_note_list_card([])
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_clear_notes(), app_state.main_loop)
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "您的记事本已被全部清空！"}})
-        
+            return CardBuilder.build_note_list_card(notes, page=page_num)
+
+        return _respond_card_sync_or_patch(_do_delete_note, card_message_id, "已删除该条笔记！")
+
+    elif action_value.get("action") == "clear_notes":
+        async def _do_clear_notes():
+            session_data = await get_session_async(chat_id)
+            session_data["notes"] = []
+            await save_session_async(chat_id, session_data)
+            return CardBuilder.build_note_list_card([])
+
+        return _respond_card_sync_or_patch(_do_clear_notes, card_message_id, "记事本已全部清空！")
+
     elif action_value.get("action") == "refresh_status":
         if "chat_id" in action_value or action_value.get("plugin"):
             # 允许插件专属状态刷新逻辑穿透分发至 plugin_manager
@@ -1000,60 +1310,116 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         else:
             if not is_admin(chat_id):
                 return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "仅管理员可查看系统状态。"}})
-            if app_state.main_loop and app_state.main_loop.is_running():
-                async def do_refresh_status():
-                    from commands import get_system_status_card_data
-                    cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats = get_system_status_card_data()
-                    new_card = CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats)
-                    await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-                asyncio.run_coroutine_threadsafe(do_refresh_status(), app_state.main_loop)
-                
-            return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "状态已刷新！"}})
+            fetch_remote = bool(action_value.get("fetch_remote", False))
+
+            async def _do_refresh_status():
+                from commands import get_system_status_card_data
+                cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats = await asyncio.to_thread(
+                    get_system_status_card_data, fetch_remote
+                )
+                return CardBuilder.build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status, bot_stats)
+
+            return _respond_card_sync_or_patch(
+                _do_refresh_status,
+                card_message_id,
+                "已完成远端版本检查与刷新" if fetch_remote else "状态已秒级刷新！",
+                sync_timeout=0.8 if fetch_remote else 1.5,
+            )
 
     elif action_value.get("action") == "refresh_quota":
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_refresh_quota():
-                try:
-                    import importlib
-                    import utils.quota
-                    importlib.reload(utils.quota)
-                    import cards.stats_cards
-                    importlib.reload(cards.stats_cards)
-                    CardBuilder.build_quota_card = staticmethod(cards.stats_cards.build_quota_card)
-                except Exception as e:
-                    log.warning(f"[card_actions] Quota module reload warning: {e}")
-                from utils.quota import fetch_quota
-                quota_data = await asyncio.get_running_loop().run_in_executor(None, fetch_quota)
-                new_card = CardBuilder.build_quota_card(quota_data)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_refresh_quota(), app_state.main_loop)
+        async def _do_refresh_quota():
+            from utils.quota import fetch_quota
+            from cards.stats_cards import get_antigravity_account
+            await asyncio.to_thread(get_antigravity_account, True)
+            quota_data = await asyncio.to_thread(fetch_quota, True)
+            return CardBuilder.build_quota_card(quota_data)
 
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "额度已刷新！"}})
+        return _respond_card_sync_or_patch(_do_refresh_quota, card_message_id, "额度已刷新！", sync_timeout=1.4)
+
+    elif action_value.get("action") in ("toggle_memory_form", "prompt_add_memory"):
+        show_form = True if action_value.get("action") == "prompt_add_memory" else bool(action_value.get("show", True))
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_toggle_mem_form():
+            session_data = await get_session_async(chat_id)
+            session_data.pop("pending_command", None)
+            await save_session_async(chat_id, session_data)
+            memories = await get_profile_async(chat_id)
+            proj_summary = None
+            try:
+                from agent_memory import get_project_memory_summary
+                proj_summary = get_project_memory_summary((session_data or {}).get("project", "默认"), session_data=session_data)
+            except Exception:
+                pass
+            return CardBuilder.build_memory_card(memories, project_memory_summary=proj_summary, show_add_form=show_form, page=page_num)
+
+        return _respond_card_sync_or_patch(
+            _do_toggle_mem_form, card_message_id, "请在卡片内输入个人偏好" if show_form else "已收起输入框", toast_type="info"
+        )
+
+    elif action_value.get("action") == "memory_add_submit":
+        mem_txt = str(form_value.get("memory_text") or "").strip()
+        if not mem_txt:
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "请输入偏好内容"}})
+
+        async def _do_add_mem():
+            memories = list(await get_profile_async(chat_id))
+            memories.append(mem_txt)
+            await save_profile_async(chat_id, memories)
+            session_data = await get_session_async(chat_id)
+            if session_data.pop("pending_command", None) is not None:
+                await save_session_async(chat_id, session_data)
+            proj_summary = None
+            try:
+                from agent_memory import get_project_memory_summary
+                proj_summary = get_project_memory_summary((session_data or {}).get("project", "默认"), session_data=session_data)
+            except Exception:
+                pass
+            last_page = max(1, (len(memories) + 9) // 10)
+            return CardBuilder.build_memory_card(
+                memories, project_memory_summary=proj_summary, page=last_page, notice="已保存新的个人偏好"
+            )
+
+        return _respond_card_sync_or_patch(_do_add_mem, card_message_id, "偏好已保存！")
+
+    elif action_value.get("action") == "memory_page":
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_mem_page():
+            memories = await get_profile_async(chat_id)
+            session_data = await get_session_async(chat_id)
+            proj_summary = None
+            try:
+                from agent_memory import get_project_memory_summary
+                proj_summary = get_project_memory_summary((session_data or {}).get("project", "默认"), session_data=session_data)
+            except Exception:
+                pass
+            return CardBuilder.build_memory_card(memories, project_memory_summary=proj_summary, page=page_num)
+
+        return _respond_card_sync_or_patch(_do_mem_page, card_message_id, f"第 {page_num} 页", toast_type="info")
 
     elif action_value.get("action") == "forget_single_memory":
         idx = int(action_value.get("index"))
-        
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_forget():
-                memories = await get_profile_async(chat_id)
-                if 0 <= idx < len(memories):
-                    removed = memories.pop(idx)
-                    await save_profile_async(chat_id, memories)
-                    log.info(f"Removed memory preference: '{removed}' in chat {chat_id}")
-                    proj_summary = None
-                    try:
-                        from agent_memory import get_project_memory_summary
-                        session_data = await get_session_async(chat_id)
-                        proj_summary = get_project_memory_summary(
-                            (session_data or {}).get("project", "默认"), session_data=session_data
-                        )
-                    except Exception:
-                        pass
-                    new_card = CardBuilder.build_memory_card(memories, project_memory_summary=proj_summary)
-                    await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_forget(), app_state.main_loop)
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功擦除该偏好记录！"}})
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_forget():
+            memories = list(await get_profile_async(chat_id))
+            if 0 <= idx < len(memories):
+                removed = memories.pop(idx)
+                await save_profile_async(chat_id, memories)
+                log.info(f"Removed memory preference: '{removed}' in chat {chat_id}")
+            proj_summary = None
+            try:
+                from agent_memory import get_project_memory_summary
+                session_data = await get_session_async(chat_id)
+                proj_summary = get_project_memory_summary(
+                    (session_data or {}).get("project", "默认"), session_data=session_data
+                )
+            except Exception:
+                pass
+            return CardBuilder.build_memory_card(memories, project_memory_summary=proj_summary, page=page_num)
+
+        return _respond_card_sync_or_patch(_do_forget, card_message_id, "已成功擦除该偏好记录！")
 
     elif action_value.get("action") == "backfill_project_memory":
         if app_state.main_loop and app_state.main_loop.is_running():
@@ -1079,135 +1445,77 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_backfill_mem(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在扫描并同步当前会话长效记忆..."}})
 
-    elif action_value.get("action") == "create_project_prompt":
-        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
-            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无创建项目权限"}})
-        parent_path = action_value.get("parent_path")
-        
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_create_project_prompt():
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.CREATE_PROJECT.value
-                session_data["create_project_parent"] = parent_path
+    elif action_value.get("action") in ("switch_cron_tab", "open_cron_create", "cron_page"):
+        tab = "create" if action_value.get("action") == "open_cron_create" else str(action_value.get("tab", "user"))
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_switch_cron():
+            from database import get_all_cron_tasks, get_cron_logs
+            loop = asyncio.get_running_loop()
+            tasks = await loop.run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
+            logs = await loop.run_in_executor(None, lambda: get_cron_logs(chat_id=chat_id, limit=15)) if tab == "history" else None
+            session_data = await get_session_async(chat_id)
+            if session_data.pop("pending_command", None) is not None:
                 await save_session_async(chat_id, session_data)
-                
-                prompt_msg = f"📂 **请输入新建项目的名称，或直接输入项目的 Git 仓库地址**：\n\n*(支持通过 Git URL 克隆；若输入项目名，将在公共根目录 `{parent_path}` 下新建并初始化)*"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, prompt_msg))
+            return CardBuilder.build_cron_panel_card(tasks, active_tab=tab, session_data=session_data, logs=logs, page=page_num)
 
-            future = asyncio.run_coroutine_threadsafe(do_create_project_prompt(), app_state.main_loop)
-            try:
-                future.result(timeout=5)
-            except Exception as e:
-                log.error(f"[create_project_prompt] error: {e}")
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "请输入项目名或Git仓库地址！"}})
+        tab_labels = {"history": "历史记录", "user": "用户任务", "system": "系统任务", "create": "新建任务表单"}
+        return _respond_card_sync_or_patch(
+            _do_switch_cron, card_message_id, f"已切换至 {tab_labels.get(tab, tab)}", toast_type="info"
+        )
 
-    elif action_value.get("action") == "prompt_custom_workspace_root":
-        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
-            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无工作区根目录设置权限"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_prompt_ws_root():
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.CUSTOM_WORKSPACE_ROOT.value
-                await save_session_async(chat_id, session_data)
-                
-                msg = "⚙️ **设置公共项目根目录**\n\n请直接在此回复您想要设定的公共项目根目录绝对路径（例如：`/vol1/1000/github`）：\n\n*(系统收到后将自动校验路径合法性，并将后续所有新建项目与列表面板绑定至该根目录，当前活跃工作区保持不变)*"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
+    elif action_value.get("action") == "cron_create_submit":
+        import uuid
+        raw_name = str(form_value.get("cron_name") or "").strip() or "未命名任务"
+        act_type = str(form_value.get("cron_action_type") or "ai_agent").strip()
+        if act_type == "shell" and not is_admin(chat_id):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 Shell 脚本定时任务仅管理员可创建"}})
+        if act_type not in ("ai_agent", "reminder", "shell"):
+            act_type = "ai_agent"
+        custom_expr = str(form_value.get("cron_custom_expr") or "").strip()
+        preset_expr = str(form_value.get("cron_preset") or "0 9 * * *").strip()
+        expr = custom_expr or preset_expr
+        prompt_txt = str(form_value.get("cron_prompt") or "").strip()
+        if not prompt_txt:
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "请填写执行 Prompt 或提醒内容"}})
 
-            future = asyncio.run_coroutine_threadsafe(do_prompt_ws_root(), app_state.main_loop)
-            try:
-                future.result(timeout=5)
-            except Exception as e:
-                log.error(f"[prompt_custom_workspace_root] error: {e}")
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复公共项目根目录绝对路径！"}})
+        async def _do_cron_submit():
+            from cron_engine import compute_next_run
+            from database import get_all_cron_tasks, save_cron_task
+            task_type = "delay" if re.match(r"^\d+\s*[smhd]?$", expr.lower()) else "cron"
+            now_ts = int(time.time())
+            next_run = compute_next_run(expr, task_type, now_ts)
+            if not next_run or next_run <= 0:
+                return None, "error", f"无效的 Cron 或倒计时表达式：{expr}"
+            session_data = await get_session_async(chat_id)
+            t_id = f"task_usr_{now_ts}_{uuid.uuid4().hex[:6]}"
+            task_data = {
+                "id": t_id,
+                "chat_id": chat_id,
+                "category": "user",
+                "name": raw_name,
+                "task_type": task_type,
+                "action_type": act_type,
+                "command": prompt_txt if act_type == "shell" else "",
+                "cron_expr": expr,
+                "prompt": prompt_txt,
+                "project_path": session_data.get("project", ""),
+                "is_active": True,
+                "created_by": chat_id,
+                "created_at": now_ts,
+                "next_run_at": next_run,
+            }
+            await asyncio.to_thread(save_cron_task, task_data)
+            tasks = await asyncio.to_thread(get_all_cron_tasks, chat_id)
+            card = CardBuilder.build_cron_panel_card(
+                tasks,
+                active_tab="user",
+                session_data=session_data,
+                notice=f"已创建任务「**{raw_name}**」（`{expr}`）",
+            )
+            return card, "success", f"已创建任务：{raw_name}"
 
-    elif action_value.get("action") == "prompt_custom_project_path":
-        if not (is_admin(chat_id) or has_scope(chat_id, SCOPE_PROJECT)):
-            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 无开发工作区设置权限"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_prompt_custom():
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.CUSTOM_PROJECT_PATH.value
-                await save_session_async(chat_id, session_data)
-                
-                msg = "⚙️ **设置开发工作区**\n\n请直接回复您想要设定的开发工作区绝对路径（例如：`/vol1/1000/github/my-app`）：\n\n*(系统收到后将自动校验路径合法性并为您切换工作区)*"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-
-            future = asyncio.run_coroutine_threadsafe(do_prompt_custom(), app_state.main_loop)
-            try:
-                future.result(timeout=5)
-            except Exception as e:
-                log.error(f"[prompt_custom_project_path] error: {e}")
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复开发工作区绝对路径！"}})
-
-    elif action_value.get("action") == "prompt_add_note":
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_prompt_note():
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.NOTE_ADD.value
-                await save_session_async(chat_id, session_data)
-                
-                msg = "📝 **添加笔记**\n\n请直接在此回复您要添加的笔记内容：\n\n*(提示：随时也可发送 `/note add <内容>` 进行快速添加)*"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-
-            future = asyncio.run_coroutine_threadsafe(do_prompt_note(), app_state.main_loop)
-            try:
-                future.result(timeout=5)
-            except Exception as e:
-                log.error(f"[prompt_add_note] error: {e}")
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复您要添加的笔记内容！"}})
-
-    elif action_value.get("action") == "prompt_add_memory":
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_prompt_memory():
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.MEMORY_ADD.value
-                await save_session_async(chat_id, session_data)
-                
-                msg = "🧠 **新增个人偏好**\n\n请直接在此回复您希望 AI 记住的偏好或习惯设定（例如：`写代码只用 Python` 或 `用中文回答`）：\n\n*(系统收到后将永久保存至您的个人偏好记忆库)*"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-
-            future = asyncio.run_coroutine_threadsafe(do_prompt_memory(), app_state.main_loop)
-            try:
-                future.result(timeout=5)
-            except Exception as e:
-                log.error(f"[prompt_add_memory] error: {e}")
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复您的个人偏好设定！"}})
-
-    elif action_value.get("action") == "browse_recent_page":
-        target_path = action_value.get("current_path")
-        target_page = action_value.get("page", 1)
-        
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_browse_recent_page():
-                session_data = await get_session_async(chat_id)
-                recent_projects = session_data.get("recent_projects", [])
-                ignored_projects = session_data.get("ignored_projects", [])
-                ws_root = session_data.get("workspace_root")
-                new_card = CardBuilder.build_dir_browser_card(target_path, recent_projects, target_page, workspace_root=ws_root, ignored_projects=ignored_projects)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_browse_recent_page(), app_state.main_loop)
-            
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"正在载入第 {target_page} 页项目..."}})
-
-    elif action_value.get("action") == "switch_cron_tab":
-        tab = action_value.get("tab", "user")
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_switch_cron():
-                from database import get_all_cron_tasks, get_cron_logs
-                loop = asyncio.get_running_loop()
-                tasks = await loop.run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
-                logs = await loop.run_in_executor(None, lambda: get_cron_logs(chat_id=chat_id, limit=15)) if tab == "history" else None
-                session_data = await get_session_async(chat_id)
-                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab=tab, session_data=session_data, logs=logs)
-                await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_switch_cron(), app_state.main_loop)
-        tab_label = "历史记录" if tab == "history" else ("用户" if tab == "user" else "系统")
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"已切换至 {tab_label} 面板"}})
+        return _respond_card_sync_or_patch(_do_cron_submit, card_message_id, "计划任务已创建！")
 
     elif action_value.get("action") == "open_cron_panel":
         if app_state.main_loop and app_state.main_loop.is_running():
@@ -1221,77 +1529,56 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             asyncio.run_coroutine_threadsafe(do_open_cron(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在打开计划任务中心..."}})
 
-    elif action_value.get("action") == "open_cron_create":
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_open_create():
-                from commands import PendingCommand
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.CRON_ADD.value
-                await save_session_async(chat_id, session_data)
-                
-                msg = "⏱️ **新建计划任务**\n\n请直接在此回复 3 段信息，中间用竖线 `|` 隔开：\n" \
-                      "`任务名称 | 触发规则(Cron表达式/秒数) | 执行 Prompt`\n\n" \
-                      "📌 **示例 1 (标准 Cron 每天 09:00 执行)**：\n" \
-                      "`每日总结 | 0 9 * * * | 检查当前工作区的 Git 提交并生成日报`\n\n" \
-                      "📌 **示例 2 (倒计时 10 分钟后一次性执行)**：\n" \
-                      "`磁盘压测汇报 | 600s | 提取 /tmp/iscsi_stab_test.log 并分析报告`"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-            asyncio.run_coroutine_threadsafe(do_open_create(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请发送格式为 '名称 | 规则 | Prompt' 的任务文本"}})
-
     elif action_value.get("action") == "toggle_cron_active":
         task_id = action_value.get("task_id")
         is_active = bool(action_value.get("is_active", True))
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_toggle_cron():
-                from database import update_cron_task_status, get_all_cron_tasks
-                await asyncio.get_running_loop().run_in_executor(None, lambda: update_cron_task_status(task_id, is_active))
-                tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
-                session_data = await get_session_async(chat_id)
-                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_toggle_cron(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"任务已{'启用' if is_active else '暂停'}"}})
+        cur_tab = str(action_value.get("tab") or "user")
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_toggle_cron():
+            from database import get_all_cron_tasks, update_cron_task_status
+            await asyncio.to_thread(update_cron_task_status, task_id, is_active)
+            tasks = await asyncio.to_thread(get_all_cron_tasks, chat_id)
+            session_data = await get_session_async(chat_id)
+            return CardBuilder.build_cron_panel_card(tasks, active_tab=cur_tab, session_data=session_data, page=page_num)
+
+        return _respond_card_sync_or_patch(
+            _do_toggle_cron, card_message_id, f"任务已{'启用' if is_active else '暂停'}"
+        )
 
     elif action_value.get("action") == "delete_cron_task":
         task_id = action_value.get("task_id")
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_delete_cron():
-                from database import delete_cron_task, get_all_cron_tasks
-                await asyncio.get_running_loop().run_in_executor(None, lambda: delete_cron_task(task_id, keep_logs=False))
-                tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
-                session_data = await get_session_async(chat_id)
-                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_delete_cron(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "计划任务已物理删除！"}})
+        cur_tab = str(action_value.get("tab") or "user")
+        page_num = int(action_value.get("page") or 1)
+
+        async def _do_delete_cron():
+            from database import delete_cron_task, get_all_cron_tasks
+            await asyncio.to_thread(delete_cron_task, task_id, False)
+            tasks = await asyncio.to_thread(get_all_cron_tasks, chat_id)
+            session_data = await get_session_async(chat_id)
+            return CardBuilder.build_cron_panel_card(tasks, active_tab=cur_tab, session_data=session_data, page=page_num)
+
+        return _respond_card_sync_or_patch(_do_delete_cron, card_message_id, "计划任务已删除！")
 
     elif action_value.get("action") == "clear_completed_cron":
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_clear_completed_cron():
-                from database import cleanup_completed_delay_tasks, get_all_cron_tasks
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: cleanup_completed_delay_tasks(chat_id, include_paused=True)
-                )
-                tasks = await asyncio.get_running_loop().run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
-                session_data = await get_session_async(chat_id)
-                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_clear_completed_cron(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已清理所有已完成/已暂停任务！"}})
+        async def _do_clear_completed_cron():
+            from database import cleanup_completed_delay_tasks, get_all_cron_tasks
+            await asyncio.to_thread(cleanup_completed_delay_tasks, chat_id, True)
+            tasks = await asyncio.to_thread(get_all_cron_tasks, chat_id)
+            session_data = await get_session_async(chat_id)
+            return CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
+
+        return _respond_card_sync_or_patch(_do_clear_completed_cron, card_message_id, "已清理所有已完成/已暂停任务！")
 
     elif action_value.get("action") == "clear_cron_logs":
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_clear_cron_logs():
-                from database import clear_cron_logs, get_all_cron_tasks
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, lambda: clear_cron_logs(chat_id))
-                tasks = await loop.run_in_executor(None, lambda: get_all_cron_tasks(chat_id))
-                session_data = await get_session_async(chat_id)
-                new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="history", session_data=session_data, logs=[])
-                await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_clear_cron_logs(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已清空历史执行记录！"}})
+        async def _do_clear_cron_logs():
+            from database import clear_cron_logs, get_all_cron_tasks
+            await asyncio.to_thread(clear_cron_logs, chat_id)
+            tasks = await asyncio.to_thread(get_all_cron_tasks, chat_id)
+            session_data = await get_session_async(chat_id)
+            return CardBuilder.build_cron_panel_card(tasks, active_tab="history", session_data=session_data, logs=[])
+
+        return _respond_card_sync_or_patch(_do_clear_cron_logs, card_message_id, "已清空历史执行记录！")
 
     elif action_value.get("action") == "run_cron_now":
         task_id = action_value.get("task_id")
@@ -1307,38 +1594,83 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已触发即刻运行计划任务！"}})
 
     elif action_value.get("action") == "reload_plugins":
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_reload_plugins():
-                from plugin_manager import plugin_manager
-                plugin_manager.reload_plugins()
-                p_list = plugin_manager.get_plugin_list()
-                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed")
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_reload_plugins(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功热重载插件库！"}})
+        async def _do_reload_plugins():
+            from plugin_manager import plugin_manager
+            plugin_manager.reload_plugins()
+            return CardBuilder.build_plugin_panel_card(plugin_manager.get_plugin_list(), active_tab="installed", notice="已热重载全部插件")
 
-    elif action_value.get("action") == "switch_plugin_tab":
-        tab = action_value.get("tab", "installed")
+        return _respond_card_sync_or_patch(_do_reload_plugins, card_message_id, "已成功热重载插件库！")
+
+    elif action_value.get("action") in ("switch_plugin_tab", "toggle_plugin_form", "prompt_install_github", "prompt_add_source"):
+        act = action_value.get("action")
+        if act == "prompt_install_github":
+            tab, form_mode = "installed", "install"
+        elif act == "prompt_add_source":
+            tab, form_mode = "sources", "source"
+        else:
+            tab = str(action_value.get("tab") or "installed")
+            form_mode = str(action_value.get("form") or "")
+
+        async def _do_switch_plugin():
+            from plugin_manager import plugin_manager
+            return CardBuilder.build_plugin_panel_card(
+                plugin_manager.get_plugin_list(), active_tab=tab, active_form=form_mode
+            )
+
+        return _respond_card_sync_or_patch(
+            _do_switch_plugin,
+            card_message_id,
+            "已切换插件视图" if not form_mode else "请在表单中填写仓库信息",
+            toast_type="info",
+        )
+
+    elif action_value.get("action") == "plugin_install_submit":
+        repo_url = str(form_value.get("plugin_repo_url") or "").strip()
+        if not repo_url or repo_url.startswith("-"):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "请输入合法的 GitHub 仓库地址"}})
         if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_switch_plugin():
+            async def _do_form_install_plugin():
+                from plugin_store import install_plugin_from_github
                 from plugin_manager import plugin_manager
-                p_list = plugin_manager.get_plugin_list()
-                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab=tab)
-                await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_switch_plugin(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"已切换至 {'已安装插件' if tab=='installed' else '插件源与商店'}"}})
+                ok, msg = await asyncio.to_thread(install_plugin_from_github, repo_url)
+                if ok:
+                    plugin_manager.reload_plugins()
+                new_card = CardBuilder.build_plugin_panel_card(
+                    plugin_manager.get_plugin_list(), active_tab="installed", notice=msg[:240]
+                )
+                if card_message_id:
+                    await asyncio.to_thread(patch_interactive_card_sdk, card_message_id, new_card)
+            asyncio.run_coroutine_threadsafe(_do_form_install_plugin(), app_state.main_loop)
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在后台克隆并安装插件..."}})
+
+    elif action_value.get("action") == "plugin_source_submit":
+        s_name = str(form_value.get("source_name") or "").strip()
+        s_url = str(form_value.get("source_url") or "").strip()
+        s_desc = str(form_value.get("source_desc") or "").strip()
+        if not s_name or not s_url or s_url.startswith("-"):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "请填写合法的插件源名称与仓库 URL"}})
+
+        async def _do_add_plugin_src():
+            from plugin_store import add_plugin_source
+            from plugin_manager import plugin_manager
+            await asyncio.to_thread(add_plugin_source, s_name, s_url, s_desc)
+            return CardBuilder.build_plugin_panel_card(
+                plugin_manager.get_plugin_list(), active_tab="sources", notice=f"已添加插件源「{s_name}」"
+            )
+
+        return _respond_card_sync_or_patch(_do_add_plugin_src, card_message_id, "插件源已保存！")
 
     elif action_value.get("action") == "refresh_store_plugins":
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_refresh_store():
                 from plugin_store import fetch_remote_store_plugins
-                remote_list = await asyncio.get_running_loop().run_in_executor(None, lambda: fetch_remote_store_plugins(force_refresh=True))
+                await asyncio.get_running_loop().run_in_executor(None, lambda: fetch_remote_store_plugins(force_refresh=True))
                 from plugin_manager import plugin_manager
                 p_list = plugin_manager.get_plugin_list()
                 new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="sources")
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
             asyncio.run_coroutine_threadsafe(do_refresh_store(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已成功刷新 GitHub 插件列表！"}})
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在刷新 GitHub 插件列表..."}})
 
     elif action_value.get("action") == "update_plugin":
         plugin_id = action_value.get("plugin_id")
@@ -1349,9 +1681,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 from plugin_manager import plugin_manager
                 plugin_manager.reload_plugins()
                 p_list = plugin_manager.get_plugin_list()
-                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed")
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed", notice=msg[:200])
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, f"🔄 **插件更新结果：**\n{msg}"))
             asyncio.run_coroutine_threadsafe(do_update_plugin(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在从 Git 拉取插件 {plugin_id} 最新代码..."}})
 
@@ -1364,9 +1695,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 from plugin_manager import plugin_manager
                 plugin_manager.reload_plugins()
                 p_list = plugin_manager.get_plugin_list()
-                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed")
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed", notice=msg[:200])
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, f"🗑️ **插件卸载通知：**\n{msg}"))
             asyncio.run_coroutine_threadsafe(do_uninstall_plugin(), app_state.main_loop)
         return P2CardActionTriggerResponse({"toast": {"type": "warning", "content": f"正在卸载插件 {plugin_id}..."}})
 
@@ -1380,176 +1710,156 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 from plugin_manager import plugin_manager
                 plugin_manager.reload_plugins()
                 p_list = plugin_manager.get_plugin_list()
-                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed")
+                new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed", notice=msg[:200])
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, f"📥 **插件安装通知：**\n{msg}"))
             asyncio.run_coroutine_threadsafe(do_install_repo(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在一键安装 GitHub 插件仓库..."}})
+        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在一键安装 GitHub 插件仓库..."}})
 
-    elif action_value.get("action") == "prompt_install_github":
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_prompt_install():
-                from commands import PendingCommand
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.PLUGIN_INSTALL_GITHUB.value
-                await save_session_async(chat_id, session_data)
-                msg = "📥 **从 GitHub 安装插件**\n\n请在此直接回复 GitHub 插件仓库地址，例如：\n`https://github.com/owner/my-feishu-plugin.git` 或 `owner/my-feishu-plugin`"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-            asyncio.run_coroutine_threadsafe(do_prompt_install(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复 GitHub 仓库地址"}})
-
-    elif action_value.get("action") == "prompt_add_source":
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_prompt_source():
-                from commands import PendingCommand
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.PLUGIN_ADD_SOURCE.value
-                await save_session_async(chat_id, session_data)
-                msg = "➕ **添加 GitHub 插件源**\n\n请直接在此回复 2~3 段信息，中间用竖线 `|` 隔开：\n`源名称 | 仓库URL | [可选描述]`\n\n例如：`开源社区插件源 | https://github.com/my-org/plugins-repo | 社区维护插件集`"
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-            asyncio.run_coroutine_threadsafe(do_prompt_source(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复源名称与 URL"}})
-
-    elif action_value.get("action") == "prompt_typesafe_key":
+    elif action_value.get("action") in ("toggle_typesafe_form", "prompt_typesafe_key", "prompt_typesafe_base_url", "prompt_typesafe_model"):
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该设置仅管理员可用！"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_prompt_ts_key():
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.TYPESAFE_SET_KEY.value
-                await save_session_async(chat_id, session_data)
-                msg = (
-                    "🔑 **设置 TypeSafe AI API Key**\n\n"
-                    "请在此直接回复您的 TypeSafe API Key（例如：`ts_live_...` 或从 https://console.typesafe.ai/keys 获取的 Key）：\n\n"
-                    "*(系统收到后将自动加密写入本地 .env 并即刻热生效)*"
-                )
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-            asyncio.run_coroutine_threadsafe(do_prompt_ts_key(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请直接回复您的 TypeSafe API Key"}})
+        show_f = True if action_value.get("action") != "toggle_typesafe_form" else bool(action_value.get("show", True))
 
-    elif action_value.get("action") == "prompt_typesafe_base_url":
+        async def _do_toggle_ts_form():
+            from system_one_gate import get_typesafe_config_state
+            session_data = await get_session_async(chat_id)
+            if session_data.pop("pending_command", None) is not None:
+                await save_session_async(chat_id, session_data)
+            cur = get_typesafe_config_state()
+            return CardBuilder.build_typesafe_config_card(
+                api_key=cur["api_key"],
+                enabled=cur["enabled"],
+                model=cur["model"],
+                base_url=cur["base_url"],
+                tier=cur.get("tier"),
+                auto_mode=cur.get("auto_mode"),
+                show_credentials_form=show_f,
+            )
+
+        return _respond_card_sync_or_patch(
+            _do_toggle_ts_form,
+            card_message_id,
+            "请在卡片安全表单中填写凭据（不在聊天留痕）" if show_f else "已收起凭据表单",
+            toast_type="info",
+        )
+
+    elif action_value.get("action") == "typesafe_form_submit":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该设置仅管理员可用！"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_prompt_ts_url():
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.TYPESAFE_SET_BASE_URL.value
-                await save_session_async(chat_id, session_data)
-                msg = (
-                    "🌐 **设置 TypeSafe 服务端点 (Base URL)**\n\n"
-                    "请在此直接回复自定义 API 端点（例如：`https://api.typesafe.ai/v1`），回复 `default` 可恢复官方默认："
-                )
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-            asyncio.run_coroutine_threadsafe(do_prompt_ts_url(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复 Base URL"}})
+        new_key = str(form_value.get("ts_api_key") or "").strip()
+        raw_url = form_value.get("ts_base_url")
+        raw_model = str(form_value.get("ts_model") or "").strip()
 
-    elif action_value.get("action") == "prompt_typesafe_model":
-        if not is_admin(chat_id):
-            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该设置仅管理员可用！"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_prompt_ts_model():
-                session_data = await get_session_async(chat_id)
-                session_data["pending_command"] = PendingCommand.TYPESAFE_SET_MODEL.value
-                await save_session_async(chat_id, session_data)
-                msg = (
-                    "🤖 **设置决策网关模型名称 (Model)**\n\n"
-                    "请在此直接回复您想要使用的模型名称（例如：`decision-model-preview` 或 `jev-latest`）：\n\n"
-                    "*(系统收到后将自动写入本地 .env 并即刻热生效)*"
-                )
-                await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, msg))
-            asyncio.run_coroutine_threadsafe(do_prompt_ts_model(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "请回复模型名称"}})
+        async def _do_ts_form_submit():
+            from system_one_gate import get_typesafe_config_state, update_typesafe_env
+            cur = get_typesafe_config_state()
+            kw = {}
+            changed = []
+            if new_key:
+                kw["api_key"] = new_key
+                changed.append("API Key")
+            if raw_url is not None:
+                u_clean = str(raw_url).strip()
+                if u_clean.lower() in ("clear", "reset", "default", "默认", "官方"):
+                    u_clean = ""
+                if u_clean != (cur.get("base_url") or ""):
+                    kw["base_url"] = u_clean
+                    changed.append("Base URL")
+            if raw_model and raw_model != cur.get("model"):
+                kw["model"] = raw_model
+                changed.append(f"模型 ({raw_model})")
+            updated = update_typesafe_env(**kw) if kw else cur
+            notice_msg = f"已安全更新：{', '.join(changed)}" if changed else "未检测到字段变更"
+            return CardBuilder.build_typesafe_config_card(
+                api_key=updated["api_key"],
+                enabled=updated["enabled"],
+                model=updated["model"],
+                base_url=updated["base_url"],
+                tier=updated.get("tier"),
+                auto_mode=updated.get("auto_mode"),
+                show_credentials_form=False,
+                notice=notice_msg,
+            )
+
+        return _respond_card_sync_or_patch(_do_ts_form_submit, card_message_id, "System One 凭据与配置已热生效！")
 
     elif action_value.get("action") == "toggle_typesafe_enabled":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_toggle_ts():
-                from system_one_gate import get_typesafe_config_state, update_typesafe_env
-                cur = get_typesafe_config_state()
-                new_state = not cur["enabled"]
-                updated = update_typesafe_env(enabled=new_state)
-                new_card = CardBuilder.build_typesafe_config_card(
-                    api_key=updated["api_key"],
-                    enabled=updated["enabled"],
-                    model=updated["model"],
-                    base_url=updated["base_url"]
-                )
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
-                )
-            asyncio.run_coroutine_threadsafe(do_toggle_ts(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "System One 网关开关状态已更新！"}})
+
+        async def _do_toggle_ts():
+            from system_one_gate import get_typesafe_config_state, update_typesafe_env
+            cur = get_typesafe_config_state()
+            updated = update_typesafe_env(enabled=not cur["enabled"])
+            return CardBuilder.build_typesafe_config_card(
+                api_key=updated["api_key"],
+                enabled=updated["enabled"],
+                model=updated["model"],
+                base_url=updated["base_url"],
+                tier=updated.get("tier"),
+                auto_mode=updated.get("auto_mode"),
+            )
+
+        return _respond_card_sync_or_patch(_do_toggle_ts, card_message_id, "System One 网关开关状态已更新！")
 
     elif action_value.get("action") == "toggle_typesafe_auto_mode":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_toggle_auto():
-                from system_one_gate import get_typesafe_config_state, update_typesafe_env, infer_effort_from_model
-                cur = get_typesafe_config_state()
-                new_auto = not cur.get("auto_mode", True)
-                updated = update_typesafe_env(auto_mode=new_auto)
-                
-                # 若关闭自适应模式，立即将当前会话的 effort 同步至 base_model 所指定的档位，杜绝悬挂的旧 effort 冲突
-                try:
-                    session_data = await get_session_async(chat_id)
-                    cur_model = session_data.get("base_model") or session_data.get("model", "")
-                    if cur_model:
-                        session_data["model"] = cur_model
-                        session_data["reasoning_effort"] = infer_effort_from_model(cur_model, session_data.get("reasoning_effort", "medium"))
-                        session_data.pop("typesafe_adaptive_tier", None)
-                        await save_session_async(chat_id, session_data)
-                except Exception as _sync_err:
-                    log.warning(f"[toggle_typesafe_auto_mode] Sync session effort failed: {_sync_err}")
 
-                new_card = CardBuilder.build_typesafe_config_card(
-                    api_key=updated["api_key"],
-                    enabled=updated["enabled"],
-                    model=updated["model"],
-                    base_url=updated["base_url"],
-                    tier=updated.get("tier"),
-                    auto_mode=updated.get("auto_mode", True)
-                )
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
-                )
-            asyncio.run_coroutine_threadsafe(do_toggle_auto(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "自适应思考模式状态已更新！"}})
+        async def _do_toggle_auto():
+            from system_one_gate import get_typesafe_config_state, infer_effort_from_model, update_typesafe_env
+            cur = get_typesafe_config_state()
+            updated = update_typesafe_env(auto_mode=not cur.get("auto_mode", True))
+            try:
+                session_data = await get_session_async(chat_id)
+                cur_model = session_data.get("base_model") or session_data.get("model", "")
+                if cur_model:
+                    session_data["model"] = cur_model
+                    session_data["reasoning_effort"] = infer_effort_from_model(cur_model, session_data.get("reasoning_effort", "medium"))
+                    session_data.pop("typesafe_adaptive_tier", None)
+                    await save_session_async(chat_id, session_data)
+            except Exception as _sync_err:
+                log.warning(f"[toggle_typesafe_auto_mode] Sync session effort failed: {_sync_err}")
+
+            return CardBuilder.build_typesafe_config_card(
+                api_key=updated["api_key"],
+                enabled=updated["enabled"],
+                model=updated["model"],
+                base_url=updated["base_url"],
+                tier=updated.get("tier"),
+                auto_mode=updated.get("auto_mode", True),
+            )
+
+        return _respond_card_sync_or_patch(_do_toggle_auto, card_message_id, "自适应思考模式状态已更新！")
 
     elif action_value.get("action") == "open_typesafe_tier_menu":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_open_tier_menu():
-                from system_one_gate import get_typesafe_config_state
-                cur = get_typesafe_config_state()
-                tier_card = CardBuilder.build_typesafe_tier_menu_card(tier=cur.get("tier", "gateway"))
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, tier_card)
-                )
-            asyncio.run_coroutine_threadsafe(do_open_tier_menu(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已载入介入深度级别说明与设置面板"}})
+
+        async def _do_open_tier_menu():
+            from system_one_gate import get_typesafe_config_state
+            cur = get_typesafe_config_state()
+            return CardBuilder.build_typesafe_tier_menu_card(tier=cur.get("tier", "gateway"))
+
+        return _respond_card_sync_or_patch(_do_open_tier_menu, card_message_id, "已载入决策级别配置", toast_type="info")
 
     elif action_value.get("action") == "open_typesafe_main_card":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_open_main_card():
-                from system_one_gate import get_typesafe_config_state
-                cur = get_typesafe_config_state()
-                main_card = CardBuilder.build_typesafe_config_card(
-                    api_key=cur["api_key"],
-                    enabled=cur["enabled"],
-                    model=cur["model"],
-                    base_url=cur["base_url"],
-                    tier=cur.get("tier", "gateway")
-                )
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, main_card)
-                )
-            asyncio.run_coroutine_threadsafe(do_open_main_card(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已返回主控制台"}})
+
+        async def _do_open_main_card():
+            from system_one_gate import get_typesafe_config_state
+            cur = get_typesafe_config_state()
+            return CardBuilder.build_typesafe_config_card(
+                api_key=cur["api_key"],
+                enabled=cur["enabled"],
+                model=cur["model"],
+                base_url=cur["base_url"],
+                tier=cur.get("tier", "gateway"),
+                auto_mode=cur.get("auto_mode"),
+            )
+
+        return _respond_card_sync_or_patch(_do_open_main_card, card_message_id, "已返回主控制台", toast_type="info")
 
     elif action_value.get("action") == "set_typesafe_tier":
         if not is_admin(chat_id):
@@ -1562,53 +1872,48 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             "copilot": "L3 · 全流程决策",
         }
         disp_name = tier_names.get(target_tier, target_tier)
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_set_ts_tier():
-                from system_one_gate import update_typesafe_env
-                updated = update_typesafe_env(tier=target_tier)
-                if from_sub_menu:
-                    new_card = CardBuilder.build_typesafe_tier_menu_card(tier=updated.get("tier", target_tier))
-                else:
-                    new_card = CardBuilder.build_typesafe_config_card(
-                        api_key=updated["api_key"],
-                        enabled=updated["enabled"],
-                        model=updated["model"],
-                        base_url=updated["base_url"],
-                        tier=updated.get("tier", target_tier)
-                    )
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
-                )
-            asyncio.run_coroutine_threadsafe(do_set_ts_tier(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"决策级别已切换为 {disp_name}"}})
+
+        async def _do_set_ts_tier():
+            from system_one_gate import update_typesafe_env
+            updated = update_typesafe_env(tier=target_tier)
+            if from_sub_menu:
+                return CardBuilder.build_typesafe_tier_menu_card(tier=updated.get("tier", target_tier))
+            return CardBuilder.build_typesafe_config_card(
+                api_key=updated["api_key"],
+                enabled=updated["enabled"],
+                model=updated["model"],
+                base_url=updated["base_url"],
+                tier=updated.get("tier", target_tier),
+                auto_mode=updated.get("auto_mode"),
+            )
+
+        return _respond_card_sync_or_patch(_do_set_ts_tier, card_message_id, f"决策级别已切换为 {disp_name}")
 
     elif action_value.get("action") == "set_typesafe_model":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
         target_model = action_value.get("model", "jev-latest")
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_set_ts_model():
-                from system_one_gate import update_typesafe_env
-                updated = update_typesafe_env(model=target_model)
-                new_card = CardBuilder.build_typesafe_config_card(
-                    api_key=updated["api_key"],
-                    enabled=updated["enabled"],
-                    model=updated["model"],
-                    base_url=updated["base_url"],
-                    tier=updated.get("tier")
-                )
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
-                )
-            asyncio.run_coroutine_threadsafe(do_set_ts_model(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"System One 模型已切换为 {target_model}"}})
+
+        async def _do_set_ts_model():
+            from system_one_gate import update_typesafe_env
+            updated = update_typesafe_env(model=target_model)
+            return CardBuilder.build_typesafe_config_card(
+                api_key=updated["api_key"],
+                enabled=updated["enabled"],
+                model=updated["model"],
+                base_url=updated["base_url"],
+                tier=updated.get("tier"),
+                auto_mode=updated.get("auto_mode"),
+            )
+
+        return _respond_card_sync_or_patch(_do_set_ts_model, card_message_id, f"System One 模型已切换为 {target_model}")
 
     elif action_value.get("action") == "test_typesafe_ping":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_ts_ping():
-                from system_one_gate import test_typesafe_connectivity, get_typesafe_config_state
+                from system_one_gate import get_typesafe_config_state, test_typesafe_connectivity
                 cur = get_typesafe_config_state()
                 res = await test_typesafe_connectivity()
                 new_card = CardBuilder.build_typesafe_config_card(
@@ -1617,7 +1922,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     model=cur["model"],
                     base_url=cur["base_url"],
                     test_result=res,
-                    tier=cur.get("tier")
+                    tier=cur.get("tier"),
+                    auto_mode=cur.get("auto_mode"),
                 )
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
@@ -1628,22 +1934,20 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     elif action_value.get("action") == "clear_typesafe_key":
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 该操作仅管理员可用！"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_clear_ts_key():
-                from system_one_gate import update_typesafe_env
-                updated = update_typesafe_env(api_key="")
-                new_card = CardBuilder.build_typesafe_config_card(
-                    api_key=updated["api_key"],
-                    enabled=updated["enabled"],
-                    model=updated["model"],
-                    base_url=updated["base_url"],
-                    tier=updated.get("tier")
-                )
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
-                )
-            asyncio.run_coroutine_threadsafe(do_clear_ts_key(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已清除 API Key，恢复降级兜底模式"}})
+
+        async def _do_clear_ts_key():
+            from system_one_gate import update_typesafe_env
+            updated = update_typesafe_env(api_key="")
+            return CardBuilder.build_typesafe_config_card(
+                api_key=updated["api_key"],
+                enabled=updated["enabled"],
+                model=updated["model"],
+                base_url=updated["base_url"],
+                tier=updated.get("tier"),
+                auto_mode=updated.get("auto_mode"),
+            )
+
+        return _respond_card_sync_or_patch(_do_clear_ts_key, card_message_id, "已清除 API Key，恢复降级兜底模式")
 
     # Interactive MCP management panel actions (read/write permissions checked inside handler)
     mcp_resp = handle_mcp_card_action(action_value, chat_id, card_message_id, form_value=form_value)

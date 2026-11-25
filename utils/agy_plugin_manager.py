@@ -277,12 +277,29 @@ async def _exec_agy_plugin(argv_tail: List[str], timeout_seconds: float = 25.0) 
         return False, "", f"执行 `agy plugin` 异常：{e}"
 
 
+_AGY_PLUGIN_LIST_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]], Optional[str]]] = {}
+_AGY_PLUGIN_CACHE_TTL = 15.0
+
+
+def invalidate_agy_plugin_cache() -> None:
+    _AGY_PLUGIN_LIST_CACHE.clear()
+
+
 async def list_agy_plugins(
     workspace_dir: Optional[str] = None,
     plugin_roots: Optional[List[Tuple[str, str]]] = None,
     config_paths: Optional[List[str]] = None,
+    force_refresh: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """Return `(plugins, error_msg)` combining `agy plugin list --json` and filesystem discovery."""
+    """Return `(plugins, error_msg)` combining `agy plugin list --json` and filesystem discovery (15s cache)."""
+    import time as _time
+    use_cache = (plugin_roots is None and config_paths is None)
+    cache_key = os.path.abspath(workspace_dir) if (workspace_dir and os.path.isdir(workspace_dir)) else "__default__"
+    if use_cache and not force_refresh and cache_key in _AGY_PLUGIN_LIST_CACHE:
+        ts, cached_plugins, cached_err = _AGY_PLUGIN_LIST_CACHE[cache_key]
+        if (_time.time() - ts) < _AGY_PLUGIN_CACHE_TTL:
+            return [dict(p) for p in cached_plugins], cached_err
+
     local_map = _discover_local_agy_plugins(
         workspace_dir=workspace_dir,
         plugin_roots=plugin_roots,
@@ -350,6 +367,10 @@ async def list_agy_plugins(
     )
     if not ok and not plugins:
         return [], (stderr_s or stdout_s or "查询 Antigravity 原生插件列表失败")
+    if use_cache:
+        if len(_AGY_PLUGIN_LIST_CACHE) > 32:
+            _AGY_PLUGIN_LIST_CACHE.clear()
+        _AGY_PLUGIN_LIST_CACHE[cache_key] = (_time.time(), [dict(p) for p in plugins], None)
     return plugins, None
 
 
@@ -390,9 +411,11 @@ async def set_agy_plugin_enabled(name: str, enabled: bool, dir_name: str = "") -
     ok, out_s, err_s = await _exec_agy_plugin([sub, clean_name], timeout_seconds=20.0)
     verb = "已启用" if enabled else "已禁用"
     if ok:
+        invalidate_agy_plugin_cache()
         return True, f"{verb} Antigravity 原生插件 `{clean_name}`"
     # Fallback to config.json plugins map if CLI reports unknown/not installed in registry
     if _update_local_plugin_config_enabled(clean_name, enabled):
+        invalidate_agy_plugin_cache()
         return True, f"{verb}插件 `{clean_name}`（已写入全局插件配置）"
     return False, (err_s or out_s or f"{sub} 失败")
 
@@ -406,6 +429,7 @@ async def uninstall_agy_plugin(name: str, plugin_path: str = "", scope: str = ""
 
     ok, out_s, err_s = await _exec_agy_plugin(["uninstall", clean_name], timeout_seconds=25.0)
     if ok:
+        invalidate_agy_plugin_cache()
         return True, f"已卸载 Antigravity 原生插件 `{clean_name}`"
 
     # If it is a manually installed directory inside ~/.gemini/config/plugins/<clean_name>, remove it safely
@@ -414,6 +438,7 @@ async def uninstall_agy_plugin(name: str, plugin_path: str = "", scope: str = ""
     if candidate_dir.startswith(global_plugins_root + os.sep) and os.path.isdir(candidate_dir):
         try:
             shutil.rmtree(candidate_dir)
+            invalidate_agy_plugin_cache()
             return True, f"已移除全局插件目录 `{clean_name}`"
         except Exception as e:
             return False, f"移除插件目录失败：{e}"
@@ -432,6 +457,7 @@ async def install_agy_plugin(target: str) -> Tuple[bool, str]:
 
     ok, out_s, err_s = await _exec_agy_plugin(["install", clean_target], timeout_seconds=45.0)
     if ok:
+        invalidate_agy_plugin_cache()
         msg = out_s or err_s or f"已成功安装插件 `{clean_target}`"
         return True, msg[:360]
 
@@ -455,6 +481,7 @@ async def install_agy_plugin(target: str) -> Tuple[bool, str]:
                 return False, f"Git 克隆插件仓库失败：{(g_err or b'').decode('utf-8', errors='replace').strip()[:240]}"
             ok2, out2, err2 = await _exec_agy_plugin(["install", dest_dir], timeout_seconds=30.0)
             if ok2 or os.path.isfile(os.path.join(dest_dir, "plugin.json")):
+                invalidate_agy_plugin_cache()
                 return True, f"已从 GitHub 克隆并安装原生插件 `{repo_name}`"
             return False, (err2 or out2 or "安装失败")[:360]
         except Exception as e:
@@ -470,6 +497,7 @@ async def import_agy_plugins(source: str = "claude") -> Tuple[bool, str]:
     ok, out_s, err_s = await _exec_agy_plugin(["import", clean_src], timeout_seconds=30.0)
     combined = "\n".join(x for x in (out_s, err_s) if x).strip()
     if ok:
+        invalidate_agy_plugin_cache()
         return True, (combined or f"已完成从 `{clean_src}` 导入插件")[:360]
     return False, (combined or f"从 `{clean_src}` 导入插件失败")[:360]
 

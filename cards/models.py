@@ -24,13 +24,56 @@ def _parse_model_entry(entry_str):
     return entry_str, entry_str
 
 
-def build_model_panel(available_models, current_model, health_statuses=None):
+_TIER_SUFFIX_RE = re.compile(r"-(low|medium|med|high|xhigh|max)$", re.IGNORECASE)
+_LABEL_TIER_RE = re.compile(r"\s*\((Low|Medium|Med|High|xHigh|XHigh|Max)\)\s*$", re.IGNORECASE)
+_TIER_SHORT_LABELS = {
+    "low": "Low",
+    "medium": "Med",
+    "med": "Med",
+    "high": "High",
+    "xhigh": "xHigh",
+    "max": "Max",
+}
+
+
+def _split_model_base_and_tier(m_id: str, m_label: str):
+    """Extract (base_id, base_label, tier_short) if m_id ends with a reasoning tier suffix."""
+    m = _TIER_SUFFIX_RE.search(m_id)
+    if not m:
+        return m_id, m_label, ""
+    raw_tier = m.group(1).lower()
+    base_id = m_id[: m.start()]
+    base_label = _LABEL_TIER_RE.sub("", m_label).strip() or base_id
+    return base_id, base_label, _TIER_SHORT_LABELS.get(raw_tier, raw_tier.capitalize())
+
+
+def build_model_panel(
+    available_models,
+    current_model,
+    health_statuses=None,
+    agent_mode=None,
+    quota_data=None,
+):
     if health_statuses is None:
         try:
             from utils.model_health import get_all_health_statuses
             health_statuses = get_all_health_statuses()
         except Exception:
             health_statuses = {}
+
+    if quota_data is None:
+        try:
+            from utils.quota import get_cached_quota_snapshot
+            quota_data = get_cached_quota_snapshot(max_age=300.0)
+        except Exception:
+            quota_data = None
+
+    if not agent_mode:
+        try:
+            import config
+            agent_mode = getattr(config, "DEFAULT_AGENT_MODE", "auto") or "auto"
+        except Exception:
+            agent_mode = "auto"
 
     parsed_models = []
     for item in available_models:
@@ -50,12 +93,12 @@ def build_model_panel(available_models, current_model, health_statuses=None):
         else:
             group = "other"
         model_groups.setdefault(group, []).append((m_id, m_label))
-    
+
     group_meta = {
-        "gemini": {"icon": "💎", "title": "Gemini 系列", "color": "blue"},
-        "claude": {"icon": "🧠", "title": "Claude 系列", "color": "purple"},
-        "gpt":    {"icon": "⚡", "title": "GPT 系列", "color": "green"},
-        "other":  {"icon": "🔮", "title": "其他模型", "color": "grey"},
+        "gemini": {"icon": "💎", "title": "Gemini 系列", "hint": "gemini"},
+        "claude": {"icon": "🧠", "title": "Claude 系列", "hint": "claude"},
+        "gpt": {"icon": "⚡", "title": "GPT 系列", "hint": "gpt"},
+        "other": {"icon": "🔮", "title": "其他模型", "hint": "other"},
     }
 
     has_congested = any(
@@ -67,54 +110,184 @@ def build_model_panel(available_models, current_model, health_statuses=None):
         if has_congested
         else ""
     )
-    
+
+    mode_defs = [
+        ("auto", "⚡ Auto 自动"),
+        ("accept-edits", "📝 Accept-Edits"),
+        ("plan", "🧭 Plan 只读规划"),
+    ]
+    mode_buttons = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": f"✓ {m_lbl}" if agent_mode == m_key else m_lbl},
+            "type": "primary" if agent_mode == m_key else "default",
+            "value": {"action": "switch_agent_mode", "mode": m_key},
+        }
+        for m_key, m_lbl in mode_defs
+    ]
+
     elements = [
         {
             "tag": "markdown",
-            "content": f"🎯 **当前活跃模型**：`{current_model}`\n\n从下方选择一个模型，即可一键热切换：{congested_tip}"
-        }
+            "content": (
+                f"🎯 **当前活跃模型**：`{current_model}` · **执行模式**：`{agent_mode}`\n"
+                f"点击下方推理档位或模型按钮即可原地热切换：{congested_tip}"
+            ),
+        },
+        {
+            "tag": "action",
+            "layout": "flow",
+            "actions": mode_buttons,
+        },
     ]
-    
+
     for group_key in ["gemini", "claude", "gpt", "other"]:
         models = model_groups.get(group_key, [])
         if not models:
             continue
         meta = group_meta[group_key]
-        
+
+        quota_badge = ""
+        if quota_data and meta["hint"] != "other":
+            try:
+                from utils.quota import get_group_min_remaining_pct
+                min_pct = get_group_min_remaining_pct(quota_data, meta["hint"])
+                if min_pct is not None:
+                    q_icon = "🟢" if min_pct > 50 else ("🟡" if min_pct > 20 else "🔴")
+                    quota_badge = f"  ·  {q_icon} 配额余量 `{min_pct:.0f}%`"
+            except Exception:
+                pass
+
         elements.append({"tag": "hr"})
         elements.append({
             "tag": "markdown",
-            "content": f"{meta['icon']} **{meta['title']}**"
+            "content": f"{meta['icon']} **{meta['title']}**{quota_badge}"
         })
-        
-        actions = []
+
+        # 按底座家族聚合推理档位（>=2 个档位且均无 503 拥堵时折叠为紧凑矩阵行）
+        family_buckets = {}
+        family_order = []
         for m_id, m_label in models:
-            is_current = (m_id == current_model or m_label == current_model or m_id.lower() == current_model.lower())
-            h_info = (health_statuses or {}).get(m_id.lower(), {})
-            h_status = h_info.get("status", "unknown") if isinstance(h_info, dict) else "unknown"
-            if h_status == "unhealthy":
-                display = f"{'✅ ' if is_current else ''}🔴 {m_label} (503拥堵)"
-                btn_type = "danger"
-            elif h_status == "healthy":
-                display = f"{'✅ ' if is_current else ''}🟢 {m_label}"
-                btn_type = "primary" if is_current else "default"
+            base_id, base_label, tier_short = _split_model_base_and_tier(m_id, m_label)
+            if base_id not in family_buckets:
+                family_buckets[base_id] = {"base_label": base_label, "items": []}
+                family_order.append(base_id)
+            family_buckets[base_id]["items"].append((m_id, m_label, tier_short))
+
+        standalone_actions = []
+        for base_id in family_order:
+            bucket = family_buckets[base_id]
+            items = bucket["items"]
+            has_unhealthy_in_family = any(
+                isinstance((health_statuses or {}).get(mid.lower()), dict)
+                and (health_statuses or {})[mid.lower()].get("status") == "unhealthy"
+                for mid, _, _ in items
+            )
+            can_compact_row = (
+                len(items) >= 2
+                and all(bool(t_short) for _, _, t_short in items)
+                and not has_unhealthy_in_family
+            )
+            if can_compact_row:
+                if standalone_actions:
+                    elements.append({"tag": "action", "layout": "flow", "actions": standalone_actions})
+                    standalone_actions = []
+                row_btns = []
+                any_active_in_row = False
+                for m_id, m_label, t_short in items:
+                    is_current = (
+                        m_id == current_model
+                        or m_label == current_model
+                        or m_id.lower() == str(current_model).lower()
+                    )
+                    if is_current:
+                        any_active_in_row = True
+                    h_info = (health_statuses or {}).get(m_id.lower(), {})
+                    h_status = h_info.get("status", "unknown") if isinstance(h_info, dict) else "unknown"
+                    prefix = "✅ " if is_current else ("🟢 " if h_status == "healthy" else "")
+                    row_btns.append({
+                        "tag": "column",
+                        "width": "auto",
+                        "elements": [
+                            {
+                                "tag": "button",
+                                "size": "small",
+                                "text": {"tag": "plain_text", "content": f"{prefix}{t_short}"},
+                                "type": "primary" if is_current else "default",
+                                "value": {"action": "switch_model", "model": m_id},
+                            }
+                        ],
+                    })
+                title_md = (
+                    f"🌟 **{bucket['base_label']}**"
+                    if any_active_in_row
+                    else f"**{bucket['base_label']}**"
+                )
+                elements.append({
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "vertical_align": "center",
+                            "elements": [{"tag": "markdown", "content": title_md}],
+                        },
+                        *row_btns,
+                    ],
+                })
             else:
-                display = f"✅ {m_label}" if is_current else m_label
-                btn_type = "primary" if is_current else "default"
-            actions.append({
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": display},
-                "type": btn_type,
-                "value": {"action": "switch_model", "model": m_id}
+                for m_id, m_label, _ in items:
+                    is_current = (
+                        m_id == current_model
+                        or m_label == current_model
+                        or m_id.lower() == str(current_model).lower()
+                    )
+                    h_info = (health_statuses or {}).get(m_id.lower(), {})
+                    h_status = h_info.get("status", "unknown") if isinstance(h_info, dict) else "unknown"
+                    if h_status == "unhealthy":
+                        display = f"{'✅ ' if is_current else ''}🔴 {m_label} (503拥堵)"
+                        btn_type = "danger"
+                    elif h_status == "healthy":
+                        display = f"{'✅ ' if is_current else ''}🟢 {m_label}"
+                        btn_type = "primary" if is_current else "default"
+                    else:
+                        display = f"✅ {m_label}" if is_current else m_label
+                        btn_type = "primary" if is_current else "default"
+                    standalone_actions.append({
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": display},
+                        "type": btn_type,
+                        "value": {"action": "switch_model", "model": m_id},
+                    })
+
+        if standalone_actions:
+            elements.append({
+                "tag": "action",
+                "layout": "flow",
+                "actions": standalone_actions
             })
-        
-        elements.append({
-            "tag": "action",
-            "layout": "flow",
-            "actions": actions
-        })
-    
+
     elements.append({"tag": "hr"})
+    elements.append({
+        "tag": "action",
+        "layout": "flow",
+        "actions": [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "🔄 同步最新模型列表"},
+                "type": "default",
+                "value": {"action": "user_choice", "choice": "/model refresh", "label": "同步模型列表"},
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "📊 查看套餐额度"},
+                "type": "default",
+                "value": {"action": "user_choice", "choice": "/quota", "label": "查看套餐额度"},
+            },
+        ],
+    })
     elements.append(create_footer())
 
     return {

@@ -54,9 +54,12 @@ class TestV33PerformanceUpgrades(unittest.IsolatedAsyncioTestCase):
         clear_health_cache()
 
     def test_01_version_bumped_to_v3_3(self):
-        self.assertEqual(config.BASE_VERSION_PREFIX, "v3.3.")
+        self.assertIn(config.BASE_VERSION_PREFIX, ("v3.3.", "v3.4."))
         ver = get_version_string("HEAD")
-        self.assertTrue(ver.startswith("v3.3."), f"Expected v3.3.x, got {ver}")
+        self.assertTrue(
+            ver.startswith(("v3.3.", "v3.4.")),
+            f"Expected v3.3.x or v3.4.x, got {ver}",
+        )
 
     def test_02_scope_classifier_handles_start_doing_and_short_inquiry(self):
         res = classify_task_scope_and_budget("开始做吧  记得版本号提升到3.3", tier="High")

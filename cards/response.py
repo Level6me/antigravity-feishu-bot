@@ -70,7 +70,14 @@ def build_ai_response(
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": btn_label},
                 "type": "default",
-                "value": {"action": "user_choice", "choice": opt, "label": btn_label}
+                "value": {
+                    "action": "user_choice",
+                    "choice": opt,
+                    "label": btn_label,
+                    "from_choice_card": True,
+                    "question": str(choice_card_data.get("question", "请选择："))[:120],
+                    "reply_preview": (reply_text or "")[:1200],
+                },
             })
             if is_long_options:
                 markdown_options.append(f"- **{btn_label}**: {rest_text}")
@@ -188,6 +195,62 @@ def build_ai_response(
             "title": {"content": header_title, "tag": "plain_text"}
         },
         "elements": elements
+    }
+
+
+def build_choice_locked_card(
+    chosen_label: str,
+    chosen_value: str,
+    question: str = "已确认选项",
+    reply_preview: str = "",
+    current_model: str = "Default",
+    current_project: str = "默认",
+):
+    """Build in-place locked confirmation state after a user clicks a `[CHOICE_CARD]` button."""
+    elements = []
+    if reply_preview:
+        elements.append({
+            "tag": "markdown",
+            "content": sanitize_feishu_markdown(reply_preview),
+        })
+        elements.append({"tag": "hr"})
+    elements.append({
+        "tag": "markdown",
+        "content": (
+            f"**{sanitize_feishu_markdown(question)}**\n\n"
+            f"✅ **已确认选择**：`{sanitize_feishu_markdown(chosen_label)}`"
+            + (
+                f" — {sanitize_feishu_markdown(chosen_value)}"
+                if chosen_value and chosen_value != chosen_label
+                else ""
+            )
+            + "\n*（选项已锁定提交，正在继续执行后续处理...）*"
+        ),
+    })
+    elements.append({
+        "tag": "action",
+        "actions": [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"✅ 已选择：{chosen_label[:20]}"},
+                "type": "primary",
+                "disabled": True,
+            }
+        ],
+    })
+    proj_name = os.path.basename(current_project) if (current_project and current_project not in ("默认", "Default")) else "默认"
+    elements.append({
+        "tag": "markdown",
+        "content": f"<font color='grey'>🤖 模型: {current_model} | 🗂️ 项目: {proj_name}</font>",
+    })
+    elements.append(create_footer())
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "green",
+            "title": {"content": "✅ 选项已确认", "tag": "plain_text"},
+        },
+        "elements": elements,
     }
 
 

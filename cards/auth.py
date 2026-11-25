@@ -51,7 +51,25 @@ def _fmt_ts(ts):
         return "-"
 
 
-def build_auth_hint_card():
+def build_auth_hint_card(pending: bool = False):
+    if pending:
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "turquoise",
+                "title": {"content": "⏳ 权限申请已提交", "tag": "plain_text"},
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        "您的使用权限申请已实时推送给管理员审批。\n\n"
+                        "审批通过后系统将自动下发通知卡片，届时即可直接开始对话。"
+                    ),
+                },
+                create_footer(),
+            ],
+        }
     return {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -63,8 +81,19 @@ def build_auth_hint_card():
                 "tag": "markdown",
                 "content": (
                     "您好，当前飞书会话尚未获得本机器人的使用权限。\n\n"
-                    "如需使用，请发送 **`/auth`** 向管理员申请授权。"
+                    "点击下方按钮即可**一键向管理员申请授权**（或发送 **`/auth`**）："
                 ),
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🔑 一键申请使用权限"},
+                        "type": "primary",
+                        "value": {"action": "guest_request_auth"},
+                    }
+                ],
             },
             create_footer(),
         ],

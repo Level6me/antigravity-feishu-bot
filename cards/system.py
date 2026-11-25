@@ -107,6 +107,10 @@ def build_welcome_card():
                         "tag": "button",
                         "text": {"tag": "plain_text", "content": "🧹 清空上下文"},
                         "type": "default",
+                        "confirm": {
+                            "title": {"tag": "plain_text", "content": "确认清空当前对话上下文"},
+                            "text": {"tag": "plain_text", "content": "清空后将开启全新对话，确定继续吗？"}
+                        },
                         "value": {"action": "user_choice", "choice": "/clear", "label": "清空上下文"}
                     }
                 ]
@@ -230,7 +234,7 @@ _HELP_STATIC_COMMANDS = {
 }
 
 
-def build_help_card(is_admin_user: bool = False, plugins=None):
+def build_help_card(is_admin_user: bool = False, plugins=None, active_tab: str = "all"):
     if plugins is None:
         try:
             from plugin_manager import plugin_manager
@@ -238,81 +242,122 @@ def build_help_card(is_admin_user: bool = False, plugins=None):
         except Exception:
             plugins = []
 
+    valid_tabs = {"all", "common", "project", "eco", "admin"}
+    tab = active_tab if active_tab in valid_tabs else "all"
+    if tab == "admin" and not is_admin_user:
+        tab = "all"
+
+    tab_defs = [
+        ("all", "📋 全览"),
+        ("common", "⚡ 常用与模型"),
+        ("project", "📁 工程与调度"),
+        ("eco", "🧩 扩展生态"),
+    ]
+    if is_admin_user:
+        tab_defs.append(("admin", "🔐 运维管理"))
+
+    tab_buttons = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": label},
+            "type": "primary" if tab == t_key else "default",
+            "value": {"action": "help_switch_tab", "tab": t_key},
+        }
+        for t_key, label in tab_defs
+    ]
+
     elements = [
         {
             "tag": "markdown",
-            "content": "🤖 **欢迎使用 Antigravity 智能助理控制台！**\n包含系统的所有指令与交互菜单，点击下方按钮或发送斜杠指令即可快速调起操作："
+            "content": "🤖 **欢迎使用 Antigravity 智能助理控制台！**\n点击下方分类标签毫秒级切换视图，或点击底部按钮一键唤起面板：",
         },
-        {"tag": "hr"},
         {
-            "tag": "markdown",
-            "content": (
-                "🎛️ **模型与记忆控制：**\n"
-                "• `/model` : 弹出大模型选择面板，自由热切换模型\n"
-                "• `/context` : 查看对话上下文 Token 占用统计与容量看板\n"
-                "• `/memory` : 查看与管理您的个人偏好设定（支持交互式新增与删除）\n"
-                "• `/brain` : 查看 Antigravity 全局跨会话记忆库\n"
-                "• `/clear` : 彻底清空当前会话的上下文记忆，重新开始"
-            )
-        },
-        {"tag": "hr"},
-        {
-            "tag": "markdown",
-            "content": (
-                "📁 **项目与工作区工程：**\n"
-                "• `/project` : 弹出项目管理器（支持切换工作区、新建项目、设置路径与翻页）\n"
-                "• `/adddir [add|remove|clear|路径]` : 挂载/管理额外工作区目录（多仓库协同 `--add-dir`）\n"
-                "• `/mode [auto|accept-edits|plan]` : 切换 CLI 执行模式（支持 ACP 原地热切换）\n"
-                "• `/note` : 记事本管理看板（支持添加、查看详情、删除与清空）\n"
-                "• `/cron`（或 `/schedule`）: 定时任务与周期提醒调度中心\n"
-                "• `/quota` : 查询 Google AI Pro 套餐官方剩余额度看板\n"
-                "• `/status` : 查看机器人的运行状态、CPU/内存/Uptime 与日志"
-            )
-        },
-        {"tag": "hr"},
-        {
-            "tag": "markdown",
-            "content": (
-                "⚡ **系统管理、ACP 与生态扩展：**\n"
-                "• `/steer <追加内容>` : 向运行中的 ACP 会话排队追加指令（当前回合结束后自动续跑，无需 `/stop`）\n"
-                "• `/plugin [reload]` : 管理**机器人扩展插件**（查看、启停与热重载）\n"
-                "• `/skills [list|add|search|use|unuse|enable|disable|install ...]` : 弹出 Antigravity Skills 技能管理中心（支持浏览、搜索、会话挂载、启停、在线创建与 GitHub 安装）\n"
-                "• `/agyplugin [list|install|validate|enable|disable|uninstall|import ...]` : 弹出 `agy` 原生 CLI 插件交互式管理中心\n"
-                "• `/mcp [list|enable|disable|remove|add ...]` : 弹出 `agy` 原生 MCP 服务管理中心\n"
-                "• `/stop` : 中止当前会话中正在执行的后台任务\n"
-                "• `/s1` : 打开 System One 决策网关控制台\n"
-                "• `/ping` : 检测机器人在线状态与响应连通性\n"
-                "• `/update` : 检查并更新机器人服务至最新版本\n"
-                "• `/help` : 显示此帮助卡片"
-            )
+            "tag": "action",
+            "layout": "flow",
+            "actions": tab_buttons,
         },
     ]
 
-    # 动态渲染已启用的第三方/硬件扩展插件命令（自动去重内置核心指令）
-    dynamic_plugin_lines = []
-    for p in (plugins or []):
-        if not isinstance(p, dict) or not p.get("enabled", True):
-            continue
-        raw_cmds = p.get("commands") or []
-        extra_cmds = [
-            c.strip()
-            for c in raw_cmds
-            if isinstance(c, str) and c.strip() and c.strip().lower() not in _HELP_STATIC_COMMANDS
-        ]
-        if not extra_cmds:
-            continue
-        cmd_str = " ".join(f"`{c}`" for c in extra_cmds)
-        p_name = p.get("name") or p.get("id") or "扩展插件"
-        dynamic_plugin_lines.append(f"• {cmd_str} : {p_name}")
+    if tab in ("all", "common"):
+        elements.extend([
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": (
+                    "🎛️ **模型与记忆控制：**\n"
+                    "• `/model` : 弹出大模型矩阵控制台（支持推理档位、配额余量与执行模式热切）\n"
+                    "• `/context` : 查看对话上下文 Token 占用统计与容量看板\n"
+                    "• `/memory` : 查看与管理您的个人偏好设定（支持卡片内联新增与擦除）\n"
+                    "• `/brain` : 查看 Antigravity 全局跨会话记忆库\n"
+                    "• `/clear` : 彻底清空当前会话的上下文记忆，重新开始"
+                ),
+            },
+        ])
 
-    if dynamic_plugin_lines:
-        elements.append({"tag": "hr"})
-        elements.append({
-            "tag": "markdown",
-            "content": "🧩 **已加载扩展插件指令：**\n" + "\n".join(dynamic_plugin_lines),
-        })
+    if tab in ("all", "project"):
+        elements.extend([
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": (
+                    "📁 **项目与工作区工程：**\n"
+                    "• `/project` : 弹出项目管理器（支持内联新建/克隆项目、设根目录、置顶切换与翻页）\n"
+                    "• `/adddir [add|remove|clear|路径]` : 挂载/管理额外工作区目录（多仓库协同 `--add-dir`）\n"
+                    "• `/mode [auto|accept-edits|plan]` : 切换 CLI 执行模式（支持 ACP 原地热切换）\n"
+                    "• `/note` : 记事本看板（支持内联添加、原卡展开详情、删除与清空）\n"
+                    "• `/cron`（或 `/schedule`）: 定时任务与周期 AI 巡检调度中心（支持可视化表单创建）\n"
+                    "• `/quota` : 查询 Google AI Pro 套餐官方剩余额度看板\n"
+                    "• `/status` : 秒级查看机器人 CPU/内存/温池会话与 Git 状态"
+                ),
+            },
+        ])
 
-    if is_admin_user:
+    if tab in ("all", "eco"):
+        elements.extend([
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": (
+                    "⚡ **系统管理、ACP 与生态扩展：**\n"
+                    "• `/steer <追加内容>` : 向运行中的 ACP 会话排队追加指令（当前回合结束后自动续跑，无需 `/stop`）\n"
+                    "• `/plugin [reload]` : 管理**机器人扩展插件**（查看、GitHub 安装与热重载）\n"
+                    "• `/skills [list|add|search|use|unuse|enable|disable|install ...]` : 弹出 Antigravity Skills 技能管理中心\n"
+                    "• `/agyplugin [list|install|validate|enable|disable|uninstall|import ...]` : 弹出 `agy` 原生 CLI 插件管理中心\n"
+                    "• `/mcp [list|enable|disable|remove|add ...]` : 弹出 `agy` 原生 MCP 服务管理中心\n"
+                    "• `/stop` : 中止当前会话中正在执行的后台任务\n"
+                    "• `/s1` : 打开 System One 决策网关控制台（支持表单无痕配置凭据）\n"
+                    "• `/ping` : 检测机器人在线状态与响应连通性\n"
+                    "• `/update` : 检查并更新机器人服务至最新版本\n"
+                    "• `/help` : 显示此帮助卡片"
+                ),
+            },
+        ])
+
+        # 动态渲染已启用的第三方/硬件扩展插件命令（自动去重内置核心指令）
+        dynamic_plugin_lines = []
+        for p in (plugins or []):
+            if not isinstance(p, dict) or not p.get("enabled", True):
+                continue
+            raw_cmds = p.get("commands") or []
+            extra_cmds = [
+                c.strip()
+                for c in raw_cmds
+                if isinstance(c, str) and c.strip() and c.strip().lower() not in _HELP_STATIC_COMMANDS
+            ]
+            if not extra_cmds:
+                continue
+            cmd_str = " ".join(f"`{c}`" for c in extra_cmds)
+            p_name = p.get("name") or p.get("id") or "扩展插件"
+            dynamic_plugin_lines.append(f"• {cmd_str} : {p_name}")
+
+        if dynamic_plugin_lines:
+            elements.append({"tag": "hr"})
+            elements.append({
+                "tag": "markdown",
+                "content": "🧩 **已加载扩展插件指令：**\n" + "\n".join(dynamic_plugin_lines),
+            })
+
+    if is_admin_user and tab in ("all", "admin"):
         elements.append({"tag": "hr"})
         elements.append({
             "tag": "markdown",
@@ -346,6 +391,12 @@ def build_help_card(is_admin_user: bool = False, plugins=None):
                     "text": {"tag": "plain_text", "content": "🤖 切换模型"},
                     "type": "default",
                     "value": {"action": "user_choice", "choice": "/model", "label": "切换模型"}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "⏱️ 计划任务"},
+                    "type": "default",
+                    "value": {"action": "open_cron_panel"}
                 },
                 {
                     "tag": "button",
@@ -386,23 +437,32 @@ def build_help_card(is_admin_user: bool = False, plugins=None):
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "🧹 清空上下文"},
-                    "type": "default",
+                    "type": "danger",
+                    "confirm": {
+                        "title": {"tag": "plain_text", "content": "确认清空当前对话上下文"},
+                        "text": {"tag": "plain_text", "content": "清空后将开启全新对话（项目长效记忆不受影响），确定继续吗？"}
+                    },
                     "value": {"action": "user_choice", "choice": "/clear", "label": "清空上下文"}
                 }
             ]
         },
-        {"tag": "hr"},
-        {
-            "tag": "markdown",
-            "content": (
-                "⚙️ **系统功能特性：**\n"
-                "• **多模态文件解析**：支持处理 PDF、Word、语音、视频与图片格式\n"
-                "• **受控终端执行**：支持受控执行终端命令与工作区文件读写\n"
-                "• **网页内容解析**：输入网页链接可自动提取关键内容摘要"
-            )
-        },
-        create_footer()
     ])
+
+    if tab == "all":
+        elements.extend([
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": (
+                    "⚙️ **系统功能特性：**\n"
+                    "• **多模态文件解析**：支持处理 PDF、Word、语音、视频与图片格式\n"
+                    "• **受控终端执行**：支持受控执行终端命令与工作区文件读写\n"
+                    "• **网页内容解析**：输入网页链接可自动提取关键内容摘要"
+                )
+            },
+        ])
+
+    elements.append(create_footer())
 
     return {
         "config": {"wide_screen_mode": True},
@@ -414,63 +474,69 @@ def build_help_card(is_admin_user: bool = False, plugins=None):
     }
 
 
-def build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs, git_status="未知", bot_stats=None):
+def build_status_card(cpu, mem_mb, uptime_str, status, restarts, err_logs="", git_status="未知", bot_stats=None):
     status_emoji = "🟢" if status == "online" else "🔴"
     if not bot_stats:
         bot_stats = {"total_requests": 0, "success_requests": 0, "failed_requests": 0}
-        
+
+    warm_sessions = bot_stats.get("warm_sessions")
+    load_avg = bot_stats.get("load_avg", "")
+    warm_line = f"\n- **ACP 温池活跃会话**：{warm_sessions} 个" if warm_sessions is not None else ""
+    load_line = f"\n- **系统平均负载 (1/5/15m)**：`{load_avg}`" if load_avg else ""
+
     elements = [
         {
             "tag": "markdown",
             "content": f"**服务状态**：{status_emoji} {status.upper()}\n**运行时长**：{uptime_str}\n**重启次数**：{restarts} 次"
         },
-        {
-            "tag": "hr"
-        },
+        {"tag": "hr"},
         {
             "tag": "markdown",
             "content": f"**🌿 代码库状态 (Git)**\n{git_status}"
         },
-        {
-            "tag": "hr"
-        },
+        {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": f"**📈 机器人请求统计 (自上次重启以来)**\n- **总请求数**: {bot_stats.get('total_requests', 0)}\n- **成功处理**: {bot_stats.get('success_requests', 0)}\n- **执行异常**: {bot_stats.get('failed_requests', 0)}"
+            "content": (
+                f"**📈 机器人运行与算力统计 (自上次启动以来)**\n"
+                f"- **总请求数**: {bot_stats.get('total_requests', 0)} "
+                f"(成功 {bot_stats.get('success_requests', 0)} · 异常 {bot_stats.get('failed_requests', 0)})\n"
+                f"- **累计消耗 Tokens**: {bot_stats.get('total_tokens', 0):,}"
+            )
         },
-        {
-            "tag": "hr"
-        },
-        {
-            "tag": "markdown",
-            "content": f"**💡 模型算力消耗统计 (自上次重启以来 · 自带模型)**\n- **累计消耗 Tokens**: {bot_stats.get('total_tokens', 0):,}"
-        },
-        {
-            "tag": "hr"
-        },
+        {"tag": "hr"},
         {
             "tag": "markdown",
-            "content": f"**💻 资源占用**\n- **CPU**：{cpu}%\n- **内存**：{mem_mb} MB"
-        }
+            "content": f"**💻 进程与宿主资源占用**\n- **CPU**：{cpu}% · **常驻内存 (RSS)**：{mem_mb} MB{warm_line}{load_line}"
+        },
+        {"tag": "hr"},
+        {
+            "tag": "action",
+            "layout": "flow",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔄 秒级刷新"},
+                    "type": "primary",
+                    "value": {"action": "refresh_status", "fetch_remote": False}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔍 检查远端更新"},
+                    "type": "default",
+                    "value": {"action": "refresh_status", "fetch_remote": True}
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "📊 查看配额"},
+                    "type": "default",
+                    "value": {"action": "user_choice", "choice": "/quota", "label": "查看配额"}
+                }
+            ]
+        },
+        create_footer(),
     ]
-    
-    elements.append({
-        "tag": "hr"
-    })
-    elements.append({
-        "tag": "action",
-        "actions": [
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "🔄 刷新状态"},
-                "type": "primary",
-                "value": {"action": "refresh_status"}
-            }
-        ]
-    })
-    
-    elements.append(create_footer())
-    
+
     return {
         "config": {"wide_screen_mode": True},
         "header": {

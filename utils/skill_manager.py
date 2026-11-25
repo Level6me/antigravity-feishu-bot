@@ -208,12 +208,41 @@ def _inspect_skill_dir(skill_dir: str, scope: str) -> Optional[Dict[str, Any]]:
     }
 
 
+_SKILL_LIST_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_SKILL_CACHE_TTL = 15.0
+
+
+def invalidate_skill_cache() -> None:
+    _SKILL_LIST_CACHE.clear()
+
+
 def list_skills(
     workspace_dir: Optional[str] = None,
     search_query: str = "",
     extra_roots: Optional[List[Tuple[str, str]]] = None,
+    force_refresh: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Discover and deduplicate all Antigravity skills across workspace, global, and builtin roots."""
+    """Discover and deduplicate all Antigravity skills across workspace, global, and builtin roots (15s snapshot cache)."""
+    import time as _time
+    cache_key = os.path.abspath(workspace_dir) if (workspace_dir and os.path.isdir(workspace_dir)) else "__default__"
+    use_cache = extra_roots is None
+    now = _time.time()
+
+    if use_cache and not force_refresh and cache_key in _SKILL_LIST_CACHE:
+        ts, cached_items = _SKILL_LIST_CACHE[cache_key]
+        if (now - ts) < _SKILL_CACHE_TTL:
+            items = [dict(x) for x in cached_items]
+            q = (search_query or "").strip().lower()
+            if q:
+                items = [
+                    s
+                    for s in items
+                    if q in str(s.get("name", "")).lower()
+                    or q in str(s.get("dir_name", "")).lower()
+                    or q in str(s.get("description", "")).lower()
+                ]
+            return items
+
     roots = _candidate_skill_roots(workspace_dir=workspace_dir, extra_roots=extra_roots)
     by_key: Dict[str, Dict[str, Any]] = {}
     seen_real_dirs = set()
@@ -252,6 +281,10 @@ def list_skills(
         by_key.values(),
         key=lambda s: (scope_rank.get(str(s.get("scope", "global")), 9), str(s.get("name", "")).lower()),
     )
+    if use_cache:
+        if len(_SKILL_LIST_CACHE) > 32:
+            _SKILL_LIST_CACHE.clear()
+        _SKILL_LIST_CACHE[cache_key] = (now, [dict(x) for x in items])
 
     q = (search_query or "").strip().lower()
     if q:
@@ -315,6 +348,7 @@ def set_skill_enabled(
             return False, f"切换技能状态失败：{e}"
 
     if toggled_count > 0:
+        invalidate_skill_cache()
         verb = "已启用" if enabled else "已禁用"
         return True, f"{verb}技能 `{info['name']}`"
     return False, f"未能更新技能 `{info['name']}` 状态"
@@ -371,6 +405,7 @@ def create_custom_skill(
             os.remove(disabled_path)
         with open(skill_md_path, "w", encoding="utf-8") as f:
             f.write(md_content)
+        invalidate_skill_cache()
         return True, f"已在{scope_label}创建/更新技能 `{clean_name}`"
     except Exception as e:
         return False, f"写入技能文件失败：{e}"
@@ -400,6 +435,7 @@ def remove_custom_skill(
                 return False, f"删除技能目录失败：{e}"
 
     if removed_dirs > 0:
+        invalidate_skill_cache()
         return True, f"已移除技能 `{info['name']}`"
     return False, f"未能移除技能 `{info['name']}`"
 
@@ -471,6 +507,7 @@ async def install_skill_from_source(
                     shutil.rmtree(target_dir)
                 shutil.copytree(s_dir, target_dir)
             installed_names.append(s_name)
+        invalidate_skill_cache()
         return True, f"已从本地目录安装 {len(installed_names)} 个技能至{scope_label}：`{', '.join(installed_names[:8])}`"
 
     # Support GitHub URLs including `/tree/<branch>/<subpath>`
@@ -531,6 +568,7 @@ async def install_skill_from_source(
                 shutil.rmtree(gt_dir, ignore_errors=True)
             installed_names.append(s_name)
 
+        invalidate_skill_cache()
         return True, f"已从 GitHub 安装 {len(installed_names)} 个技能至{scope_label}：`{', '.join(installed_names[:8])}`"
     except asyncio.TimeoutError:
         return False, "克隆 GitHub 技能仓库超时（60s）。"

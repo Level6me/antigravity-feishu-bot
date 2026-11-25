@@ -29,6 +29,8 @@ _PORT_CACHE = None  # (timestamp, port)
 _PORT_CACHE_TTL = 300
 _AGY_VERSION_CACHE = None
 _LSP_FAST_HINT = {"port": None, "scheme": "https", "csrf": None, "ts": 0.0}
+_QUOTA_RESULT_CACHE = {"ts": 0.0, "data": None}
+_QUOTA_RESULT_CACHE_TTL = 20.0
 
 
 def get_agy_version() -> str:
@@ -341,9 +343,40 @@ def _merge_quota_responses(primary, secondary):
     return result
 
 
-def fetch_quota():
-    """Return quota data dict (or None). Uses local LSP first, remote fallback, and merges if needed."""
+def get_cached_quota_snapshot(max_age: float = 120.0) -> Optional[dict]:
+    """Return in-memory cached quota dict without any I/O if fresher than max_age seconds."""
+    cached = _QUOTA_RESULT_CACHE.get("data")
+    ts = float(_QUOTA_RESULT_CACHE.get("ts") or 0.0)
+    if cached and (time.time() - ts) <= max_age:
+        return cached
+    return None
+
+
+def get_group_min_remaining_pct(quota_data: Optional[dict], model_hint: str) -> Optional[float]:
+    """Return minimum remaining quota percentage (0.0~100.0) for a model family, or None if unavailable."""
+    target_groups = _find_target_quota_groups(quota_data, model_hint)
+    if not target_groups:
+        return None
+    pcts = []
+    for g in target_groups:
+        for b in (g.get("buckets") or []):
+            if isinstance(b, dict) and "remainingFraction" in b:
+                try:
+                    pcts.append(round(float(b["remainingFraction"]) * 100.0, 1))
+                except Exception:
+                    pass
+    return min(pcts) if pcts else None
+
+
+def fetch_quota(force_refresh: bool = False):
+    """Return quota data dict (or None). Uses local LSP first, remote fallback, and merges if needed.
+    Preserves port/version/CSRF warm caches even on force_refresh=True (no destructive module reload).
+    """
     global _PORT_CACHE
+    now = time.time()
+    if not force_refresh and _QUOTA_RESULT_CACHE["data"] and (now - _QUOTA_RESULT_CACHE["ts"]) < _QUOTA_RESULT_CACHE_TTL:
+        return _QUOTA_RESULT_CACHE["data"]
+
     local_data = None
     port = discover_lsp_port()
     if port is not None:
@@ -353,17 +386,24 @@ def fetch_quota():
             has_argon = any("argon" in g.get("displayName", "").lower() for g in groups if isinstance(g, dict))
             # If local probe returned Gemini, 3P, and Argon groups, it is complete
             if len(groups) >= 3 or (len(groups) >= 2 and has_argon):
+                _QUOTA_RESULT_CACHE["data"] = local_data
+                _QUOTA_RESULT_CACHE["ts"] = time.time()
                 return local_data
         else:
             _PORT_CACHE = None
 
     remote_data = _fetch_remote_fallback()
     if not local_data:
-        return remote_data
-    if not remote_data:
-        return local_data
+        final_res = remote_data
+    elif not remote_data:
+        final_res = local_data
+    else:
+        final_res = _merge_quota_responses(local_data, remote_data)
 
-    return _merge_quota_responses(local_data, remote_data)
+    if final_res:
+        _QUOTA_RESULT_CACHE["data"] = final_res
+        _QUOTA_RESULT_CACHE["ts"] = time.time()
+    return final_res
 
 
 def format_duration(seconds: int) -> str:

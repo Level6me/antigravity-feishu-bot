@@ -48,6 +48,7 @@ class CardBuilder:
 
     build_ai_response = staticmethod(response.build_ai_response)
     build_budget_pause_card = staticmethod(response.build_budget_pause_card)
+    build_choice_locked_card = staticmethod(response.build_choice_locked_card)
 
     build_dir_browser_card = staticmethod(projects.build_dir_browser_card)
 

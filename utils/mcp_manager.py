@@ -322,21 +322,42 @@ async def _exec_agy_mcp(argv_tail: List[str], timeout_seconds: float = 25.0) -> 
         return False, "", f"执行 `agy mcp` 异常：{e}"
 
 
+_MCP_LIST_CACHE: Dict[str, Any] = {"ts": 0.0, "servers": None, "err": None}
+_MCP_CACHE_TTL = 15.0
+
+
+def invalidate_mcp_cache() -> None:
+    _MCP_LIST_CACHE["ts"] = 0.0
+    _MCP_LIST_CACHE["servers"] = None
+
+
 async def list_mcp_servers(
     config_paths: Optional[List[str]] = None,
+    force_refresh: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """Return `(servers, error_message)` combining `agy mcp list` and local config metadata."""
+    """Return `(servers, error_message)` combining `agy mcp list` and local config metadata (15s snapshot cache)."""
+    import time as _time
+    use_cache = config_paths is None
+    if use_cache and not force_refresh and _MCP_LIST_CACHE["servers"] is not None:
+        if (_time.time() - float(_MCP_LIST_CACHE["ts"])) < _MCP_CACHE_TTL:
+            return [dict(s) for s in _MCP_LIST_CACHE["servers"]], _MCP_LIST_CACHE["err"]
+
     cfg_meta = _load_local_mcp_config_metadata(config_paths=config_paths)
     ok, stdout_s, stderr_s = await _exec_agy_mcp(["list"], timeout_seconds=15.0)
     if not ok:
         # If CLI fails (e.g., sandbox read-only), fall back to local config metadata if present
         if cfg_meta:
-            return sorted(cfg_meta.values(), key=lambda x: x["name"].lower()), None
+            res = sorted(cfg_meta.values(), key=lambda x: x["name"].lower())
+            if use_cache:
+                _MCP_LIST_CACHE.update({"ts": _time.time(), "servers": res, "err": None})
+            return res, None
         err = mask_sensitive_text(stderr_s or stdout_s or "查询 MCP 列表失败")
         return [], err
 
     cli_servers = parse_agy_mcp_list_output(stdout_s)
     if not cli_servers and "no mcp servers configured" in stdout_s.lower():
+        if use_cache:
+            _MCP_LIST_CACHE.update({"ts": _time.time(), "servers": [], "err": None})
         return [], None
 
     merged_by_name: Dict[str, Dict[str, Any]] = {}
@@ -359,7 +380,10 @@ async def list_mcp_servers(
     if not merged_by_name and cfg_meta:
         merged_by_name.update(cfg_meta)
 
-    return sorted(merged_by_name.values(), key=lambda x: x["name"].lower()), None
+    res = sorted(merged_by_name.values(), key=lambda x: x["name"].lower())
+    if use_cache:
+        _MCP_LIST_CACHE.update({"ts": _time.time(), "servers": res, "err": None})
+    return res, None
 
 
 async def set_mcp_server_enabled(name: str, enabled: bool) -> Tuple[bool, str]:
@@ -369,6 +393,7 @@ async def set_mcp_server_enabled(name: str, enabled: bool) -> Tuple[bool, str]:
     action = "enable" if enabled else "disable"
     ok, out_s, err_s = await _exec_agy_mcp([action, clean_name], timeout_seconds=20.0)
     if ok:
+        invalidate_mcp_cache()
         verb = "已启用" if enabled else "已禁用"
         return True, f"{verb} MCP 服务 `{clean_name}`"
     return False, mask_sensitive_text(err_s or out_s or f"{action} 失败")
@@ -380,6 +405,7 @@ async def remove_mcp_server(name: str) -> Tuple[bool, str]:
         return False, f"非法 MCP 服务名称：`{clean_name}`"
     ok, out_s, err_s = await _exec_agy_mcp(["remove", clean_name], timeout_seconds=20.0)
     if ok:
+        invalidate_mcp_cache()
         return True, f"已移除 MCP 服务 `{clean_name}`"
     return False, mask_sensitive_text(err_s or out_s or "移除失败")
 
@@ -456,6 +482,7 @@ async def add_mcp_server(
 
     ok, out_s, err_s = await _exec_agy_mcp(argv, timeout_seconds=25.0)
     if ok:
+        invalidate_mcp_cache()
         return True, f"已添加/更新 MCP 服务 `{clean_name}`（`{t_norm}`）"
     return False, mask_sensitive_text(err_s or out_s or "添加失败")
 

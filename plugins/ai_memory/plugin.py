@@ -21,14 +21,19 @@ class AIMemoryPlugin(BasePlugin):
                 import config
                 proj_dir = (session_data or {}).get("project", "默认")
                 conv_id = (session_data or {}).get("conversation", "")
+                proj_summary = get_project_memory_summary(proj_dir, session_data=session_data)
                 if conv_id:
                     tx_path = config.get_transcript_path(conv_id)
-                    inspect_and_backfill_transcript(tx_path, project_dir=proj_dir, chat_id=chat_id, conv_id=conv_id)
-                proj_summary = get_project_memory_summary(proj_dir, session_data=session_data)
+                    asyncio.get_running_loop().run_in_executor(
+                        None,
+                        lambda: inspect_and_backfill_transcript(
+                            tx_path, project_dir=proj_dir, chat_id=chat_id, conv_id=conv_id
+                        ),
+                    )
             except Exception as e:
                 log.warning(f"[Plugin:ai_memory] Failed to load project memory summary: {e}")
             card = CardBuilder.build_memory_card(memories, project_memory_summary=proj_summary)
-            self.send_reply_card(message_id, card)
+            await asyncio.get_running_loop().run_in_executor(None, lambda: self.send_reply_card(message_id, card))
             return True
         return False
 

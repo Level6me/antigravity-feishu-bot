@@ -70,9 +70,14 @@ async def _render_and_patch_skill_card(
     notice: str = "",
     notice_level: str = "info",
     needs_session_reload: bool = False,
+    force_refresh: bool = False,
+    do_patch: bool = True,
 ):
     ws_dir, pinned, _ = await _resolve_chat_context(chat_id)
-    skills = list_skills(workspace_dir=ws_dir, search_query=search_query)
+    try:
+        skills = list_skills(workspace_dir=ws_dir, search_query=search_query, force_refresh=force_refresh)
+    except TypeError:
+        skills = list_skills(workspace_dir=ws_dir, search_query=search_query)
     card = CardBuilder.build_skill_panel_card(
         skills,
         active_tab=active_tab,
@@ -87,11 +92,49 @@ async def _render_and_patch_skill_card(
         is_admin_user=is_admin(chat_id),
         workspace_dir=ws_dir,
     )
-    if card_message_id:
+    if do_patch and card_message_id:
         await asyncio.get_running_loop().run_in_executor(
             None, lambda: patch_interactive_card_sdk(card_message_id, card)
         )
     return card
+
+
+def _smart_skill_read_response(
+    chat_id: str,
+    card_message_id: str,
+    toast_text: str,
+    toast_type: str = "info",
+    **render_kwargs,
+) -> P2CardActionTriggerResponse:
+    if asyncio._get_running_loop() is None and app_state.main_loop and app_state.main_loop.is_running():
+        fut = asyncio.run_coroutine_threadsafe(
+            _render_and_patch_skill_card(chat_id, card_message_id, do_patch=False, **render_kwargs),
+            app_state.main_loop,
+        )
+        try:
+            card = fut.result(timeout=1.4)
+            return P2CardActionTriggerResponse({
+                "card": {"type": "raw", "data": card},
+                "toast": {"type": toast_type, "content": toast_text},
+            })
+        except Exception:
+            async def _late_patch():
+                try:
+                    c = await asyncio.wrap_future(fut)
+                    if card_message_id and c:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: patch_interactive_card_sdk(card_message_id, c)
+                        )
+                except Exception:
+                    pass
+            asyncio.run_coroutine_threadsafe(_late_patch(), app_state.main_loop)
+            return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_text}})
+
+    asyncio.run_coroutine_threadsafe(
+        _render_and_patch_skill_card(chat_id, card_message_id, do_patch=True, **render_kwargs),
+        app_state.main_loop,
+    )
+    return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_text}})
 
 
 def handle_skill_card_action(
@@ -131,112 +174,79 @@ def _dispatch_skill_action(
         f_scope = str(val.get("filter") or "all")
         page = max(1, int(val.get("page") or 1))
         q = str(val.get("q") or "")
-
-        async def _do_tab():
-            await _render_and_patch_skill_card(
-                chat_id, card_message_id, active_tab=tab, filter_scope=f_scope, page=page, search_query=q
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_tab(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已切换视图"}})
+        return _smart_skill_read_response(
+            chat_id, card_message_id, "已切换视图", active_tab=tab, filter_scope=f_scope, page=page, search_query=q
+        )
 
     if action == "skill_filter":
         f_scope = str(val.get("filter") or "all")
         q = str(val.get("q") or "")
-
-        async def _do_filter():
-            await _render_and_patch_skill_card(
-                chat_id, card_message_id, active_tab="list", filter_scope=f_scope, page=1, search_query=q
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_filter(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已更新筛选"}})
+        return _smart_skill_read_response(
+            chat_id, card_message_id, "已更新筛选", active_tab="list", filter_scope=f_scope, page=1, search_query=q
+        )
 
     if action == "skill_page":
         f_scope = str(val.get("filter") or "all")
         page = max(1, int(val.get("page") or 1))
         q = str(val.get("q") or "")
-
-        async def _do_page():
-            await _render_and_patch_skill_card(
-                chat_id, card_message_id, active_tab="list", filter_scope=f_scope, page=page, search_query=q
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_page(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"第 {page} 页"}})
+        return _smart_skill_read_response(
+            chat_id, card_message_id, f"第 {page} 页", active_tab="list", filter_scope=f_scope, page=page, search_query=q
+        )
 
     if action == "skill_detail":
         name = str(val.get("name") or "")
         f_scope = str(val.get("filter") or "all")
         page = max(1, int(val.get("page") or 1))
         q = str(val.get("q") or "")
-
-        async def _do_detail():
-            await _render_and_patch_skill_card(
-                chat_id,
-                card_message_id,
-                active_tab="list",
-                filter_scope=f_scope,
-                page=page,
-                expanded_name=name,
-                search_query=q,
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_detail(), app_state.main_loop)
-        return P2CardActionTriggerResponse(
-            {"toast": {"type": "info", "content": f"已展开 {name} 详情" if name else "已收起详情"}}
+        return _smart_skill_read_response(
+            chat_id,
+            card_message_id,
+            f"已展开 {name} 详情" if name else "已收起详情",
+            active_tab="list",
+            filter_scope=f_scope,
+            page=page,
+            expanded_name=name,
+            search_query=q,
         )
 
     if action == "skill_search_submit":
         f_scope = str(val.get("filter") or "all")
         q = str(form_value.get("skill_query") or "").strip()
-
-        async def _do_search():
-            await _render_and_patch_skill_card(
-                chat_id,
-                card_message_id,
-                active_tab="list",
-                filter_scope=f_scope,
-                page=1,
-                search_query=q,
-                notice=f"已按关键词「`{q}`」过滤技能列表" if q else "已显示全部技能",
-                notice_level="info",
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_search(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"搜索：{q}" if q else "已清除搜索"}})
+        return _smart_skill_read_response(
+            chat_id,
+            card_message_id,
+            f"搜索：{q}" if q else "已清除搜索",
+            active_tab="list",
+            filter_scope=f_scope,
+            page=1,
+            search_query=q,
+            notice=f"已按关键词「`{q}`」过滤技能列表" if q else "已显示全部技能",
+            notice_level="info",
+        )
 
     if action == "skill_search_clear":
         f_scope = str(val.get("filter") or "all")
-
-        async def _do_clear_search():
-            await _render_and_patch_skill_card(
-                chat_id, card_message_id, active_tab="list", filter_scope=f_scope, page=1, search_query=""
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_clear_search(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已清除搜索过滤"}})
+        return _smart_skill_read_response(
+            chat_id, card_message_id, "已清除搜索过滤", active_tab="list", filter_scope=f_scope, page=1, search_query=""
+        )
 
     if action == "skill_refresh":
         tab = str(val.get("tab") or "list")
         f_scope = str(val.get("filter") or "all")
         page = max(1, int(val.get("page") or 1))
         q = str(val.get("q") or "")
-
-        async def _do_refresh():
-            await _render_and_patch_skill_card(
-                chat_id,
-                card_message_id,
-                active_tab=tab,
-                filter_scope=f_scope,
-                page=page,
-                search_query=q,
-                notice="已重新扫描并刷新技能库",
-                notice_level="info",
-            )
-
-        asyncio.run_coroutine_threadsafe(_do_refresh(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在刷新技能库..."}})
+        return _smart_skill_read_response(
+            chat_id,
+            card_message_id,
+            "已刷新技能库",
+            active_tab=tab,
+            filter_scope=f_scope,
+            page=page,
+            search_query=q,
+            notice="已重新扫描并刷新技能库",
+            notice_level="info",
+            force_refresh=True,
+        )
 
     if action == "skill_pin_toggle":
         name = str(val.get("name") or "").strip()
