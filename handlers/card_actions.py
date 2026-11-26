@@ -1,5 +1,6 @@
 """Feishu interactive card action callbacks."""
 import asyncio
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 import json
 import os
 import re
@@ -34,21 +35,73 @@ chat_queues = app_state.chat_queues
 chat_workers = app_state.chat_workers
 
 
+def _safe_int(value, default: int = 0) -> int:
+    """Safely parse integer parameters from card action payloads without crashing callbacks."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_card_response(
+    card: dict,
+    toast_type: str,
+    toast_content: str,
+    card_message_id: str = "",
+    force_v2: bool = False,
+) -> P2CardActionTriggerResponse:
+    """Build a P2CardActionTriggerResponse with automatic Schema 2.0 card adaptation."""
+    if card:
+        from cards.common import adapt_card_for_message
+        adapted = adapt_card_for_message(card, message_id=card_message_id, force_v2=force_v2)
+        return P2CardActionTriggerResponse({
+            "card": {"type": "raw", "data": adapted},
+            "toast": {"type": toast_type, "content": toast_content},
+        })
+    return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_content}})
+
+
+def _can_sync_return_for_cardkit_card(action_value: dict, card_message_id: str) -> tuple[bool, bool]:
+    """Return `(can_sync_return, is_known_v2)` for cards that may have been emitted via CardKit 2.0.
+    For legacy pre-restart cards without `_card_schema` when CardKit is enabled, avoids returning a V1 card
+    synchronously (which triggers Feishu client 200830) and routes through 200830-self-healing async PATCH.
+    """
+    is_known_v2 = (
+        action_value.get("_card_schema") == "2.0"
+        or app_state.is_v2_card_message(card_message_id)
+    )
+    if is_known_v2 or action_value.get("_card_schema") == "1.0":
+        return True, is_known_v2
+    try:
+        from lark_client import CardKitStreamController
+        return (not CardKitStreamController.can_attempt()), False
+    except Exception:
+        return True, False
+
+
 def _respond_card_sync_or_patch(
     build_card_coro,
     card_message_id: str,
     toast_content: str,
     toast_type: str = "success",
     sync_timeout: float = 1.5,
+    can_sync_return: bool = True,
+    claim_key: str = "",
+    release_on_error: bool = False,
 ) -> P2CardActionTriggerResponse:
     """Execute async state update + card build on main_loop.
     Returns card synchronously in callback response (<30ms, 0 HTTP PATCH) from WS worker thread,
-    falling back to async patch_interactive_card_sdk on slow operations or in-loop test calls.
+    falling back to async patch_interactive_card_sdk ONLY on timeout or in-loop/legacy-V2 calls.
+    Real business exceptions are surfaced immediately as an error toast (never disguised as success).
     """
     if not (app_state.main_loop and app_state.main_loop.is_running()):
-        return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_content}})
+        if release_on_error and claim_key:
+            app_state.release_card_action(claim_key)
+        return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "事件循环未就绪，请稍后重试"}})
 
-    if asyncio._get_running_loop() is None:
+    if asyncio._get_running_loop() is None and can_sync_return:
         fut = asyncio.run_coroutine_threadsafe(build_card_coro(), app_state.main_loop)
         try:
             res = fut.result(timeout=sync_timeout)
@@ -57,48 +110,84 @@ def _respond_card_sync_or_patch(
             else:
                 new_card, eff_type, eff_msg = res, toast_type, toast_content
             if new_card:
-                return P2CardActionTriggerResponse({
-                    "card": {"type": "raw", "data": new_card},
-                    "toast": {"type": eff_type, "content": eff_msg},
-                })
+                return _build_card_response(
+                    new_card,
+                    eff_type,
+                    eff_msg,
+                    card_message_id=card_message_id,
+                )
             return P2CardActionTriggerResponse({"toast": {"type": eff_type, "content": eff_msg}})
-        except Exception:
+        except FuturesTimeoutError:
             async def _fallback_patch():
-                try:
-                    res = await asyncio.wrap_future(fut)
-                    new_card = res[0] if (isinstance(res, tuple) and len(res) == 3) else res
-                    if new_card and card_message_id:
-                        await asyncio.get_running_loop().run_in_executor(
-                            None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
-                        )
-                except Exception as pe:
-                    log.warning(f"[CardAction] Fallback patch failed: {pe}")
-            asyncio.run_coroutine_threadsafe(_fallback_patch(), app_state.main_loop)
+                res = await asyncio.wrap_future(fut)
+                new_card = res[0] if (isinstance(res, tuple) and len(res) == 3) else res
+                if new_card and card_message_id:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+                    )
+            app_state.schedule_bg_coro(
+                _fallback_patch,
+                label="CardActionFallbackPatch",
+                claim_key=claim_key,
+                release_on_error=release_on_error,
+            )
             return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_content}})
+        except Exception as exc:
+            if release_on_error and claim_key:
+                app_state.release_card_action(claim_key)
+            log.error(f"[CardAction] Sync callback coroutine failed: {exc}", exc_info=True)
+            return P2CardActionTriggerResponse({
+                "toast": {"type": "error", "content": f"操作失败：{str(exc)[:80]}"}
+            })
 
     async def _loop_patch():
-        try:
-            res = await build_card_coro()
-            new_card = res[0] if (isinstance(res, tuple) and len(res) == 3) else res
-            if new_card and card_message_id:
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
-                )
-        except Exception as le:
-            log.warning(f"[CardAction] Loop patch failed: {le}")
+        res = await build_card_coro()
+        new_card = res[0] if (isinstance(res, tuple) and len(res) == 3) else res
+        if new_card and card_message_id:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
+            )
 
-    asyncio.run_coroutine_threadsafe(_loop_patch(), app_state.main_loop)
+    app_state.schedule_bg_coro(
+        _loop_patch,
+        label="CardActionAsyncPatch",
+        claim_key=claim_key,
+        release_on_error=release_on_error,
+    )
     return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_content}})
 
 
 # Provide main_loop as dynamic attribute via module-level lookup in function
 def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
-    log.info(f"Card action received: {data.event.action.value}")
+    """Top-level Feishu interactive card callback entrypoint with fail-safe error boundary."""
+    try:
+        return _do_p2_card_action_trigger_impl(data)
+    except Exception as e:
+        import traceback
+        log.error(f"[CardAction] Unhandled exception in card callback: {e}\n{traceback.format_exc()}")
+        return P2CardActionTriggerResponse({
+            "toast": {"type": "error", "content": "卡片操作处理异常，请稍后重试"}
+        })
 
-    action_value = data.event.action.value or {}
-    form_value = getattr(data.event.action, "form_value", None) or {}
-    chat_id = data.event.context.open_chat_id
-    card_message_id = data.event.context.open_message_id
+
+def _do_p2_card_action_trigger_impl(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
+    event = getattr(data, "event", None)
+    action_obj = getattr(event, "action", None)
+    context_obj = getattr(event, "context", None)
+    raw_val = getattr(action_obj, "value", None)
+    log.info(f"Card action received: {raw_val}")
+
+    action_value = raw_val if isinstance(raw_val, dict) else {}
+    raw_form = getattr(action_obj, "form_value", None)
+    form_value = raw_form if isinstance(raw_form, dict) else {}
+    chat_id = getattr(context_obj, "open_chat_id", "") or ""
+    card_message_id = getattr(context_obj, "open_message_id", "") or ""
+
+    # Stateless Schema 2.0 discovery: buttons converted by convert_card_v1_to_v2 carry
+    # `_card_schema: "2.0"`, allowing post-restart callbacks to know immediately that the
+    # card message is Schema 2.0 and must never be updated with Schema 1.0 JSON.
+    if action_value.get("_card_schema") == "2.0" and card_message_id:
+        app_state.register_v2_card_message(card_message_id)
 
     # Check whitelist if configured
     is_allowed = True
@@ -133,12 +222,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 sess = get_auth_session(chat_id)
                 if admin_cid and sess:
                     await send_card_to_chat_async(admin_cid, CardBuilder.build_auth_request_card(sess))
-            asyncio.run_coroutine_threadsafe(_notify_admin_req(), app_state.main_loop)
+            app_state.schedule_bg_coro(_notify_admin_req, label="GuestAuthNotify")
         toast_msg = "已向管理员提交授权申请！" if status == "ok" else "申请已提交，请等待管理员审批"
-        return P2CardActionTriggerResponse({
-            "card": {"type": "raw", "data": CardBuilder.build_auth_hint_card(pending=True)},
-            "toast": {"type": "success" if status == "ok" else "info", "content": toast_msg},
-        })
+        return _build_card_response(
+            CardBuilder.build_auth_hint_card(pending=True),
+            "success" if status == "ok" else "info",
+            toast_msg,
+            card_message_id=card_message_id,
+        )
 
     # Auth gate: guests / pending / banned chats cannot operate any other card.
     if role in ("guest", "pending", "banned"):
@@ -159,23 +250,31 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         option_id = str(action_value.get("option_id") or "")
         chosen_label = str(action_value.get("label") or option_id or "已处理")
         req_title = str(action_value.get("title") or "工具权限审批")
+        claim_key = f"acp_perm:{perm_token or card_message_id or chat_id}"
+        if not app_state.claim_card_action(claim_key, ttl_seconds=1800.0):
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "该权限审批已处理，请勿重复点击"}})
         if app_state.main_loop and app_state.main_loop.is_running():
+            can_sync_perm, _ = _can_sync_return_for_cardkit_card(action_value, card_message_id)
+
             async def _do_resolve_perm():
                 from acp_client import resolve_pending_permission
                 ok, msg = resolve_pending_permission(perm_token, chat_id, option_id)
-                if ok and card_message_id:
-                    res_card = CardBuilder.build_acp_permission_result_card(req_title, chosen_label)
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: patch_interactive_card_sdk(card_message_id, res_card)
-                    )
-                return ok, msg
-            try:
-                ok, msg = asyncio.run_coroutine_threadsafe(_do_resolve_perm(), app_state.main_loop).result(timeout=5)
-                toast_type = "success" if ok else "warning"
-                return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": msg}})
-            except Exception as e:
-                log.error(f"[CardAction] acp_permission_decision error: {e}")
-                return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "权限审批提交失败"}})
+                if not ok:
+                    return None, "warning", msg
+                res_card = CardBuilder.build_acp_permission_result_card(req_title, chosen_label)
+                return res_card, "success", msg
+
+            return _respond_card_sync_or_patch(
+                _do_resolve_perm,
+                card_message_id,
+                "已提交权限审批",
+                toast_type="success",
+                sync_timeout=1.4,
+                can_sync_return=can_sync_perm,
+                claim_key=claim_key,
+                release_on_error=True,
+            )
+        app_state.release_card_action(claim_key)
         return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "事件循环未就绪"}})
 
     if action_value.get("action") == "switch_model":
@@ -226,9 +325,17 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     if (
                         not auto_relayed
                         and active_sess
+                        and active_sess.lock.locked()
+                    ):
+                        # Do not kill an active running task; persisted model will take effect on next turn
+                        log.info(
+                            f"[switch_model] Active session busy in chat {chat_id}; deferred warm session reset until current turn finishes"
+                        )
+                    elif (
+                        not auto_relayed
+                        and active_sess
                         and getattr(active_sess, "transport_name", "") == "acp"
                         and active_sess.is_alive()
-                        and not active_sess.lock.locked()
                     ):
                         switched_ok = await active_sess.set_model(new_model, effort=effort_to_set)
                         if not switched_ok:
@@ -243,8 +350,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                             chat_id, new_model, cwd_dir, conversation_id=conv_id,
                             effort=effort_to_set, agent_mode=agent_mode, extra_dirs=extra_dirs,
                         ))
-                except Exception:
-                    pass
+                except Exception as sw_err:
+                    log.warning(f"[switch_model] Session pool update warning for chat {chat_id}: {sw_err}")
                 initial_probe_status = "probing"
                 initial_probe_latency = 0.0
                 initial_fallback = None
@@ -320,17 +427,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
                 return res_card
 
-            future = asyncio.run_coroutine_threadsafe(do_switch(), app_state.main_loop)
-            try:
-                result_card = future.result(timeout=8)
-            except Exception as e:
-                log.error(f"[switch_model] do_switch failed or timed out: {e}")
+            return _respond_card_sync_or_patch(
+                do_switch,
+                card_message_id,
+                f"模型已切换为 {new_model}",
+                toast_type="success",
+                sync_timeout=1.5,
+            )
 
-        if result_card:
-            return P2CardActionTriggerResponse({
-                "card": {"type": "raw", "data": result_card},
-                "toast": {"type": "success", "content": f"模型已切换为 {new_model}"}
-            })
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": f"模型已切换为 {new_model}"}})
 
     elif action_value.get("action") == "capacity_choice_decision":
@@ -340,106 +444,162 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         if decision == "switch_form_and_continue":
             target_model = str(form_value.get("capacity_target_model") or target_model or "").strip()
 
+        cap_claim_key = f"capacity_choice:{card_message_id or chat_id}"
+        if not app_state.claim_card_action(cap_claim_key, ttl_seconds=3600.0):
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "该模型切换卡片已处理，请勿重复点击"}})
+
         if decision == "cancel":
-            if app_state.main_loop and app_state.main_loop.is_running():
-                async def _do_cancel_capacity():
-                    session_data = await get_session_async(chat_id)
+            if not (app_state.main_loop and app_state.main_loop.is_running()):
+                app_state.release_card_action(cap_claim_key)
+                return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "事件循环未就绪，请稍后重试"}})
+
+            async def _do_cancel_capacity():
+                session_data = await get_session_async(chat_id)
+                cur_paused = session_data.get("paused_capacity_state") or {}
+                stored_mid = cur_paused.get("card_message_id") or ""
+                if not stored_mid or not card_message_id or stored_mid == card_message_id:
                     paused = session_data.pop("paused_capacity_state", None) or {}
                     await save_session_async(chat_id, session_data)
-                    cancelled_card = CardBuilder.build_capacity_choice_card(
-                        failed_model=failed_model or paused.get("failed_model") or session_data.get("model", "Default"),
-                        user_text=paused.get("user_text", ""),
-                        current_project=paused.get("project_dir") or session_data.get("project", "默认"),
-                        resolved_status="cancelled",
-                    )
-                    if card_message_id:
+                else:
+                    paused = {}
+                cancelled_card = CardBuilder.build_capacity_choice_card(
+                    failed_model=failed_model or paused.get("failed_model") or session_data.get("model", "Default"),
+                    user_text=paused.get("user_text", ""),
+                    current_project=paused.get("project_dir") or session_data.get("project", "默认"),
+                    resolved_status="cancelled",
+                )
+                if card_message_id:
+                    try:
                         await asyncio.get_running_loop().run_in_executor(
                             None, lambda: patch_interactive_card_sdk(card_message_id, cancelled_card)
                         )
-                asyncio.run_coroutine_threadsafe(_do_cancel_capacity(), app_state.main_loop)
+                    except Exception as pe:
+                        log.warning(f"[CapacityChoice] Failed patching cancelled card: {pe}")
+
+            app_state.schedule_bg_coro(
+                _do_cancel_capacity,
+                label="CapacityChoiceCancel",
+                claim_key=cap_claim_key,
+                release_on_error=True,
+            )
             return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已取消本次任务重试"}})
 
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def _do_capacity_resume():
-                session_data = await get_session_async(chat_id)
-                paused = session_data.pop("paused_capacity_state", None) or {}
-                orig_q = paused.get("user_text") or session_data.get("last_user_query") or "继续执行刚才的任务"
-                err_m = failed_model or paused.get("failed_model") or session_data.get("model", "Default")
-                proj_dir = paused.get("project_dir") or session_data.get("project", "默认")
-                chosen_model = (err_m if decision == "retry_current" else (target_model or paused.get("recommended_model") or err_m)).strip()
+        if not (app_state.main_loop and app_state.main_loop.is_running()):
+            app_state.release_card_action(cap_claim_key)
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "事件循环未就绪，请稍后重试"}})
 
-                from system_one_gate import infer_effort_from_model
-                effort_to_set = infer_effort_from_model(chosen_model, session_data.get("reasoning_effort", "medium"))
-
-                if decision == "retry_current":
-                    try:
-                        from utils.model_health import clear_model_health
-                        clear_model_health(chosen_model)
-                    except Exception:
-                        pass
-                else:
-                    session_data["model"] = chosen_model
-                    session_data["base_model"] = chosen_model
-                    session_data["reasoning_effort"] = effort_to_set
-
-                try:
-                    from agent_memory import relay_conversation_for_model_switch
-                    relay_conversation_for_model_switch(
-                        chat_id=chat_id,
-                        session_data=session_data,
-                        new_model=chosen_model,
-                        old_model=err_m,
-                        project_dir=proj_dir,
-                        force=bool(paused.get("tainted_conv") or session_data.get("_capacity_tainted_conv")),
+        async def _do_capacity_resume():
+            session_data = await get_session_async(chat_id)
+            cur_paused = session_data.get("paused_capacity_state") or {}
+            stored_mid = cur_paused.get("card_message_id") or ""
+            is_stale_card = (
+                not cur_paused
+                or (bool(card_message_id) and bool(stored_mid) and stored_mid != card_message_id)
+            )
+            if is_stale_card:
+                log.info(f"[CapacityChoice] Ignoring stale/superseded capacity card {card_message_id} in chat {chat_id}")
+                if card_message_id:
+                    stale_card = CardBuilder.build_capacity_choice_card(
+                        failed_model=failed_model or session_data.get("model", "Default"),
+                        user_text="（该算力选择卡片已失效或已被后续新消息/操作接管）",
+                        current_project=session_data.get("project", "默认"),
+                        resolved_status="cancelled",
                     )
-                except Exception as relay_err:
-                    log.warning(f"[capacity_choice_decision] Relay check failed: {relay_err}")
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: patch_interactive_card_sdk(card_message_id, stale_card)
+                        )
+                    except Exception as pe:
+                        log.warning(f"[CapacityChoice] Failed patching stale card: {pe}")
+                return
 
-                comp_steps = list(paused.get("completed_steps") or [])
-                plan_steps = list(paused.get("planned_steps") or [])
-                if comp_steps or plan_steps:
-                    session_data["_resumed_task_progress"] = {
-                        "user_text": orig_q,
-                        "elapsed_seconds": int(paused.get("elapsed_seconds") or 0),
-                        "completed_steps": comp_steps,
-                        "planned_steps": plan_steps,
-                        "current_plan_idx": int(paused.get("current_plan_idx") or 0),
-                        "max_progress_pct": int(paused.get("max_progress_pct") or 0),
-                    }
-                await save_session_async(chat_id, session_data)
+            paused = session_data.pop("paused_capacity_state", None) or {}
+            orig_q = paused.get("user_text") or session_data.get("last_user_query") or "继续执行刚才的任务"
+            err_m = failed_model or paused.get("failed_model") or session_data.get("model", "Default")
+            proj_dir = paused.get("project_dir") or session_data.get("project", "默认")
+            chosen_model = (err_m if decision == "retry_current" else (target_model or paused.get("recommended_model") or err_m)).strip()
 
+            from system_one_gate import infer_effort_from_model
+            effort_to_set = infer_effort_from_model(chosen_model, session_data.get("reasoning_effort", "medium"))
+
+            if decision == "retry_current":
                 try:
-                    from session_pool import session_pool
-                    await session_pool.reset_session(chat_id)
+                    from utils.model_health import clear_model_health
+                    clear_model_health(chosen_model)
                 except Exception:
                     pass
+            else:
+                session_data["model"] = chosen_model
+                session_data["base_model"] = chosen_model
+                session_data["reasoning_effort"] = effort_to_set
 
-                resolved_card = CardBuilder.build_capacity_choice_card(
-                    failed_model=err_m,
-                    user_text=orig_q,
-                    current_project=proj_dir,
-                    resolved_status="retry_current" if decision == "retry_current" else "switched",
-                    resolved_model=chosen_model,
+            try:
+                from agent_memory import relay_conversation_for_model_switch
+                relay_conversation_for_model_switch(
+                    chat_id=chat_id,
+                    session_data=session_data,
+                    new_model=chosen_model,
+                    old_model=err_m,
+                    project_dir=proj_dir,
+                    force=bool(paused.get("tainted_conv") or session_data.get("_capacity_tainted_conv")),
                 )
-                if card_message_id:
+            except Exception as relay_err:
+                log.warning(f"[capacity_choice_decision] Relay check failed: {relay_err}")
+
+            comp_steps = list(paused.get("completed_steps") or [])
+            plan_steps = list(paused.get("planned_steps") or [])
+            if comp_steps or plan_steps:
+                session_data["_resumed_task_progress"] = {
+                    "user_text": orig_q,
+                    "elapsed_seconds": int(paused.get("elapsed_seconds") or 0),
+                    "completed_steps": comp_steps,
+                    "planned_steps": plan_steps,
+                    "current_plan_idx": int(paused.get("current_plan_idx") or 0),
+                    "max_progress_pct": int(paused.get("max_progress_pct") or 0),
+                }
+            await save_session_async(chat_id, session_data)
+
+            try:
+                from session_pool import session_pool
+                await session_pool.reset_session(chat_id)
+            except Exception as rs_err:
+                log.warning(f"[CapacityChoice] Session reset warning: {rs_err}")
+
+            resolved_card = CardBuilder.build_capacity_choice_card(
+                failed_model=err_m,
+                user_text=orig_q,
+                current_project=proj_dir,
+                resolved_status="retry_current" if decision == "retry_current" else "switched",
+                resolved_model=chosen_model,
+            )
+            if card_message_id:
+                try:
                     await asyncio.get_running_loop().run_in_executor(
                         None, lambda: patch_interactive_card_sdk(card_message_id, resolved_card)
                     )
+                except Exception as pe:
+                    log.warning(f"[CapacityChoice] Failed patching resolved card (continuing resume): {pe}")
 
-                simulated_content = json.dumps({"text": orig_q}, ensure_ascii=False)
-                try:
-                    await _handle_message_async_internal(
-                        card_message_id, chat_id, "text", simulated_content, trusted_internal_resume=True
-                    )
-                except TypeError:
-                    await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
+            simulated_content = json.dumps({"text": orig_q}, ensure_ascii=False)
+            try:
+                await _handle_message_async_internal(
+                    card_message_id, chat_id, "text", simulated_content, trusted_internal_resume=True
+                )
+            except TypeError:
+                await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
 
-            asyncio.run_coroutine_threadsafe(_do_capacity_resume(), app_state.main_loop)
+        app_state.schedule_bg_coro(
+            _do_capacity_resume,
+            label="CapacityChoiceResume",
+            claim_key=cap_claim_key,
+            release_on_error=True,
+        )
 
+        toast_target = target_model or "推荐模型"
         toast_msg = (
             f"🔄 正在继续使用 {failed_model or '当前模型'} 重试任务..."
             if decision == "retry_current"
-            else f"⚡ 已切换至 {target_model}，正在继续执行任务..."
+            else f"⚡ 已切换至 {toast_target}，正在继续执行任务..."
         )
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": toast_msg}})
 
@@ -460,10 +620,10 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 active_sess = session_pool.get_active_session(chat_id)
                 if active_sess and getattr(active_sess, "transport_name", "") == "acp" and active_sess.is_alive():
                     await active_sess.set_mode(target_mode)
-                elif active_sess:
+                elif active_sess and not active_sess.lock.locked():
                     await session_pool.reset_session(chat_id)
-            except Exception:
-                pass
+            except Exception as mode_err:
+                log.warning(f"[switch_agent_mode] Hot-switch mode warning for chat {chat_id}: {mode_err}")
             avail = await get_available_models_cached(force_refresh=False) or DEFAULT_FALLBACK_MODELS
             card = CardBuilder.build_model_panel(avail, session_data.get("model", "Default"), agent_mode=target_mode)
             return card, "success", f"执行模式已热切为 {target_mode}"
@@ -474,14 +634,11 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         tab = str(action_value.get("tab") or "all").strip().lower()
         new_help_card = CardBuilder.build_help_card(is_admin_user=is_admin(chat_id), active_tab=tab)
         if asyncio._get_running_loop() is None:
-            return P2CardActionTriggerResponse({
-                "card": {"type": "raw", "data": new_help_card},
-                "toast": {"type": "info", "content": "已切换帮助分类"},
-            })
+            return _build_card_response(new_help_card, "info", "已切换帮助分类", card_message_id=card_message_id)
         if app_state.main_loop and app_state.main_loop.is_running() and card_message_id:
-            asyncio.run_coroutine_threadsafe(
-                asyncio.to_thread(patch_interactive_card_sdk, card_message_id, new_help_card),
-                app_state.main_loop,
+            app_state.schedule_bg_coro(
+                lambda: asyncio.to_thread(patch_interactive_card_sdk, card_message_id, new_help_card),
+                label="HelpSwitchTabPatch",
             )
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已切换帮助分类"}})
 
@@ -491,6 +648,11 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         from_choice_card = bool(action_value.get("from_choice_card"))
         log.info(f"User selected choice: {choice} (from_choice_card={from_choice_card})")
 
+        choice_claim_key = f"choice_card:{card_message_id}" if (from_choice_card and card_message_id) else ""
+        if choice_claim_key:
+            if not app_state.claim_card_action(choice_claim_key, ttl_seconds=3600.0):
+                return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "您已提交过该选项，请勿重复点击"}})
+
         locked_card = None
         if from_choice_card and not str(choice).startswith("/"):
             locked_card = CardBuilder.build_choice_locked_card(
@@ -499,6 +661,11 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 question=str(action_value.get("question") or "已确认选项"),
                 reply_preview=str(action_value.get("reply_preview") or ""),
             )
+
+        can_sync_base, is_known_v2_choice = _can_sync_return_for_cardkit_card(action_value, card_message_id)
+        can_sync_return_choice = bool(
+            locked_card is not None and asyncio._get_running_loop() is None and can_sync_base
+        )
 
         if app_state.main_loop and app_state.main_loop.is_running():
             async def notify_and_process():
@@ -515,28 +682,37 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
                 if not handled:
                     if locked_card is not None:
-                        # 原卡片已原地锁定展示用户所选选项，无需再发多余刷屏文本消息
-                        if asyncio._get_running_loop() is not None and card_message_id:
-                            pass
+                        pass
                     else:
                         user_display_text = f"✅ **您已选择：{label}**\n*(选项内容已提交 AI 进行下一步处理...)*"
                         await asyncio.get_running_loop().run_in_executor(None, lambda: send_reply_sdk(card_message_id, user_display_text))
                     simulated_content = json.dumps({"text": f"我的选择是：{choice}"}, ensure_ascii=False)
                     await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
 
-            if locked_card is not None and asyncio._get_running_loop() is not None and card_message_id:
-                asyncio.run_coroutine_threadsafe(
-                    asyncio.to_thread(patch_interactive_card_sdk, card_message_id, locked_card),
-                    app_state.main_loop,
+            if locked_card is not None and not can_sync_return_choice and card_message_id:
+                app_state.schedule_bg_coro(
+                    lambda: asyncio.to_thread(patch_interactive_card_sdk, card_message_id, locked_card),
+                    label="UserChoiceLockPatch",
                 )
-            asyncio.run_coroutine_threadsafe(notify_and_process(), app_state.main_loop)
+            app_state.schedule_bg_coro(
+                notify_and_process,
+                label="UserChoiceProcess",
+                claim_key=choice_claim_key,
+                release_on_error=True,
+            )
+        elif choice_claim_key:
+            app_state.release_card_action(choice_claim_key)
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "事件循环未就绪，请稍后重试"}})
 
-        if locked_card is not None and asyncio._get_running_loop() is None:
-            return P2CardActionTriggerResponse({
-                "card": {"type": "raw", "data": locked_card},
-                "toast": {"type": "success", "content": f"已确认选择：{label}"},
-            })
-        return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"已选择：{label}"}})
+        if can_sync_return_choice:
+            return _build_card_response(
+                locked_card,
+                "success",
+                f"已确认选择：{label}",
+                card_message_id=card_message_id,
+                force_v2=is_known_v2_choice,
+            )
+        return P2CardActionTriggerResponse({"toast": {"type": "success" if locked_card is not None else "info", "content": f"已确认选择：{label}" if locked_card is not None else f"已选择：{label}"}})
             
     elif action_value.get("action") == "l3_confirm_action":
         decision = action_value.get("decision", "reject")
@@ -547,34 +723,57 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         call_id = action_value.get("call_id", "")
         operator_open_id = data.event.operator.open_id if data.event.operator else ""
 
-        # 1. 管理员权限校验：仅管理员有权审批高危敏感指令
+        # 1. 管理员权限校验：仅管理员有权审批高危敏感指令（在抢占幂等锁之前校验，避免非管理员锁死按钮）
         if not is_admin(chat_id):
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "🔒 仅系统管理员有权审批高危指令！"}})
+
+        # 1.5 一次性授权卡片原子幂等锁：杜绝连点、回调重试或旧端超时导致的同一高危指令并发重复执行
+        l3_claim_key = f"l3:{card_message_id or call_id or chat_id}"
+        if not app_state.claim_card_action(l3_claim_key, ttl_seconds=3600.0):
+            log.info(f"[L3 Guard] Duplicate click ignored for {l3_claim_key} in chat {chat_id}")
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "该授权请求已在处理中，请勿重复点击"}})
+
+        can_sync_return_l3, is_known_v2_l3 = _can_sync_return_for_cardkit_card(action_value, card_message_id)
 
         # 2. 拒绝分支
         if decision == "reject":
             log.info(f"[L3 Guard] Admin {operator_open_id} rejected command in chat {chat_id}: {command}")
-            if app_state.main_loop and app_state.main_loop.is_running():
-                async def do_cleanup_paused_l3():
-                    try:
-                        session_data = await get_session_async(chat_id)
-                        session_data.pop("paused_l3_state", None)
-                        session_data.pop("_l3_authorize_all_turn", None)
-                        await save_session_async(chat_id, session_data)
-                    except Exception:
-                        pass
-                asyncio.run_coroutine_threadsafe(do_cleanup_paused_l3(), app_state.main_loop)
-
             res_card = CardBuilder.build_l3_confirm_result_card(
                 status="rejected",
                 command=command,
                 operator_id=operator_open_id,
                 scope=scope
             )
-            return P2CardActionTriggerResponse({
-                "card": {"type": "raw", "data": res_card},
-                "toast": {"type": "info", "content": "已拒绝执行该高危敏感指令"}
-            })
+            if app_state.main_loop and app_state.main_loop.is_running():
+                async def do_cleanup_paused_l3():
+                    try:
+                        session_data = await get_session_async(chat_id)
+                        cur_l3 = session_data.get("paused_l3_state") or {}
+                        stored_mid = cur_l3.get("card_message_id") or cur_l3.get("bot_reply_msg_id") or ""
+                        if not stored_mid or not card_message_id or stored_mid == card_message_id:
+                            session_data.pop("paused_l3_state", None)
+                            session_data.pop("_l3_authorize_all_turn", None)
+                            await save_session_async(chat_id, session_data)
+                    except Exception as clean_err:
+                        log.warning(f"[L3 Guard] Cleanup paused_l3_state warning: {clean_err}")
+                    if not can_sync_return_l3 and card_message_id:
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, lambda: patch_interactive_card_sdk(card_message_id, res_card)
+                            )
+                        except Exception as pe:
+                            log.warning(f"[L3 Guard] Failed patching rejected card: {pe}")
+                app_state.schedule_bg_coro(do_cleanup_paused_l3, label="L3RejectCleanup")
+
+            if can_sync_return_l3:
+                return _build_card_response(
+                    res_card,
+                    "info",
+                    "已拒绝执行该高危敏感指令",
+                    card_message_id=card_message_id,
+                    force_v2=is_known_v2_l3,
+                )
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已拒绝执行该高危敏感指令"}})
 
         # 3. 授权执行分支 (支持仅单次授权 / 本轮后续所有高危指令授权)
         is_turn_scope = (scope == "turn")
@@ -594,6 +793,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 out_text = ""
                 p_l3 = {}
 
+                if not can_sync_return_l3 and card_message_id:
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: patch_interactive_card_sdk(card_message_id, running_card)
+                        )
+                    except Exception as run_patch_err:
+                        log.warning(f"[L3 Guard] Failed patching running card: {run_patch_err}")
+
                 # 若用户选择授权本轮所有，立即标记当前 session 状态
                 if is_turn_scope:
                     try:
@@ -603,10 +810,20 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     except Exception as s_err:
                         log.warning(f"[L3 Guard] Failed saving _l3_authorize_all_turn: {s_err}")
 
-                # 多级恢复完整指令：优先从 session_data 提取完整未截断的指令，若破损则从 transcript_full.jsonl 找回
+                # 多级恢复完整指令：优先从匹配当前卡片的 paused_l3_state 提取完整未截断指令，
+                # 防止弹窗期间用户发新消息导致误用新任务的 paused_l3_state 串台！
                 try:
                     s_data = await get_session_async(chat_id)
-                    p_l3 = s_data.get("paused_l3_state") or {}
+                    raw_p_l3 = s_data.get("paused_l3_state") or {}
+                    stored_l3_mid = raw_p_l3.get("card_message_id") or raw_p_l3.get("bot_reply_msg_id") or ""
+                    if stored_l3_mid and card_message_id and stored_l3_mid != card_message_id:
+                        log.warning(
+                            f"[L3 Guard] paused_l3_state belongs to newer card {stored_l3_mid} "
+                            f"(clicked {card_message_id}); isolating stale card state"
+                        )
+                        p_l3 = {}
+                    else:
+                        p_l3 = raw_p_l3
                     saved_cmd = (p_l3.get("command") or "").strip()
                     if not tool and p_l3.get("tool"):
                         tool = p_l3.get("tool")
@@ -798,7 +1015,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                         pass
 
                     session_data = await get_session_async(chat_id)
-                    paused_l3 = session_data.pop("paused_l3_state", None) or p_l3 or {}
+                    cur_l3_state = session_data.get("paused_l3_state") or {}
+                    cur_l3_mid = cur_l3_state.get("card_message_id") or cur_l3_state.get("bot_reply_msg_id") or ""
+                    if not cur_l3_mid or not card_message_id or cur_l3_mid == card_message_id:
+                        paused_l3 = session_data.pop("paused_l3_state", None) or p_l3 or {}
+                    else:
+                        paused_l3 = p_l3 or {}
                     orig_q = paused_l3.get("user_text") or session_data.get("last_user_query", "继续执行未完成的任务")
                     if (orig_q or "").lstrip().startswith(("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]")):
                         m_orig_q = re.search(r"-\s*前序任务目标：(.+)", orig_q)
@@ -878,13 +1100,26 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 except Exception as resume_err:
                     log.error(f"[L3 Guard] Failed to trigger auto-resume after approval: {resume_err}")
 
-            asyncio.run_coroutine_threadsafe(do_execute_approved(), app_state.main_loop)
+            app_state.schedule_bg_coro(
+                do_execute_approved,
+                label="L3ExecuteApproved",
+                claim_key=l3_claim_key,
+                release_on_error=True,
+            )
+        else:
+            app_state.release_card_action(l3_claim_key)
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "事件循环未就绪，请稍后重试"}})
 
         toast_msg = "已确认授权：本轮后续高危指令将自动放行，正在后台调度执行..." if is_turn_scope else "已确认授权单次执行，正在后台调度执行..."
-        return P2CardActionTriggerResponse({
-            "card": {"type": "raw", "data": running_card},
-            "toast": {"type": "success", "content": toast_msg}
-        })
+        if can_sync_return_l3:
+            return _build_card_response(
+                running_card,
+                "success",
+                toast_msg,
+                card_message_id=card_message_id,
+                force_v2=is_known_v2_l3,
+            )
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": toast_msg}})
 
     elif action_value.get("action") == "extend_wait":
         log.info(f"User requested extend_wait in chat {chat_id}")
@@ -894,6 +1129,10 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
     elif action_value.get("action") == "continue_long_task":
         log.info(f"User requested continue_long_task in chat {chat_id}")
+        pause_claim_key = f"budget_pause:{card_message_id or chat_id}"
+        if not app_state.claim_card_action(pause_claim_key, ttl_seconds=3600.0):
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "该暂停任务已处理，请勿重复点击"}})
+
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_continue_long_task():
                 try:
@@ -902,13 +1141,37 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 except Exception:
                     pass
                 session_data = await get_session_async(chat_id)
+                cur_paused = session_data.get("paused_task_state") or {}
+                stored_mid = cur_paused.get("card_message_id") or ""
+                is_stale_card = (
+                    not cur_paused
+                    or (bool(card_message_id) and bool(stored_mid) and stored_mid != card_message_id)
+                )
+                if is_stale_card:
+                    log.info(f"[BudgetPause] Ignoring stale/superseded continue_long_task for card {card_message_id} in chat {chat_id}")
+                    if card_message_id:
+                        stale_card = CardBuilder.build_budget_pause_card(
+                            user_text="阶段性任务（该暂停卡片已失效或已被后续新消息/操作接管）",
+                            reason="已由后续操作或新消息接管",
+                            current_model=session_data.get("model", "Default"),
+                            current_project=session_data.get("project", "默认"),
+                            resumed_status="stopped",
+                        )
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, lambda: patch_interactive_card_sdk(card_message_id, stale_card)
+                            )
+                        except Exception as pe:
+                            log.warning(f"[BudgetPause] Failed patching stale card: {pe}")
+                    return
+
                 paused = session_data.pop("paused_task_state", None) or {}
 
                 orig_q = paused.get("user_text") or session_data.get("last_user_query") or "继续执行未完成的任务"
                 comp_steps = paused.get("completed_steps") or []
                 plan_steps = paused.get("planned_steps") or []
                 part_reply = paused.get("partial_reply") or ""
-                elapsed_s = int(paused.get("elapsed_seconds") or 0)
+                elapsed_s = _safe_int(paused.get("elapsed_seconds"), 0)
                 reason_s = paused.get("reason") or ""
                 scope_lbl = paused.get("scope_label") or ""
                 proj_dir = paused.get("project_dir") or session_data.get("project", "默认")
@@ -918,8 +1181,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     "elapsed_seconds": elapsed_s,
                     "completed_steps": list(comp_steps),
                     "planned_steps": list(plan_steps),
-                    "current_plan_idx": int(paused.get("current_plan_idx") or 0),
-                    "max_progress_pct": int(paused.get("max_progress_pct") or 0),
+                    "current_plan_idx": _safe_int(paused.get("current_plan_idx"), 0),
+                    "max_progress_pct": _safe_int(paused.get("max_progress_pct"), 0),
                 }
                 await save_session_async(chat_id, session_data)
 
@@ -934,12 +1197,15 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     current_model=session_data.get("model", "Default"),
                     current_project=proj_dir,
                     resumed_status="continued",
-                    current_step_idx=int(paused.get("current_plan_idx") or 0),
-                    min_pct=int(paused.get("max_progress_pct") or 0),
+                    current_step_idx=_safe_int(paused.get("current_plan_idx"), 0),
+                    min_pct=_safe_int(paused.get("max_progress_pct"), 0),
                 )
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, resumed_card)
-                )
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: patch_interactive_card_sdk(card_message_id, resumed_card)
+                    )
+                except Exception as pe:
+                    log.warning(f"[BudgetPause] Failed patching resumed card (continuing resume): {pe}")
 
                 from executor import desensitize_hardware_engineering_text
                 safe_orig_q = desensitize_hardware_engineering_text(orig_q)
@@ -962,37 +1228,65 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 except TypeError:
                     await _handle_message_async_internal(card_message_id, chat_id, "text", simulated_content)
 
-            asyncio.run_coroutine_threadsafe(do_continue_long_task(), app_state.main_loop)
+            app_state.schedule_bg_coro(
+                do_continue_long_task,
+                label="ContinueLongTask",
+                claim_key=pause_claim_key,
+                release_on_error=True,
+            )
+        else:
+            app_state.release_card_action(pause_claim_key)
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "事件循环未就绪，请稍后重试"}})
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "🚀 已确认继续执行！正在为您接力推进剩余步骤..."}})
 
     elif action_value.get("action") == "stop_paused_task":
         log.info(f"User requested stop_paused_task in chat {chat_id}")
+        pause_claim_key = f"budget_pause:{card_message_id or chat_id}"
+        if not app_state.claim_card_action(pause_claim_key, ttl_seconds=3600.0):
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "该暂停任务已处理，请勿重复点击"}})
+
         if app_state.main_loop and app_state.main_loop.is_running():
             async def do_stop_paused_task():
                 session_data = await get_session_async(chat_id)
-                paused = session_data.pop("paused_task_state", None) or {}
-                session_data.pop("_paused_message_reaction", None)
-                session_data["last_execution_paused"] = False
-                await save_session_async(chat_id, session_data)
+                cur_paused = session_data.get("paused_task_state") or {}
+                stored_mid = cur_paused.get("card_message_id") or ""
+                if not stored_mid or not card_message_id or stored_mid == card_message_id:
+                    paused = session_data.pop("paused_task_state", None) or {}
+                    session_data.pop("_paused_message_reaction", None)
+                    session_data["last_execution_paused"] = False
+                    await save_session_async(chat_id, session_data)
+                else:
+                    paused = {}
                 stopped_card = CardBuilder.build_budget_pause_card(
                     user_text=paused.get("user_text", "阶段性任务"),
                     reason=paused.get("reason", ""),
                     completed_steps=paused.get("completed_steps", []),
                     planned_steps=paused.get("planned_steps", []),
                     partial_reply=paused.get("partial_reply", ""),
-                    elapsed_seconds=int(paused.get("elapsed_seconds") or 0),
+                    elapsed_seconds=_safe_int(paused.get("elapsed_seconds"), 0),
                     scope_label=paused.get("scope_label", ""),
                     current_model=session_data.get("model", "Default"),
                     current_project=paused.get("project_dir") or session_data.get("project", "默认"),
                     resumed_status="stopped",
-                    current_step_idx=int(paused.get("current_plan_idx") or 0),
-                    min_pct=int(paused.get("max_progress_pct") or 0),
+                    current_step_idx=_safe_int(paused.get("current_plan_idx"), 0),
+                    min_pct=_safe_int(paused.get("max_progress_pct"), 0),
                 )
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: patch_interactive_card_sdk(card_message_id, stopped_card)
-                )
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: patch_interactive_card_sdk(card_message_id, stopped_card)
+                    )
+                except Exception as pe:
+                    log.warning(f"[BudgetPause] Failed patching stopped card: {pe}")
 
-            asyncio.run_coroutine_threadsafe(do_stop_paused_task(), app_state.main_loop)
+            app_state.schedule_bg_coro(
+                do_stop_paused_task,
+                label="StopPausedTask",
+                claim_key=pause_claim_key,
+                release_on_error=True,
+            )
+        else:
+            app_state.release_card_action(pause_claim_key)
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "事件循环未就绪，请稍后重试"}})
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已结束追加执行，当前阶段性进度已保存在项目记忆胶囊中。"}})
         
     elif action_value.get("action") == "browse_dir":
@@ -1021,7 +1315,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
             target_form = "root"
         else:
             target_form = str(action_value.get("form") or "")
-        page_num = int(action_value.get("page") or 1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_toggle_proj_form():
             session_data = await get_session_async(chat_id)
@@ -1097,7 +1391,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     )
                     if card_message_id:
                         await asyncio.to_thread(patch_interactive_card_sdk, card_message_id, updated_card)
-                asyncio.run_coroutine_threadsafe(_do_git_clone_proj(), app_state.main_loop)
+                app_state.schedule_bg_coro(_do_git_clone_proj, label="ProjectGitClone")
             return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在后台克隆 Git 仓库并切换工作区..."}})
 
         async def _do_local_create_proj():
@@ -1182,7 +1476,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
     elif action_value.get("action") == "remove_project_from_list":
         target_path = action_value.get("path")
-        page_num = int(action_value.get("page") or 1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_remove_project():
             session_data = await get_session_async(chat_id)
@@ -1206,7 +1500,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
     elif action_value.get("action") == "browse_recent_page":
         target_path = action_value.get("current_path")
-        target_page = int(action_value.get("page", 1))
+        target_page = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_browse_recent_page():
             session_data = await get_session_async(chat_id)
@@ -1222,7 +1516,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
     elif action_value.get("action") in ("toggle_note_form", "prompt_add_note"):
         show_form = True if action_value.get("action") == "prompt_add_note" else bool(action_value.get("show", True))
-        page_num = int(action_value.get("page") or 1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_toggle_note_form():
             session_data = await get_session_async(chat_id)
@@ -1254,7 +1548,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return _respond_card_sync_or_patch(_do_add_note, card_message_id, "笔记已保存！")
 
     elif action_value.get("action") == "note_page":
-        page_num = int(action_value.get("page") or 1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_note_page():
             session_data = await get_session_async(chat_id)
@@ -1263,8 +1557,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return _respond_card_sync_or_patch(_do_note_page, card_message_id, f"第 {page_num} 页", toast_type="info")
 
     elif action_value.get("action") == "view_note_detail":
-        idx = int(action_value.get("index", -1))
-        page_num = int(action_value.get("page") or 1)
+        idx = _safe_int(action_value.get("index"), -1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_view_note():
             session_data = await get_session_async(chat_id)
@@ -1280,8 +1574,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         )
 
     elif action_value.get("action") == "delete_note":
-        idx = int(action_value.get("index"))
-        page_num = int(action_value.get("page") or 1)
+        idx = _safe_int(action_value.get("index"), -1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_delete_note():
             session_data = await get_session_async(chat_id)
@@ -1361,7 +1655,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
     elif action_value.get("action") in ("toggle_memory_form", "prompt_add_memory"):
         show_form = True if action_value.get("action") == "prompt_add_memory" else bool(action_value.get("show", True))
-        page_num = int(action_value.get("page") or 1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_toggle_mem_form():
             session_data = await get_session_async(chat_id)
@@ -1406,7 +1700,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return _respond_card_sync_or_patch(_do_add_mem, card_message_id, "偏好已保存！")
 
     elif action_value.get("action") == "memory_page":
-        page_num = int(action_value.get("page") or 1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_mem_page():
             memories = await get_profile_async(chat_id)
@@ -1422,8 +1716,8 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
         return _respond_card_sync_or_patch(_do_mem_page, card_message_id, f"第 {page_num} 页", toast_type="info")
 
     elif action_value.get("action") == "forget_single_memory":
-        idx = int(action_value.get("index"))
-        page_num = int(action_value.get("page") or 1)
+        idx = _safe_int(action_value.get("index"), -1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_forget():
             memories = list(await get_profile_async(chat_id))
@@ -1465,12 +1759,12 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                     None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
                 )
 
-            asyncio.run_coroutine_threadsafe(do_backfill_mem(), app_state.main_loop)
+            app_state.schedule_bg_coro(do_backfill_mem, label="BackfillProjectMemory")
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在扫描并同步当前会话长效记忆..."}})
 
     elif action_value.get("action") in ("switch_cron_tab", "open_cron_create", "cron_page"):
         tab = "create" if action_value.get("action") == "open_cron_create" else str(action_value.get("tab", "user"))
-        page_num = int(action_value.get("page") or 1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_switch_cron():
             from database import get_all_cron_tasks, get_cron_logs
@@ -1549,14 +1843,14 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 new_card = CardBuilder.build_cron_panel_card(tasks, active_tab="user", session_data=session_data)
                 from lark_client import send_card_to_chat_sdk
                 await asyncio.get_running_loop().run_in_executor(None, lambda: send_card_to_chat_sdk(chat_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_open_cron(), app_state.main_loop)
+            app_state.schedule_bg_coro(do_open_cron, label="OpenCronPanel")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在打开计划任务中心..."}})
 
     elif action_value.get("action") == "toggle_cron_active":
         task_id = action_value.get("task_id")
         is_active = bool(action_value.get("is_active", True))
         cur_tab = str(action_value.get("tab") or "user")
-        page_num = int(action_value.get("page") or 1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_toggle_cron():
             from database import get_all_cron_tasks, update_cron_task_status
@@ -1572,7 +1866,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     elif action_value.get("action") == "delete_cron_task":
         task_id = action_value.get("task_id")
         cur_tab = str(action_value.get("tab") or "user")
-        page_num = int(action_value.get("page") or 1)
+        page_num = max(1, _safe_int(action_value.get("page"), 1))
 
         async def _do_delete_cron():
             from database import delete_cron_task, get_all_cron_tasks
@@ -1605,16 +1899,25 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
 
     elif action_value.get("action") == "run_cron_now":
         task_id = action_value.get("task_id")
-        from database import get_cron_task
-        task_snapshot = get_cron_task(task_id) if task_id else None
-        if not task_snapshot:
-            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "该一次性任务已完成并自动移除"}})
-        if app_state.main_loop and app_state.main_loop.is_running():
-            async def do_run_now():
-                from cron_engine import cron_engine
-                asyncio.create_task(cron_engine._run_task_wrapper(task_snapshot))
-            asyncio.run_coroutine_threadsafe(do_run_now(), app_state.main_loop)
-        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "已触发即刻运行计划任务！"}})
+        if not (app_state.main_loop and app_state.main_loop.is_running()):
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "事件循环未就绪，请稍后重试"}})
+
+        async def _do_run_cron_now():
+            from database import get_cron_task
+            from cron_engine import cron_engine
+            task_snapshot = await asyncio.to_thread(get_cron_task, task_id) if task_id else None
+            if not task_snapshot:
+                return None, "info", "该一次性任务已完成并自动移除"
+            asyncio.create_task(cron_engine._run_task_wrapper(task_snapshot))
+            return None, "success", "已触发即刻运行计划任务！"
+
+        return _respond_card_sync_or_patch(
+            _do_run_cron_now,
+            card_message_id,
+            "已触发即刻运行计划任务！",
+            toast_type="success",
+            sync_timeout=1.2,
+        )
 
     elif action_value.get("action") == "reload_plugins":
         async def _do_reload_plugins():
@@ -1663,7 +1966,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 )
                 if card_message_id:
                     await asyncio.to_thread(patch_interactive_card_sdk, card_message_id, new_card)
-            asyncio.run_coroutine_threadsafe(_do_form_install_plugin(), app_state.main_loop)
+            app_state.schedule_bg_coro(_do_form_install_plugin, label="PluginInstallForm")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在后台克隆并安装插件..."}})
 
     elif action_value.get("action") == "plugin_source_submit":
@@ -1692,7 +1995,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 p_list = plugin_manager.get_plugin_list()
                 new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="sources")
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_refresh_store(), app_state.main_loop)
+            app_state.schedule_bg_coro(do_refresh_store, label="RefreshStorePlugins")
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在刷新 GitHub 插件列表..."}})
 
     elif action_value.get("action") == "update_plugin":
@@ -1706,7 +2009,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 p_list = plugin_manager.get_plugin_list()
                 new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed", notice=msg[:200])
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_update_plugin(), app_state.main_loop)
+            app_state.schedule_bg_coro(do_update_plugin, label=f"UpdatePlugin:{plugin_id}")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在从 Git 拉取插件 {plugin_id} 最新代码..."}})
 
     elif action_value.get("action") == "uninstall_plugin":
@@ -1720,7 +2023,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 p_list = plugin_manager.get_plugin_list()
                 new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed", notice=msg[:200])
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_uninstall_plugin(), app_state.main_loop)
+            app_state.schedule_bg_coro(do_uninstall_plugin, label=f"UninstallPlugin:{plugin_id}")
         return P2CardActionTriggerResponse({"toast": {"type": "warning", "content": f"正在卸载插件 {plugin_id}..."}})
 
     elif action_value.get("action") == "install_github_repo":
@@ -1735,7 +2038,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 p_list = plugin_manager.get_plugin_list()
                 new_card = CardBuilder.build_plugin_panel_card(p_list, active_tab="installed", notice=msg[:200])
                 await asyncio.get_running_loop().run_in_executor(None, lambda: patch_interactive_card_sdk(card_message_id, new_card))
-            asyncio.run_coroutine_threadsafe(do_install_repo(), app_state.main_loop)
+            app_state.schedule_bg_coro(do_install_repo, label="InstallGitHubPlugin")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在一键安装 GitHub 插件仓库..."}})
 
     elif action_value.get("action") in ("toggle_typesafe_form", "prompt_typesafe_key", "prompt_typesafe_base_url", "prompt_typesafe_model"):
@@ -1951,7 +2254,7 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
                 await asyncio.get_running_loop().run_in_executor(
                     None, lambda: patch_interactive_card_sdk(card_message_id, new_card)
                 )
-            asyncio.run_coroutine_threadsafe(do_ts_ping(), app_state.main_loop)
+            app_state.schedule_bg_coro(do_ts_ping, label="TypeSafePing")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在发起连通性测试，请查看卡片反馈..."}})
 
     elif action_value.get("action") == "clear_typesafe_key":
@@ -1987,16 +2290,44 @@ def do_p2_card_action_trigger(data: P2CardActionTrigger) -> P2CardActionTriggerR
     if skill_resp is not None:
         return skill_resp
 
-    # Dispatch to plugin manager
-    action_name = action_value.get("action", "")
+    # Admin auth-management actions must run BEFORE plugin broadcast
+    auth_resp = handle_auth_card_action(action_value, chat_id, card_message_id)
+    if auth_resp is not None:
+        return auth_resp
+
+    # Dispatch remaining card actions to loaded plugins (bounded sync probe + async continuation)
+    action_name = str(action_value.get("action") or "").strip()
     if action_name and app_state.main_loop and app_state.main_loop.is_running():
         async def do_dispatch_plugin_card():
             from plugin_manager import plugin_manager
-            await plugin_manager.dispatch_card_action(action_name, action_value, chat_id, card_message_id)
-        asyncio.run_coroutine_threadsafe(do_dispatch_plugin_card(), app_state.main_loop)
+            handled = await plugin_manager.dispatch_card_action(action_name, action_value, chat_id, card_message_id)
+            if not handled:
+                log.warning(f"[CardAction] Unhandled card action '{action_name}' in chat {chat_id}")
+            return bool(handled)
 
-    resp = handle_auth_card_action(action_value, chat_id, card_message_id)
-    if resp is not None:
-        return resp
+        if asyncio._get_running_loop() is None:
+            fut = app_state.schedule_bg_coro(do_dispatch_plugin_card, label=f"PluginCard:{action_name}")
+            if fut is not None:
+                try:
+                    handled = fut.result(timeout=1.2)
+                    if handled:
+                        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "操作已生效"}})
+                    return P2CardActionTriggerResponse({
+                        "toast": {"type": "warning", "content": "该卡片按钮已失效或对应插件未启用，请重新生成卡片"}
+                    })
+                except FuturesTimeoutError:
+                    return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在处理操作，请稍候..."}})
+                except Exception as exc:
+                    log.error(f"[CardAction] Plugin card action '{action_name}' failed: {exc}", exc_info=True)
+                    return P2CardActionTriggerResponse({"toast": {"type": "error", "content": f"插件操作失败：{str(exc)[:80]}"}})
+        else:
+            app_state.schedule_bg_coro(do_dispatch_plugin_card, label=f"PluginCard:{action_name}")
+            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在处理操作..."}})
+
+    if action_name:
+        log.warning(f"[CardAction] Unknown/unhandled card action '{action_name}' (loop_running={bool(app_state.main_loop and app_state.main_loop.is_running())})")
+        return P2CardActionTriggerResponse({
+            "toast": {"type": "warning", "content": "该卡片按钮已失效或暂不受支持，请重新生成卡片"}
+        })
 
     return P2CardActionTriggerResponse()

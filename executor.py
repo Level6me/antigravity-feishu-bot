@@ -1468,6 +1468,8 @@ async def execute_antigravity(
                         if ck_mid:
                             new_id = ck_mid
                             cardkit_ctrl = ck
+                            if isinstance(task_meta, dict):
+                                task_meta["_cardkit_ctrl"] = ck
                 except Exception as ck_err:
                     log.debug(f"[Executor] CardKit init skipped: {ck_err}")
                 if not new_id:
@@ -2476,6 +2478,8 @@ async def execute_antigravity(
                             or session_data.get("last_user_query")
                             or "继续执行未完成的任务"
                         )
+                _l3_ck = task_meta.get("_cardkit_ctrl") if isinstance(task_meta, dict) else locals().get("cardkit_ctrl")
+                _l3_is_v2 = bool((_l3_ck and getattr(_l3_ck, "active", False)) or app_state.is_v2_card_message(bot_reply_msg_id))
                 session_data["paused_l3_state"] = {
                     "user_text": orig_l3_user_text,
                     "completed_steps": list(completed_tool_steps),
@@ -2488,6 +2492,8 @@ async def execute_antigravity(
                     "cwd": typesafe_blocked_info.get("cwd", session_data.get("project", "")),
                     "conv_id": conv_id or session_data.get("conversation", ""),
                     "bot_reply_msg_id": bot_reply_msg_id,
+                    "card_message_id": bot_reply_msg_id,
+                    "card_schema": "2.0" if _l3_is_v2 else "1.0",
                     "timestamp": time.time(),
                 }
                 try:
@@ -2504,7 +2510,15 @@ async def execute_antigravity(
                     project_dir=typesafe_blocked_info.get("cwd", session_data.get("project", "")),
                     call_id=typesafe_blocked_info.get("call_id", "")
                 )
-                await _deliver_card_reliably(confirm_card, "l3-confirm-card")
+                delivered_l3_mid = await _deliver_card_reliably(confirm_card, "l3-confirm-card")
+                if isinstance(delivered_l3_mid, str) and delivered_l3_mid and delivered_l3_mid != bot_reply_msg_id:
+                    session_data["paused_l3_state"]["card_message_id"] = delivered_l3_mid
+                    session_data["paused_l3_state"]["bot_reply_msg_id"] = delivered_l3_mid
+                    session_data["paused_l3_state"]["card_schema"] = "2.0" if app_state.is_v2_card_message(delivered_l3_mid) else "1.0"
+                    try:
+                        await _persist_session(timeout_sec=2.0)
+                    except Exception:
+                        pass
                 return {
                     "has_reply": True,
                     "returncode": 0,
@@ -2584,6 +2598,8 @@ async def execute_antigravity(
 
                 # 第二次重试依然超预算：立即截停并向飞书推送带「▶️ 继续执行剩余步骤」按钮的进度卡片
                 elapsed_s = max(0, int(time.time() - process_start_time))
+                _bp_ck = task_meta.get("_cardkit_ctrl") if isinstance(task_meta, dict) else locals().get("cardkit_ctrl")
+                _bp_is_v2 = bool((_bp_ck and getattr(_bp_ck, "active", False)) or app_state.is_v2_card_message(bot_reply_msg_id))
                 session_data["paused_task_state"] = {
                     "user_text": display_user_text,
                     "scope": scope_info.get("scope", "modify"),
@@ -2596,6 +2612,8 @@ async def execute_antigravity(
                     "elapsed_seconds": elapsed_s,
                     "reason": budget_exceeded_reason,
                     "project_dir": proj_dir,
+                    "card_message_id": bot_reply_msg_id,
+                    "card_schema": "2.0" if _bp_is_v2 else "1.0",
                     "created_at": time.time(),
                 }
                 session_data["last_execution_error"] = False
@@ -2618,7 +2636,14 @@ async def execute_antigravity(
                     current_step_idx=current_plan_idx,
                     min_pct=task_max_progress_pct,
                 )
-                await _deliver_card_reliably(pause_card, "budget-pause-card")
+                delivered_bp_mid = await _deliver_card_reliably(pause_card, "budget-pause-card")
+                if isinstance(delivered_bp_mid, str) and delivered_bp_mid and delivered_bp_mid != bot_reply_msg_id:
+                    session_data["paused_task_state"]["card_message_id"] = delivered_bp_mid
+                    session_data["paused_task_state"]["card_schema"] = "2.0" if app_state.is_v2_card_message(delivered_bp_mid) else "1.0"
+                    try:
+                        await _persist_session(timeout_sec=2.0)
+                    except Exception:
+                        pass
                 return {
                     "has_reply": True,
                     "returncode": 0,
@@ -2847,6 +2872,8 @@ async def execute_antigravity(
                         # 默认模式 (AUTO_FALLBACK_ON_CAPACITY_ERROR=False)：弹出交互式卡片，让用户自主选择切换模型或继续当前模型执行任务
                         elapsed_s = max(0, int(time.time() - process_start_time))
                         proj_dir = session_data.get("project", "默认")
+                        _cap_ck = task_meta.get("_cardkit_ctrl") if isinstance(task_meta, dict) else locals().get("cardkit_ctrl")
+                        _cap_is_v2 = bool((_cap_ck and getattr(_cap_ck, "active", False)) or app_state.is_v2_card_message(bot_reply_msg_id))
                         session_data["paused_capacity_state"] = {
                             "user_text": display_user_text,
                             "failed_model": err_model,
@@ -2858,6 +2885,8 @@ async def execute_antigravity(
                             "elapsed_seconds": elapsed_s,
                             "project_dir": proj_dir,
                             "tainted_conv": tainted_conv,
+                            "card_message_id": bot_reply_msg_id,
+                            "card_schema": "2.0" if _cap_is_v2 else "1.0",
                             "created_at": time.time(),
                         }
                         session_data["last_execution_error"] = False
@@ -2875,7 +2904,14 @@ async def execute_antigravity(
                             current_project=proj_dir,
                             error_detail=stream_error_msg or combined_err_text[:200],
                         )
-                        await _deliver_card_reliably(cap_card, "capacity-choice-card")
+                        delivered_cap_mid = await _deliver_card_reliably(cap_card, "capacity-choice-card")
+                        if isinstance(delivered_cap_mid, str) and delivered_cap_mid and delivered_cap_mid != bot_reply_msg_id:
+                            session_data["paused_capacity_state"]["card_message_id"] = delivered_cap_mid
+                            session_data["paused_capacity_state"]["card_schema"] = "2.0" if app_state.is_v2_card_message(delivered_cap_mid) else "1.0"
+                            try:
+                                await _persist_session(timeout_sec=2.0)
+                            except Exception:
+                                pass
                         return {
                             "has_reply": True,
                             "returncode": 0,

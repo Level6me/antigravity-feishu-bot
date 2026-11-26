@@ -104,14 +104,25 @@ async def _get_tenant_access_token_async() -> str:
 
 
 async def async_patch_interactive_card(message_id: str, card_content: dict, max_retries: int = 3) -> bool:
-    """Non-blocking async Feishu card PATCH over persistent keep-alive pool (zero ThreadPoolExecutor blocking)."""
+    """Non-blocking async Feishu card PATCH over persistent keep-alive pool (zero ThreadPoolExecutor blocking).
+    Automatically adapts V1 cards for tracked Schema 2.0 messages and self-heals on Feishu 200830
+    (schemaV2 card can not change schemaV1) after bot restarts.
+    """
     token = await _get_tenant_access_token_async()
     if not token:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: patch_interactive_card_sdk(message_id, card_content))
 
+    import app_state
+    from cards.common import adapt_card_for_message, convert_card_v1_to_v2
+
+    effective_card = adapt_card_for_message(card_content, message_id=message_id)
+    v2_upgraded = isinstance(effective_card, dict) and effective_card.get("schema") == "2.0"
+    if v2_upgraded:
+        app_state.register_v2_card_message(message_id)
+
     client = _get_async_http_client()
-    body_bytes = _compact_json({"content": _compact_json(card_content)}).encode("utf-8")
+    body_bytes = _compact_json({"content": _compact_json(effective_card)}).encode("utf-8")
     delay = 0.4
     for attempt in range(max_retries + 1):
         try:
@@ -125,6 +136,13 @@ async def async_patch_interactive_card(message_id: str, card_content: dict, max_
             if code == 0:
                 return True
             msg = data.get("msg", "")
+            if not v2_upgraded and _is_schema_v2_downgrade_error(code, msg):
+                log.info(f"[AsyncFeishu] Detected Schema 2.0 target for {message_id} (200830); auto-upgrading payload to V2 and retrying")
+                app_state.register_v2_card_message(message_id)
+                effective_card = convert_card_v1_to_v2(card_content, stream_element_id="", streaming_mode=False)
+                body_bytes = _compact_json({"content": _compact_json(effective_card)}).encode("utf-8")
+                v2_upgraded = True
+                continue
             if code in (99991663, 99991661):  # token expired
                 _TENANT_TOKEN_CACHE["expire_at"] = 0.0
                 token = await _get_tenant_access_token_async()
@@ -228,6 +246,11 @@ class CardKitStreamController:
                     self.bot_reply_msg_id = msg_id
                     self.active = True
                     self.streaming_enabled = False
+                    try:
+                        import app_state
+                        app_state.register_v2_card_message(msg_id, card_id=card_id)
+                    except Exception:
+                        pass
                     return msg_id
         except Exception as e:
             log.debug(f"[CardKit] create_and_send fallback: {e}")
@@ -398,6 +421,17 @@ class CardKitStreamController:
             return False
 
 
+def _is_schema_v2_downgrade_error(code, msg: str) -> bool:
+    """Return True when Feishu rejects patching a Schema 2.0 card with a Schema 1.0 payload (ErrCode 200830)."""
+    msg_str = str(msg or "")
+    msg_lower = msg_str.lower()
+    return (
+        "200830" in msg_str
+        or "schemav2 card can not change schemav1" in msg_lower
+        or "schema v2" in msg_lower and "v1" in msg_lower
+    )
+
+
 def _is_non_retryable_card_error(code, msg: str) -> bool:
     """Return True for deterministic Feishu card payload/schema validation errors."""
     msg_str = str(msg or "")
@@ -545,13 +579,32 @@ def send_interactive_card_sdk(message_id, card_content):
 
 @with_retry(max_retries=4, initial_delay=0.6)
 def patch_interactive_card_sdk(message_id, card_content):
+    import app_state
+    from cards.common import adapt_card_for_message, convert_card_v1_to_v2
+
+    effective_card = adapt_card_for_message(card_content, message_id=message_id)
+    v2_upgraded = isinstance(effective_card, dict) and effective_card.get("schema") == "2.0"
+    if v2_upgraded:
+        app_state.register_v2_card_message(message_id)
+
     req = PatchMessageRequest.builder() \
         .message_id(message_id) \
         .request_body(PatchMessageRequestBody.builder() \
-            .content(_compact_json(card_content)) \
+            .content(_compact_json(effective_card)) \
             .build()) \
         .build()
     resp = api_client.im.v1.message.patch(req)
+    if resp.code != 0 and not v2_upgraded and _is_schema_v2_downgrade_error(resp.code, resp.msg):
+        log.info(f"[patch_interactive_card_sdk] Detected Schema 2.0 target for {message_id} (200830); auto-upgrading payload to V2 and retrying")
+        app_state.register_v2_card_message(message_id)
+        v2_card = convert_card_v1_to_v2(card_content, stream_element_id="", streaming_mode=False)
+        retry_req = PatchMessageRequest.builder() \
+            .message_id(message_id) \
+            .request_body(PatchMessageRequestBody.builder() \
+                .content(_compact_json(v2_card)) \
+                .build()) \
+            .build()
+        resp = api_client.im.v1.message.patch(retry_req)
     if resp.code != 0:
         log.error(f"[patch_interactive_card_sdk] Failed (code {resp.code}): {resp.msg}")
         if _is_non_retryable_card_error(resp.code, resp.msg):

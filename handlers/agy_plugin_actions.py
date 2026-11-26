@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 import os
 from typing import Any, Dict, Optional
 
@@ -105,26 +106,27 @@ def _smart_agy_plugin_read_response(
         )
         try:
             card = fut.result(timeout=1.4)
+            from cards.common import adapt_card_for_message
             return P2CardActionTriggerResponse({
-                "card": {"type": "raw", "data": card},
+                "card": {"type": "raw", "data": adapt_card_for_message(card, message_id=card_message_id)},
                 "toast": {"type": "info", "content": toast_text},
             })
-        except Exception:
+        except FuturesTimeoutError:
             async def _late_patch():
-                try:
-                    c = await asyncio.wrap_future(fut)
-                    if card_message_id and c:
-                        await asyncio.get_running_loop().run_in_executor(
-                            None, lambda: patch_interactive_card_sdk(card_message_id, c)
-                        )
-                except Exception:
-                    pass
-            asyncio.run_coroutine_threadsafe(_late_patch(), app_state.main_loop)
+                c = await asyncio.wrap_future(fut)
+                if card_message_id and c:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: patch_interactive_card_sdk(card_message_id, c)
+                    )
+            app_state.schedule_bg_coro(_late_patch, label="AgyPluginReadLatePatch")
             return P2CardActionTriggerResponse({"toast": {"type": "info", "content": toast_text}})
+        except Exception as exc:
+            log.error(f"[AgyPluginActions] Sync read failed: {exc}", exc_info=True)
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": f"加载失败：{str(exc)[:80]}"}})
 
-    asyncio.run_coroutine_threadsafe(
-        _render_and_patch_agy_plugin_card(chat_id, card_message_id, do_patch=True, **render_kwargs),
-        app_state.main_loop,
+    app_state.schedule_bg_coro(
+        lambda: _render_and_patch_agy_plugin_card(chat_id, card_message_id, do_patch=True, **render_kwargs),
+        label="AgyPluginReadLoopPatch",
     )
     return P2CardActionTriggerResponse({"toast": {"type": "info", "content": toast_text}})
 
@@ -232,7 +234,7 @@ def _dispatch_agy_plugin_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_toggle(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_toggle, label=f"AgyPluginToggle:{name}")
         verb = "启用" if enable else "禁用"
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在{verb} {name}..."}})
 
@@ -256,7 +258,7 @@ def _dispatch_agy_plugin_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_uninstall(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_uninstall, label=f"AgyPluginUninstall:{name}")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在卸载 {name}..."}})
 
     if action == "agy_plugin_validate":
@@ -277,7 +279,7 @@ def _dispatch_agy_plugin_action(
                 notice_level="success" if ok else "warning",
             )
 
-        asyncio.run_coroutine_threadsafe(_do_validate(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_validate, label="AgyPluginValidate")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在校验插件结构..."}})
 
     if action == "agy_plugin_import":
@@ -296,7 +298,7 @@ def _dispatch_agy_plugin_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_import(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_import, label=f"AgyPluginImport:{source}")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在从 {source} 导入插件..."}})
 
     if action == "agy_plugin_form_submit":
@@ -334,7 +336,7 @@ def _dispatch_agy_plugin_action(
                 needs_session_reload=needs_reload,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_form(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_form, label=f"AgyPluginForm:{op}")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在执行插件操作 ({op})..."}})
 
     if action == "agy_plugin_reload_session":
@@ -371,7 +373,7 @@ def _dispatch_agy_plugin_action(
                 needs_session_reload=False,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_reload(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_reload, label="AgyPluginReloadSession")
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在重建会话以加载新插件..."}})
 
     return P2CardActionTriggerResponse()

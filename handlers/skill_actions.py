@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 import os
 from typing import Any, Dict, List, Optional
 
@@ -113,26 +114,27 @@ def _smart_skill_read_response(
         )
         try:
             card = fut.result(timeout=1.4)
+            from cards.common import adapt_card_for_message
             return P2CardActionTriggerResponse({
-                "card": {"type": "raw", "data": card},
+                "card": {"type": "raw", "data": adapt_card_for_message(card, message_id=card_message_id)},
                 "toast": {"type": toast_type, "content": toast_text},
             })
-        except Exception:
+        except FuturesTimeoutError:
             async def _late_patch():
-                try:
-                    c = await asyncio.wrap_future(fut)
-                    if card_message_id and c:
-                        await asyncio.get_running_loop().run_in_executor(
-                            None, lambda: patch_interactive_card_sdk(card_message_id, c)
-                        )
-                except Exception:
-                    pass
-            asyncio.run_coroutine_threadsafe(_late_patch(), app_state.main_loop)
+                c = await asyncio.wrap_future(fut)
+                if card_message_id and c:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: patch_interactive_card_sdk(card_message_id, c)
+                    )
+            app_state.schedule_bg_coro(_late_patch, label="SkillReadLatePatch")
             return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_text}})
+        except Exception as exc:
+            log.error(f"[SkillActions] Sync read failed: {exc}", exc_info=True)
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": f"加载失败：{str(exc)[:80]}"}})
 
-    asyncio.run_coroutine_threadsafe(
-        _render_and_patch_skill_card(chat_id, card_message_id, do_patch=True, **render_kwargs),
-        app_state.main_loop,
+    app_state.schedule_bg_coro(
+        lambda: _render_and_patch_skill_card(chat_id, card_message_id, do_patch=True, **render_kwargs),
+        label="SkillReadLoopPatch",
     )
     return P2CardActionTriggerResponse({"toast": {"type": toast_type, "content": toast_text}})
 
@@ -278,7 +280,7 @@ def _dispatch_skill_action(
                 notice_level="success",
             )
 
-        asyncio.run_coroutine_threadsafe(_do_pin(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_pin, label=f"SkillPin:{name}")
         toast_txt = f"📌 已挂载技能 {name}" if pin else f"已取消挂载 {name}"
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": toast_txt}})
 
@@ -302,7 +304,7 @@ def _dispatch_skill_action(
                 notice_level="info",
             )
 
-        asyncio.run_coroutine_threadsafe(_do_clear_pins(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_clear_pins, label="SkillClearPins")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已清空挂载技能"}})
 
     if action == "skill_toggle":
@@ -327,7 +329,7 @@ def _dispatch_skill_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_toggle(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_toggle, label=f"SkillToggle:{name}")
         verb = "启用" if enable else "禁用"
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在{verb}技能 {name}..."}})
 
@@ -355,7 +357,7 @@ def _dispatch_skill_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_remove(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_remove, label=f"SkillRemove:{name}")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在移除技能 {name}..."}})
 
     if action == "skill_install_submit":
@@ -378,7 +380,7 @@ def _dispatch_skill_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_install(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_install, label="SkillInstall")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "正在安装技能，请稍候..."}})
 
     if action == "skill_create_submit":
@@ -404,7 +406,7 @@ def _dispatch_skill_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_create(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_create, label=f"SkillCreate:{name}")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在生成技能 {name}..."}})
 
     if action == "skill_reload_session":
@@ -444,7 +446,7 @@ def _dispatch_skill_action(
                 needs_session_reload=False,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_reload(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_reload, label="SkillReloadSession")
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在重建会话以刷新技能库..."}})
 
     return P2CardActionTriggerResponse()

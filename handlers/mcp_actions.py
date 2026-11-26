@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 import os
 import shlex
 from typing import Any, Dict, Optional
@@ -99,7 +100,7 @@ def _smart_mcp_read_response(
     **render_kwargs,
 ) -> P2CardActionTriggerResponse:
     """Return synchronous in-place card update from WS callback thread (<30ms, 0 HTTP PATCH),
-    while seamlessly falling back to async PATCH if called inside main_loop or on slow CLI cold start."""
+    while seamlessly falling back to async PATCH on timeout or in-loop calls."""
     if asyncio._get_running_loop() is None and app_state.main_loop and app_state.main_loop.is_running():
         fut = asyncio.run_coroutine_threadsafe(
             _render_and_patch_mcp_card(chat_id, card_message_id, do_patch=False, **render_kwargs),
@@ -107,26 +108,27 @@ def _smart_mcp_read_response(
         )
         try:
             card = fut.result(timeout=1.4)
+            from cards.common import adapt_card_for_message
             return P2CardActionTriggerResponse({
-                "card": {"type": "raw", "data": card},
+                "card": {"type": "raw", "data": adapt_card_for_message(card, message_id=card_message_id)},
                 "toast": {"type": "info", "content": toast_text},
             })
-        except Exception:
+        except FuturesTimeoutError:
             async def _late_patch():
-                try:
-                    c = await asyncio.wrap_future(fut)
-                    if card_message_id and c:
-                        await asyncio.get_running_loop().run_in_executor(
-                            None, lambda: patch_interactive_card_sdk(card_message_id, c)
-                        )
-                except Exception:
-                    pass
-            asyncio.run_coroutine_threadsafe(_late_patch(), app_state.main_loop)
+                c = await asyncio.wrap_future(fut)
+                if card_message_id and c:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: patch_interactive_card_sdk(card_message_id, c)
+                    )
+            app_state.schedule_bg_coro(_late_patch, label="MCPReadLatePatch")
             return P2CardActionTriggerResponse({"toast": {"type": "info", "content": toast_text}})
+        except Exception as exc:
+            log.error(f"[MCPActions] Sync read failed: {exc}", exc_info=True)
+            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": f"加载失败：{str(exc)[:80]}"}})
 
-    asyncio.run_coroutine_threadsafe(
-        _render_and_patch_mcp_card(chat_id, card_message_id, do_patch=True, **render_kwargs),
-        app_state.main_loop,
+    app_state.schedule_bg_coro(
+        lambda: _render_and_patch_mcp_card(chat_id, card_message_id, do_patch=True, **render_kwargs),
+        label="MCPReadLoopPatch",
     )
     return P2CardActionTriggerResponse({"toast": {"type": "info", "content": toast_text}})
 
@@ -233,7 +235,7 @@ def _dispatch_mcp_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_toggle(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_toggle, label=f"MCPToggle:{name}")
         verb = "启用" if enable else "禁用"
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在{verb} {name}..."}})
 
@@ -255,7 +257,7 @@ def _dispatch_mcp_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_remove(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_remove, label=f"MCPRemove:{name}")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在移除 {name}..."}})
 
     if action == "mcp_quick_add":
@@ -275,7 +277,7 @@ def _dispatch_mcp_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_quick_add(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_quick_add, label=f"MCPQuickAdd:{tpl_id}")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在安装模板 {tpl_id}..."}})
 
     if action == "mcp_add_submit":
@@ -324,7 +326,7 @@ def _dispatch_mcp_action(
                 needs_session_reload=ok,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_add_submit(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_add_submit, label=f"MCPAdd:{name}")
         return P2CardActionTriggerResponse({"toast": {"type": "info", "content": f"正在添加 MCP 服务 {name}..."}})
 
     if action == "mcp_reload_session":
@@ -361,7 +363,7 @@ def _dispatch_mcp_action(
                 needs_session_reload=False,
             )
 
-        asyncio.run_coroutine_threadsafe(_do_reload(), app_state.main_loop)
+        app_state.schedule_bg_coro(_do_reload, label="MCPReloadSession")
         return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "正在重建会话以加载新 MCP..."}})
 
     return P2CardActionTriggerResponse()
