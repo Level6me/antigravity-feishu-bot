@@ -526,8 +526,13 @@ class SessionPool:
             sess and sorted(getattr(sess, "extra_dirs", []) or []) != normalized_extra_dirs
         )
 
-        # Live ACP sessions support in-place model/effort/mode hot-switching without process restart!
-        is_live_acp = bool(sess and not sess_dead and sess_transport == "acp" and sess.is_alive())
+        # Live ACP sessions (including sessions currently in their start handshake) support in-place model/effort/mode hot-switching!
+        is_live_acp = bool(
+            sess
+            and not sess_dead
+            and sess_transport == "acp"
+            and (sess.is_alive() or sess._start_lock.locked())
+        )
         if is_live_acp:
             model_mismatch = bool(sess.sandbox_enabled != sandbox_enabled)
             mode_mismatch = False

@@ -488,6 +488,8 @@ class AcpPersistentSession:
         self._permission_notifier = permission_notifier
         self._async_update_callback = async_update_callback
         self._in_turn = False
+        self._initializing = False
+        self._session_ready = False
 
     def get_recent_stderr(self) -> str:
         return self._recent_stderr_buf
@@ -495,8 +497,12 @@ class AcpPersistentSession:
     def clear_recent_stderr(self):
         self._recent_stderr_buf = ""
 
-    def is_alive(self) -> bool:
+    def _process_alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
+
+    def is_alive(self) -> bool:
+        """True only when subprocess is alive AND ACP initialize/session-open handshake is not still in flight."""
+        return self._process_alive() and not self._initializing
 
     def is_dead_or_closing(self) -> bool:
         return self._closing or (self.process is not None and self.process.returncode is not None)
@@ -569,22 +575,27 @@ class AcpPersistentSession:
                     pass
             return
 
-        self.process = proc
-        self.spawn_time = time.time()
-        self.last_active_time = time.time()
-        if hasattr(app_state, "register_subprocess"):
-            app_state.register_subprocess(self.chat_id, self.process)
-        else:
-            app_state.running_processes[self.chat_id] = self.process
-
-        self._stderr_drain_task = asyncio.create_task(self._drain_stderr())
-        self._stdout_reader_task = asyncio.create_task(self._read_stdout_loop())
-
+        self._initializing = True
+        self._session_ready = False
         try:
+            self.process = proc
+            self.spawn_time = time.time()
+            self.last_active_time = time.time()
+            if hasattr(app_state, "register_subprocess"):
+                app_state.register_subprocess(self.chat_id, self.process)
+            else:
+                app_state.running_processes[self.chat_id] = self.process
+
+            self._stderr_drain_task = asyncio.create_task(self._drain_stderr())
+            self._stdout_reader_task = asyncio.create_task(self._read_stdout_loop())
+
             await self._initialize_and_open_session(cwd_dir or os.getcwd())
+            self._session_ready = True
         except Exception:
             await self._terminate_process_only()
             raise
+        finally:
+            self._initializing = False
 
     async def _initialize_and_open_session(self, cwd_dir: str):
         init_res = await self._rpc_call(
@@ -636,7 +647,7 @@ class AcpPersistentSession:
             await self.set_mode(self.agent_mode)
 
     async def _send_json(self, payload: Dict[str, Any]):
-        if not self.is_alive() or not self.process or not self.process.stdin:
+        if not self._process_alive() or not self.process or not self.process.stdin:
             raise RuntimeError("ACP process is not running")
         raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
         async with self._write_lock:
@@ -661,7 +672,7 @@ class AcpPersistentSession:
         """Dynamically switch model (and thinking effort) without restarting the ACP process.
         Includes singleflight lock + applied-state deduplication so concurrent prewarm & executor calls never send duplicate RPCs.
         """
-        if not self.is_alive() or not self.conversation_id or not model_id:
+        if not self._process_alive() or not self.conversation_id or not model_id:
             self.model = model_id
             if effort:
                 self.effort = effort
@@ -719,7 +730,7 @@ class AcpPersistentSession:
         """Dynamically switch execution mode (`default` | `accept-edits` | `plan`) in-place."""
         acp_mode = normalize_acp_mode(mode)
         self.agent_mode = acp_mode
-        if not self.is_alive() or not self.conversation_id:
+        if not self._process_alive() or not self.conversation_id:
             return False
         try:
             await self._rpc_call(
@@ -758,7 +769,7 @@ class AcpPersistentSession:
 
     async def cancel_active_turn(self):
         """Send ACP `session/cancel` notification to gracefully interrupt the current turn."""
-        if not self.is_alive() or not self.conversation_id:
+        if not self._process_alive() or not self.conversation_id:
             return
         try:
             await self._send_json({
@@ -1150,6 +1161,7 @@ class AcpPersistentSession:
 
         proc = self.process
         self.process = None
+        self._session_ready = False
         if proc:
             try:
                 descendant_pids = [p for p in snapshot_process_group_pids(proc.pid) if p != proc.pid]
@@ -1191,7 +1203,7 @@ class AcpPersistentSession:
         self._in_turn = False
         self._queued_steer_rpc_ids.clear()
         async with self._start_lock:
-            if self.is_alive() and self.conversation_id:
+            if self._process_alive() and self._session_ready and self.conversation_id:
                 try:
                     await self._rpc_call("session/close", {"sessionId": self.conversation_id}, timeout=2.0)
                 except Exception:

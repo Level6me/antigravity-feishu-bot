@@ -881,6 +881,22 @@ def detect_plan_only_or_empty_turn(raw_reply: str = "", cleaned_reply: str = "")
         return "plan_only"
     return "chatter_only"
 
+
+_RE_SYS_TASK_PLAN_RULE = re.compile(r"^\[TASK_PLAN Rule:[^\n]*\]\s*\n?", re.MULTILINE)
+_RE_SYS_TASK_PLAN_BLOCK = re.compile(
+    r"\[System Mandatory Task Planning Directive[^\n]*\][\s\S]*?(?=\n\[System |\n\[User |\Z)",
+    re.MULTILINE,
+)
+
+
+def strip_task_plan_directives_from_system_prompt(system_instruction: str = "") -> str:
+    """Strip mandatory [TASK_PLAN] directives on continuation/nudge retries to avoid contradicting the nudge."""
+    if not system_instruction:
+        return system_instruction
+    cleaned = _RE_SYS_TASK_PLAN_RULE.sub("", system_instruction)
+    cleaned = _RE_SYS_TASK_PLAN_BLOCK.sub("", cleaned)
+    return cleaned
+
 _GEMINI_SAFETY_BLOCK_RE = re.compile(
     r"(?:This request was blocked by Gemini's filters|blocked by Gemini's filters|blocked by content safety filters|triggered by mistake on safe coding,\s*security)",
     re.IGNORECASE,
@@ -1194,9 +1210,14 @@ async def execute_antigravity(
     task_plan_idx = int(resumed_task_ctx.get("current_plan_idx") or 0)
     task_completed_tool_steps = list(resumed_task_ctx.get("completed_steps") or [])
     task_explicit_plan_locked = bool(task_planned_steps)
+    HARD_MAX_ATTEMPTS = 3
+    infra_retry_used = 0
+    budget_retry_used = 0
+    empty_nudge_used = 0
+    safety_retry_used = 0
 
     async def _run_single_attempt(attempt):
-        nonlocal bot_reply_msg_id, target_transcript_path, task_start_time, task_max_progress_pct, task_planned_steps, task_plan_idx, task_completed_tool_steps, task_explicit_plan_locked
+        nonlocal bot_reply_msg_id, target_transcript_path, task_start_time, task_max_progress_pct, task_planned_steps, task_plan_idx, task_completed_tool_steps, task_explicit_plan_locked, infra_retry_used, budget_retry_used, empty_nudge_used, safety_retry_used
         logs_dir = os.path.abspath(os.path.join(BASE_DIR, "logs"))
         os.makedirs(logs_dir, exist_ok=True)
         log_file_path = os.path.join(logs_dir, f"agy_log_{uuid.uuid4().hex}.txt")
@@ -1609,10 +1630,18 @@ async def execute_antigravity(
                 or re.search(r"(?:固件去限制|去限制|解除限制|解除非\s*STM32\s*限制)", final_prompt, re.IGNORECASE)
                 else final_prompt
             )
+            eff_system_instruction = (
+                strip_task_plan_directives_from_system_prompt(system_instruction)
+                if budget_retry_ctx and (
+                    "Empty-Turn Continuation Nudge" in budget_retry_ctx
+                    or "Budget Watchdog Auto-Retry" in budget_retry_ctx
+                )
+                else system_instruction
+            )
             prompt_to_send = (
-                f"{system_instruction}{budget_retry_ctx}\n\n{prompt_for_attempt}"
+                f"{eff_system_instruction}{budget_retry_ctx}\n\n{prompt_for_attempt}"
                 if budget_retry_ctx
-                else (system_instruction + prompt_for_attempt)
+                else (eff_system_instruction + prompt_for_attempt)
             )
             turn_stream = await sess.send_prompt_and_stream(prompt_to_send)
 
@@ -2562,8 +2591,9 @@ async def execute_antigravity(
                 except Exception as mem_e:
                     log.warning(f"[BudgetWatchdog] Failed to save partial progress to capsule: {mem_e}")
 
-                if attempt < 2:
-                    # 首次超预算/停滞：立即截停并携项目记忆胶囊自动重试一遍 (Attempt 2)
+                if budget_retry_used < 1 and attempt < HARD_MAX_ATTEMPTS:
+                    budget_retry_used += 1
+                    # 首次超预算/停滞：立即截停并携项目记忆胶囊自动重试一遍
                     capsule_snippet = ""
                     try:
                         from agent_memory import read_project_capsule
@@ -2713,8 +2743,9 @@ async def execute_antigravity(
                 except Exception:
                     pass
 
-                # 2. 若为 Attempt 1，自动携脱敏后的项目记忆胶囊在全新干净会话中发起 Attempt 2 重试！
-                if attempt < 2:
+                # 2. 若尚未执行安全过滤器自愈重试，自动携脱敏后的项目记忆胶囊在全新干净会话中发起接力重试！
+                if safety_retry_used < 1 and attempt < HARD_MAX_ATTEMPTS:
+                    safety_retry_used += 1
                     capsule_snippet = ""
                     try:
                         from agent_memory import read_project_capsule
@@ -2938,7 +2969,8 @@ async def execute_antigravity(
             # 立即关闭可能持有过期凭证的温池进程，暂不向飞书推送报错卡片，直接返回 has_reply=False 触发 Attempt 2 自动重建重试！
             is_print_timeout = "print timeout" in combined_err_text.lower()
             has_abnormal_termination = (process.returncode != 0 and process.returncode is not None) or bool(stream_error_msg)
-            if not is_quota_exhausted and not is_capacity_error and not final_reply and not is_print_timeout and has_abnormal_termination and attempt < 2:
+            if not is_quota_exhausted and not is_capacity_error and not final_reply and not is_print_timeout and has_abnormal_termination and infra_retry_used < 1 and attempt < HARD_MAX_ATTEMPTS:
+                infra_retry_used += 1
                 log.warning(
                     f"[Executor] Attempt {attempt} failed without final response "
                     f"(returncode={process.returncode}, stream_error={stream_error_msg[:120]!r}). "
@@ -2948,7 +2980,7 @@ async def execute_antigravity(
                     await sess.close()
                 except Exception:
                     pass
-                return {"has_reply": False, "returncode": process.returncode or -1, "is_error": True, "is_quota_error": False, "is_capacity_error": False}
+                return {"has_reply": False, "returncode": process.returncode or -1, "is_error": True, "is_quota_error": False, "is_capacity_error": False, "infra_auto_retry": True}
             
             reply_text = final_reply or accumulated_text.strip() or ""
             raw_reply_before_clean = reply_text
@@ -2969,11 +3001,13 @@ async def execute_antigravity(
                 and not is_capacity_error
                 and not typesafe_blocked_info
                 and not is_print_timeout
-                and attempt < 2
+                and empty_nudge_used < 1
+                and attempt < HARD_MAX_ATTEMPTS
                 and not is_quota_error(combined_err_text)
                 and not is_model_capacity_error(combined_err_text)
                 and not detect_and_format_agent_system_error(combined_err_text, model_name=session_data.get("model", ""))
             ):
+                empty_nudge_used += 1
                 log.warning(
                     f"[Executor] Attempt {attempt} ended cleanly with empty reply "
                     f"(kind={empty_turn_kind}, raw_len={len(raw_reply_before_clean)}, tools={len(completed_tool_steps)}) "
@@ -3496,22 +3530,29 @@ async def execute_antigravity(
                     except Exception:
                         pass
 
-    MAX_ATTEMPTS = 2
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    for attempt in range(1, HARD_MAX_ATTEMPTS + 1):
         res = await _run_single_attempt(attempt)
-        if res.get("capacity_auto_fallback") and attempt < MAX_ATTEMPTS:
-            log.info(f"[Executor] Executing capacity auto-fallback retry attempt {attempt + 1}/{MAX_ATTEMPTS} for chat {chat_id}...")
+        if res.get("capacity_auto_fallback") and attempt < HARD_MAX_ATTEMPTS:
+            log.info(f"[Executor] Executing capacity auto-fallback retry attempt {attempt + 1}/{HARD_MAX_ATTEMPTS} for chat {chat_id}...")
             await asyncio.sleep(0.2)
             continue
-        if res.get("empty_reply_auto_retry") and attempt < MAX_ATTEMPTS:
+        if res.get("empty_reply_auto_retry") and attempt < HARD_MAX_ATTEMPTS:
             log.info(
-                f"[Executor] Executing automatic continuation nudge (attempt {attempt + 1}/{MAX_ATTEMPTS}) "
+                f"[Executor] Executing automatic continuation nudge (attempt {attempt + 1}/{HARD_MAX_ATTEMPTS}) "
                 f"after {res.get('empty_turn_kind') or 'empty'} turn for chat {chat_id}..."
             )
             await asyncio.sleep(0.2)
             continue
-        if res.get("is_quota_error") or res.get("is_capacity_error") or res["has_reply"] or res["returncode"] == 0 or attempt == MAX_ATTEMPTS:
+        if (res.get("budget_exceeded") or res.get("safety_filter_retry")) and not res.get("has_reply") and attempt < HARD_MAX_ATTEMPTS:
+            log.warning(f"[Executor] Attempt {attempt}/{HARD_MAX_ATTEMPTS} intercepted for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")
+            await asyncio.sleep(0.2)
+            continue
+        if res.get("infra_auto_retry") and attempt < HARD_MAX_ATTEMPTS:
+            log.warning(f"[Executor] Attempt {attempt}/{HARD_MAX_ATTEMPTS} failed/stalled without final response for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")
+            await asyncio.sleep(1.0)
+            continue
+        if res.get("is_quota_error") or res.get("is_capacity_error") or res["has_reply"] or res["returncode"] == 0 or attempt == HARD_MAX_ATTEMPTS:
             return res["is_error"]
-        log.warning(f"[Executor] Attempt {attempt}/{MAX_ATTEMPTS} failed/stalled without final response for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")
+        log.warning(f"[Executor] Attempt {attempt}/{HARD_MAX_ATTEMPTS} failed/stalled without final response for chat {chat_id}. Automatically retrying attempt {attempt + 1}...")
         await asyncio.sleep(1.0)
     return True

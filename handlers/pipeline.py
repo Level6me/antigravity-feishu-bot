@@ -873,6 +873,11 @@ async def _process_single_task(chat_id, task):
 
         send_script_path = os.path.join(config.BASE_DIR, "send_to_feishu.py")
         python_bin = sys.executable or "python3"
+        is_internal_resume_turn = bool(
+            is_resumed
+            or task.get("trusted_internal_resume")
+            or (user_text or "").lstrip().startswith(("[AUTO_RESUME_AFTER_L3_APPROVAL]", "[CONTINUE_PAUSED_TASK]"))
+        )
 
         if already_injected_static:
             # 同会话后续轮次：采用超精简契约头 (<280B)，消除重复头部引发的上下文滚雪球膨胀与压缩触发
@@ -884,7 +889,7 @@ async def _process_single_task(chat_id, task):
                 system_instruction += f"[{boundary_dir}]\n"
             if task.get("message_type") == "audio" or task.get("is_voice_message"):
                 system_instruction += "[Voice Interaction: 请用自然亲切的口语化中文精炼回复，避免长代码块。]\n"
-            if is_complex_agent:
+            if is_complex_agent and not is_internal_resume_turn:
                 system_instruction += (
                     "[TASK_PLAN Rule: 若需调用工具，首行先输出 `[TASK_PLAN] 步骤1 | 步骤2 | ... [/TASK_PLAN]`（按任务复杂度自适应规划 3~8 步，复杂任务可细化至 6~8 步）并立即执行；纯文本问答严禁输出此标签。]\n"
                 )
@@ -954,13 +959,14 @@ async def _process_single_task(chat_id, task):
                 system_instruction += f"[Active Project Specific Rules & Description]\n{proj_prompt_text}\n\n"
 
             if is_complex_agent:
-                # 复杂工程任务与操作指令模式
-                system_instruction += (
-                    "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
-                    "【必须执行】：只要你判断当前任务需要调用工具执行操作（读写代码、运行终端命令、多步排错、生成导出文件等），必须在回复的最开始输出一行结构化规划标签：\n"
-                    "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | ... [/TASK_PLAN]\n"
-                    "规则要求：根据任务真实复杂度动态规划 3~8 个清晰阶段（简单探查 3~4 步，常规工程 4~6 步，跨模块/含测试部署的复杂工程 5~8 步），输出标签后立即调用首个工具开始执行，不要输出任何多余过渡句；纯文本问答严禁输出此标签。\n\n"
-                )
+                # 复杂工程任务与操作指令模式（内部断点续跑/L3 审批续跑豁免 [TASK_PLAN] 强制要求，避免模型仅吐规划行而漏发工具调用）
+                if not is_internal_resume_turn:
+                    system_instruction += (
+                        "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
+                        "【必须执行】：只要你判断当前任务需要调用工具执行操作（读写代码、运行终端命令、多步排错、生成导出文件等），必须在回复的最开始输出一行结构化规划标签：\n"
+                        "[TASK_PLAN] 步骤1名称 | 步骤2名称 | 步骤3名称 | ... [/TASK_PLAN]\n"
+                        "规则要求：根据任务真实复杂度动态规划 3~8 个清晰阶段（简单探查 3~4 步，常规工程 4~6 步，跨模块/含测试部署的复杂工程 5~8 步），输出标签后立即调用首个工具开始执行，不要输出任何多余过渡句；纯文本问答严禁输出此标签。\n\n"
+                    )
                 system_instruction += (
                     "[System Autonomous Execution Directive / 自主执行决策规范]\n"
                     "用户核心准则：【严格区分提问、探查与修改命令】。\n"

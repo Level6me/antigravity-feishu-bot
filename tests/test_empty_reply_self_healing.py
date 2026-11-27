@@ -14,6 +14,7 @@ from executor import (
     count_standalone_task_plan_directives,
     detect_plan_only_or_empty_turn,
     execute_antigravity,
+    strip_task_plan_directives_from_system_prompt,
 )
 
 
@@ -284,6 +285,134 @@ class TestEmptyReplySelfHealing(unittest.IsolatedAsyncioTestCase):
         self.assertIn("空回复自动续推", fake_sess.sent_prompts[1])
         self.assertEqual(len(cards), 1)
         self.assertIn("已完成排查", cards[0][0])
+
+    async def test_session_not_found_on_attempt_1_preserves_plan_only_nudge_on_attempt_2(self):
+        """Regression: infra error on attempt 1 must not consume the plan_only auto-nudge budget."""
+        attempt_1_events = [
+            {
+                "event": "result",
+                "result": {
+                    "status": "ERROR",
+                    "error": "Session not found: 734fcc37-5395-4d6e-aaa4-bc11addb415e",
+                },
+            },
+        ]
+        attempt_2_events = [
+            {
+                "event": "step_update",
+                "step_update": {
+                    "step_type": "agent_response",
+                    "text_delta": "[TASK_PLAN] 校验容器 | 核验反代 [/TASK_PLAN]",
+                },
+            },
+            {
+                "event": "result",
+                "result": {
+                    "status": "SUCCESS",
+                    "response": "[TASK_PLAN] 校验容器 | 核验反代 [/TASK_PLAN]",
+                },
+            },
+        ]
+        attempt_3_events = [
+            {
+                "event": "step_update",
+                "step_update": {
+                    "step_type": "agent_response",
+                    "text_delta": "已完成容器与反代核验，一切正常。",
+                },
+            },
+            {
+                "event": "result",
+                "result": {
+                    "status": "SUCCESS",
+                    "response": "已完成容器与反代核验，一切正常。",
+                },
+            },
+        ]
+        is_err, cards, fake_sess = await self._run_executor([attempt_1_events, attempt_2_events, attempt_3_events])
+        self.assertFalse(is_err)
+        self.assertEqual(len(fake_sess.sent_prompts), 3)
+        self.assertIn("纯规划空回自动续推", fake_sess.sent_prompts[2])
+        self.assertEqual(len(cards), 1)
+        self.assertFalse(cards[0][1].get("is_error"))
+        self.assertIn("已完成容器与反代核验", cards[0][0])
+
+    def test_strip_task_plan_directives_on_retry_prompts(self):
+        sys_slim = (
+            "[S1 scope=modify]\n"
+            "[TASK_PLAN Rule: 若需调用工具，首行先输出 `[TASK_PLAN]`]\n"
+            "[User Notes]\n"
+        )
+        cleaned_slim = strip_task_plan_directives_from_system_prompt(sys_slim)
+        self.assertNotIn("[TASK_PLAN Rule:", cleaned_slim)
+        self.assertIn("[S1 scope=modify]", cleaned_slim)
+        self.assertIn("[User Notes]", cleaned_slim)
+
+        sys_full = (
+            "[System Rule: ...]\n\n"
+            "[System Mandatory Task Planning Directive / 任务规划强制规范]\n"
+            "【必须执行】：[TASK_PLAN] 步骤1 [/TASK_PLAN]\n\n"
+            "[System Autonomous Execution Directive / 自主执行决策规范]\n"
+            "必须执行\n"
+        )
+        cleaned_full = strip_task_plan_directives_from_system_prompt(sys_full)
+        self.assertNotIn("System Mandatory Task Planning Directive", cleaned_full)
+        self.assertIn("System Autonomous Execution Directive", cleaned_full)
+
+    async def test_acp_is_alive_waits_for_initialize_handshake(self):
+        """Regression: concurrent caller must not treat an initializing ACP subprocess as ready."""
+        from acp_client import AcpPersistentSession
+
+        sess = AcpPersistentSession(chat_id="oc_race_test", model="gemini-4-neon-high")
+        handshake_gate = asyncio.Event()
+        handshake_started = asyncio.Event()
+
+        async def fake_init(cwd_dir):
+            handshake_started.set()
+            await handshake_gate.wait()
+            sess.conversation_id = "conv-ready-1"
+
+        fake_proc = MagicMock(pid=54321, returncode=None)
+        fake_proc.stdin = MagicMock()
+        fake_proc.stdout = MagicMock()
+        fake_proc.stderr = MagicMock()
+
+        async def noop_coro():
+            await asyncio.sleep(60)
+
+        with (
+            patch("acp_client.ANTIGRAVITY_BIN", "/usr/bin/agy"),
+            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)),
+            patch.object(sess, "_initialize_and_open_session", side_effect=fake_init),
+            patch.object(sess, "_drain_stderr", side_effect=noop_coro),
+            patch.object(sess, "_read_stdout_loop", side_effect=noop_coro),
+        ):
+            prewarm_task = asyncio.create_task(sess.start())
+            await handshake_started.wait()
+
+            # Subprocess is spawned, but initialize/session/resume is still in flight
+            self.assertTrue(sess._process_alive())
+            self.assertFalse(sess.is_alive())
+
+            # Concurrent executor call to start() must block until handshake completes
+            exec_started = False
+
+            async def executor_waiter():
+                nonlocal exec_started
+                if not sess.is_alive():
+                    await sess.start()
+                exec_started = sess.is_alive()
+
+            waiter_task = asyncio.create_task(executor_waiter())
+            await asyncio.sleep(0.02)
+            self.assertFalse(waiter_task.done())
+
+            handshake_gate.set()
+            await asyncio.gather(prewarm_task, waiter_task)
+            self.assertTrue(exec_started)
+            self.assertTrue(sess.is_alive())
+            self.assertEqual(sess.conversation_id, "conv-ready-1")
+            await sess._terminate_process_only()
 
 
 if __name__ == "__main__":
